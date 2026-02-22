@@ -2,11 +2,13 @@ import os
 import sys
 import httpx
 import logging
+from typing import Annotated
+from agent import Skill, tool
 from google import genai
 from google.genai import types
 
 
-class MemorySkill:
+class MemorySkill(Skill):
     def __init__(self, api_key: str, memory_dir: str = None, consolidation_model_name: str = "gemini-3-flash-preview"):
         if memory_dir is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
@@ -21,23 +23,7 @@ class MemorySkill:
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
         self._consolidated = 0
-
-        self.tools = [
-            types.FunctionDeclaration(
-                name="read_history",
-                description="Поиск по архиву прошлых диалогов (HISTORY.md). Используй, если пользователь спрашивает о чём-то из прошлого.",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "query": types.Schema(
-                            type=types.Type.STRING,
-                            description="Слово или фраза для поиска."
-                        )
-                    },
-                    required=["query"]
-                )
-            )
-        ]
+        super().__init__()
 
     def get_context_prompt(self) -> str:
         memory = open(self.memory_file, encoding="utf-8").read() if os.path.exists(self.memory_file) else ""
@@ -47,14 +33,12 @@ class MemorySkill:
             "Используй инструмент read_history, чтобы искать в архиве прошлых диалогов."
         )
 
-    async def dispatch_tool_call(self, tool_call) -> dict:
-        if tool_call.name == "read_history":
-            query = tool_call.args.get("query", "").lower()
-            if not os.path.exists(self.history_file):
-                return {"result": "История пока пуста."}
-            matches = [line.strip() for line in open(self.history_file, encoding="utf-8") if query in line.lower()]
-            return {"result": "\n".join(matches[-10:]) if matches else f"Ничего не найдено по запросу: {query}"}
-        return {"error": f"Unknown tool: {tool_call.name}"}
+    @tool("Поиск по архиву прошлых диалогов (HISTORY.md). Используй, если пользователь спрашивает о чём-то из прошлого.")
+    def read_history(self, query: Annotated[str, "Слово или фраза для поиска."]):
+        if not os.path.exists(self.history_file):
+            return {"result": "История пока пуста."}
+        matches = [line.strip() for line in open(self.history_file, encoding="utf-8") if query.lower() in line.lower()]
+        return {"result": "\n".join(matches[-10:]) if matches else f"Ничего не найдено по запросу: {query}"}
 
     async def on_message_processed(self, messages: list):
         keep_count = 0

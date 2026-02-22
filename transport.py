@@ -1,7 +1,9 @@
 import io, os, asyncio, logging, json, mimetypes
+from typing import Annotated
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions
 from aiogram.client.session.aiohttp import AiohttpSession
+from agent import Skill, tool
 from google.genai import types
 
 
@@ -12,78 +14,19 @@ TELEGRAM_INSTRUCTIONS = (
     "Не используй ** для жирного."
 )
 
-class TelegramSkill:
+
+class TelegramSkill(Skill):
     def __init__(self, bot: Bot):
         self.bot = bot
-        self.agent = None
         self._message = None
-        self.tools = [
-            types.FunctionDeclaration(
-                name="send_files",
-                description="Отправить один или несколько файлов как группу. Один вызов = одна группа. Для нескольких групп — вызови несколько раз.",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "paths": types.Schema(
-                            type=types.Type.ARRAY,
-                            items=types.Schema(type=types.Type.STRING),
-                            description="Список путей к файлам внутри контейнера.",
-                        ),
-                    },
-                    required=["paths"],
-                ),
-            ),
-            types.FunctionDeclaration(
-                name="send_images",
-                description="Отправить одно или несколько изображений как альбом (до 10). Один вызов = один альбом. Для нескольких альбомов — вызови несколько раз.",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "paths": types.Schema(
-                            type=types.Type.ARRAY,
-                            items=types.Schema(type=types.Type.STRING),
-                            description="Список путей к изображениям внутри контейнера.",
-                        ),
-                    },
-                    required=["paths"],
-                ),
-            ),
-            types.FunctionDeclaration(
-                name="download_file",
-                description=(
-                    "Скачать файл, отправленный пользователем, в рабочую директорию. "
-                    "Путь назначения должен быть внутри /workspace/."
-                ),
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "tg_file_id": types.Schema(
-                            type=types.Type.STRING,
-                            description="tg_file_id из метаданных прикреплённого файла.",
-                        ),
-                        "dest_path": types.Schema(
-                            type=types.Type.STRING,
-                            description="Путь назначения внутри контейнера (например /workspace/photo.jpg).",
-                        ),
-                    },
-                    required=["tg_file_id", "dest_path"],
-                ),
-            ),
-        ]
+        super().__init__()
 
     def set_message(self, message):
         self._message = message
 
-    async def dispatch_tool_call(self, tool_call) -> dict:
-        if tool_call.name == "download_file":
-            return await self._download_file(
-                tg_file_id=tool_call.args.get("tg_file_id"),
-                dest_path=tool_call.args.get("dest_path"),
-            )
-
+    def _resolve_paths(self, paths: list[str]) -> list[str] | dict:
         from exec import ExecSkill
         exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None)
-        paths = tool_call.args.get("paths", [])
         host_paths = []
         for p in paths:
             host_path = exec_skill.resolve_path(p) if exec_skill else None
@@ -92,25 +35,40 @@ class TelegramSkill:
             if not os.path.exists(host_path):
                 return {"error": f"Файл не найден: {host_path}"}
             host_paths.append(host_path)
+        return host_paths
 
-        logging.info("[skill] %s: %s", tool_call.name, host_paths)
-
-        if tool_call.name == "send_images":
-            if len(host_paths) == 1:
-                await self._message.answer_photo(FSInputFile(host_paths[0]))
-            else:
-                media = [InputMediaPhoto(media=FSInputFile(p)) for p in host_paths]
-                await self._message.answer_media_group(media)
+    @tool("Отправить один или несколько файлов как группу. Один вызов = одна группа. Для нескольких групп — вызови несколько раз.")
+    async def send_files(self, paths: Annotated[list[str], "Список путей к файлам внутри контейнера."]):
+        host_paths = self._resolve_paths(paths)
+        if isinstance(host_paths, dict):
+            return host_paths
+        logging.info("[skill] send_files: %s", host_paths)
+        if len(host_paths) == 1:
+            await self._message.answer_document(FSInputFile(host_paths[0]))
         else:
-            if len(host_paths) == 1:
-                await self._message.answer_document(FSInputFile(host_paths[0]))
-            else:
-                media = [InputMediaDocument(media=FSInputFile(p)) for p in host_paths]
-                await self._message.answer_media_group(media)
-
+            media = [InputMediaDocument(media=FSInputFile(p)) for p in host_paths]
+            await self._message.answer_media_group(media)
         return {"status": "ok"}
 
-    async def _download_file(self, tg_file_id: str, dest_path: str) -> dict:
+    @tool("Отправить одно или несколько изображений как альбом (до 10). Один вызов = один альбом. Для нескольких альбомов — вызови несколько раз.")
+    async def send_images(self, paths: Annotated[list[str], "Список путей к изображениям внутри контейнера."]):
+        host_paths = self._resolve_paths(paths)
+        if isinstance(host_paths, dict):
+            return host_paths
+        logging.info("[skill] send_images: %s", host_paths)
+        if len(host_paths) == 1:
+            await self._message.answer_photo(FSInputFile(host_paths[0]))
+        else:
+            media = [InputMediaPhoto(media=FSInputFile(p)) for p in host_paths]
+            await self._message.answer_media_group(media)
+        return {"status": "ok"}
+
+    @tool("Скачать файл, отправленный пользователем, в рабочую директорию. Путь назначения должен быть внутри /workspace/.")
+    async def download_file(
+        self,
+        tg_file_id: Annotated[str, "tg_file_id из метаданных прикреплённого файла."],
+        dest_path: Annotated[str, "Путь назначения внутри контейнера (например /workspace/photo.jpg)."],
+    ):
         from exec import ExecSkill
         exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None)
         host_dest = exec_skill.resolve_path(dest_path) if exec_skill else None

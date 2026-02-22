@@ -1,12 +1,10 @@
-import os
-import sys
-import hashlib
-import logging
-import subprocess
+import os, sys, hashlib, logging, subprocess
+from typing import Annotated
+from agent import Skill, tool
 from google.genai import types
 
 
-class ExecSkill:
+class ExecSkill(Skill):
     def __init__(
         self,
         workspace_dir: str | None = None,
@@ -28,37 +26,7 @@ class ExecSkill:
             suffix = hashlib.md5(self.workspace_dir.encode()).hexdigest()[:8]
             container_name = f"slonagent_{suffix}"
         self.container_name = container_name
-        self._running_mounts = None
-        self.agent = None
-
-        self.tools = [
-            types.FunctionDeclaration(
-                name="exec",
-                description=(
-                    "Выполнить команду внутри Docker-контейнера. "
-                    "Всегда доступна директория /workspace. "
-                    "Папки хост-машины монтируются по WSL-схеме: C:\\\\foo → /mnt/c/foo."
-                ),
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "command": types.Schema(
-                            type=types.Type.STRING,
-                            description="Строка команды для выполнения (bash/sh синтаксис).",
-                        ),
-                        "timeout": types.Schema(
-                            type=types.Type.INTEGER,
-                            description="Необязательный таймаут в секундах.",
-                        ),
-                        "workdir": types.Schema(
-                            type=types.Type.STRING,
-                            description="Необязательная рабочая директория внутри контейнера (по умолчанию /workspace).",
-                        ),
-                    },
-                    required=["command"],
-                ),
-            )
-        ]
+        super().__init__()
 
     def _mounts(self) -> dict[str, str]:
         from config import ConfigSkill
@@ -107,16 +75,19 @@ class ExecSkill:
         subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
         logging.info("[exec] Контейнер %s остановлен", self.container_name)
 
-    async def dispatch_tool_call(self, tool_call) -> dict:
-        if tool_call.name != "exec":
-            return {"error": f"Unknown tool: {tool_call.name}"}
-
-        command = tool_call.args.get("command")
-        if not command:
-            return {"error": "command is required"}
-
-        timeout = tool_call.args.get("timeout", self.default_timeout)
-        workdir = tool_call.args.get("workdir", "/workspace")
+    @tool(
+        "Выполнить команду внутри Docker-контейнера. "
+        "Всегда доступна директория /workspace. "
+        "Папки хост-машины монтируются по WSL-схеме: C:\\\\foo → /mnt/c/foo."
+    )
+    async def exec(
+        self,
+        command: Annotated[str, "Строка команды для выполнения (bash/sh синтаксис)."],
+        timeout: Annotated[int, "Таймаут в секундах (по умолчанию 120)."] = None,
+        workdir: Annotated[str, "Рабочая директория внутри контейнера (по умолчанию /workspace)."] = "/workspace",
+    ):
+        if timeout is None:
+            timeout = self.default_timeout
 
         volume_args = ["-v", f"{self.workspace_dir}:/workspace"]
         for host, container in self._mounts().items():
@@ -155,16 +126,12 @@ class ExecSkill:
             return {"error": f"Не удалось запустить контейнер: {e}"}
 
         docker_cmd = [self.runtime, "exec", "-w", workdir, self.container_name, "bash", "-lc", command]
-
         logging.info("[exec] Запуск команды: %s", command)
 
         try:
             proc = subprocess.run(
                 docker_cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=timeout,
             )
         except FileNotFoundError:
@@ -181,15 +148,27 @@ class ExecSkill:
             return {"error": err}
 
         logging.info("[exec] exit_code=%d", proc.returncode)
-        if proc.stdout:
-            logging.info("[exec] stdout:\n%s", proc.stdout.rstrip())
-        if proc.stderr:
-            logging.warning("[exec] stderr:\n%s", proc.stderr.rstrip())
+        if proc.stdout: logging.info("[exec] stdout:\n%s", proc.stdout.rstrip())
+        if proc.stderr: logging.warning("[exec] stderr:\n%s", proc.stderr.rstrip())
 
-        result = {
-            "stderr": proc.stderr,
-            "stdout": proc.stdout,
-            "exit_code": proc.returncode,
-        }
-        return result
+        return {"stdout": proc.stdout, "stderr": proc.stderr, "exit_code": proc.returncode}
 
+    @tool("Посмотреть изображение из workspace — передаёт его напрямую в Gemini Vision.")
+    def view_image(
+        self,
+        path: Annotated[str, "Путь к изображению внутри контейнера (например /workspace/photo.png)."],
+    ):
+        host_path = self.resolve_path(path)
+        if host_path is None:
+            return {"error": f"Доступ запрещён: {path}"}
+        if not os.path.exists(host_path):
+            return {"error": f"Файл не найден: {path}"}
+
+        ext = os.path.splitext(host_path)[1].lower().lstrip(".")
+        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/jpeg")
+
+        with open(host_path, "rb") as f:
+            img_bytes = f.read()
+
+        return {"_parts": [types.Part.from_bytes(data=img_bytes, mime_type=mime)]}
