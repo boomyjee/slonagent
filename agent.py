@@ -43,6 +43,9 @@ class Skill:
             ))
             self._tool_names.add(name)
 
+    def register(self, agent):
+        self.agent = agent
+
     async def dispatch_tool_call(self, tool_call) -> dict:
         if tool_call.name not in self._tool_names:
             return {"error": f"Unknown tool: {tool_call.name}"}
@@ -62,7 +65,7 @@ class Agent:
         self.messages = []
         self.max_iterations = max_iterations
         for skill in self.skills:
-            skill.agent = self
+            skill.register(self)
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None

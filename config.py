@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sys
+from agent import Skill
 
 HELP = (
     "config read                 — показать весь конфиг\n"
@@ -13,7 +14,7 @@ HELP = (
 )
 
 
-class ConfigSkill:
+class ConfigSkill(Skill):
     """
     Управляет JSON-конфигом агента.
     LLM не видит конфиг и не может его менять.
@@ -28,6 +29,7 @@ class ConfigSkill:
     tools = []
 
     def __init__(self, config_path: str = None):
+        super().__init__()
         if config_path is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
             config_path = os.path.join(root, "config.json")
