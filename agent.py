@@ -17,7 +17,8 @@ class Agent:
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self.client = genai.Client(api_key=api_key, http_options=http_options)
 
-    async def process_message(self, text: str, instructions: str = "", transport=None):
+    async def process_message(self, message_parts: list, instructions: str = "", transport=None):
+        text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
         logging.info("[agent] incoming: %r", text)
 
         for skill in self.skills:
@@ -25,7 +26,7 @@ class Agent:
                 if transport: await transport.on_content(skill.handle_bypass_command(text))
                 return
 
-        self.messages.append({"role": "user", "content": text})
+        self.messages.append({"role": "user", "parts": message_parts})
 
         tools = []
         tool_to_skill = {}
@@ -34,12 +35,13 @@ class Agent:
                 tools.append(types.Tool(function_declarations=[f]))
                 tool_to_skill[f.name] = s
 
-        contents = [{"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]} for m in self.messages[-20:]]
+        
         skill_context = "\n\n".join(s.get_context_prompt() for s in self.skills if hasattr(s, "get_context_prompt"))
         system = "\n\n".join(filter(None, [instructions, skill_context]))
 
         try:
             config = types.GenerateContentConfig(system_instruction=system, temperature=0.7, tools=tools)
+            contents = self.messages[-20:]
             response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
 
             iteration = 0
@@ -60,7 +62,7 @@ class Agent:
                 iteration += 1
                 response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
 
-            self.messages.append({"role": "model", "content": response.text})
+            self.messages.append({"role": "model", "parts": [{"text": response.text}]})
             if transport: await transport.on_content(response.text)
 
             for s in self.skills:

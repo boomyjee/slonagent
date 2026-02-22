@@ -63,22 +63,17 @@ class MemorySkill:
             return
 
         logging.info(f"Запускаю консолидацию: {len(messages_to_consolidate)} сообщений...")
-        dialog_text = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages_to_consolidate)
         current_memory = open(self.memory_file, encoding="utf-8").read() if os.path.exists(self.memory_file) else ""
 
-        prompt = f"""Ты — агент консолидации памяти. Вызови инструмент save_memory.
+        system = f"""Ты — агент консолидации памяти. Вызови инструмент save_memory.
 
 ## Текущая память
 {current_memory or "(пусто)"}
-
-## Диалог для обработки
-{dialog_text}
 
 Передай в save_memory:
 - history_entry: краткая выжимка диалога (2–5 предложений, начни с [YYYY-MM-DD HH:MM]).
 - memory_update: полный обновлённый текст MEMORY.md (вплети новые факты в старые)."""
 
-        # Инструмент только для консолидации — не нужен снаружи
         save_memory_tool = types.FunctionDeclaration(
             name="save_memory",
             description="Сохранить результат консолидации.",
@@ -93,8 +88,14 @@ class MemorySkill:
         )
 
         try:
-            config = types.GenerateContentConfig(tools=[types.Tool(function_declarations=[save_memory_tool])])
-            contents = [{"role": "user", "parts": [{"text": prompt}]}]
+            config = types.GenerateContentConfig(
+                system_instruction=system,
+                tools=[types.Tool(function_declarations=[save_memory_tool])],
+            )
+            contents = [
+                *messages_to_consolidate,
+                {"role": "user", "parts": [{"text": "Вызови save_memory."}]},
+            ]
             response = self._client.models.generate_content(
                 model=self.consolidation_model_name,
                 contents=contents,
