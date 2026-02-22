@@ -5,10 +5,11 @@ from google.genai import types
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, skills: list = None):
+    def __init__(self, model_name: str, api_key: str, skills: list = None, max_iterations: int = 20):
         self.model_name = model_name
         self.skills = skills or []
         self.messages = []
+        self.max_iterations = max_iterations
         for skill in self.skills:
             skill.agent = self
 
@@ -42,7 +43,8 @@ class Agent:
             config = types.GenerateContentConfig(system_instruction=system, temperature=0.7, tools=tools)
             response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
 
-            while response.function_calls:
+            iteration = 0
+            while response.function_calls and iteration < self.max_iterations:
                 contents.append(response.candidates[0].content)
                 for tool_call in response.function_calls:
                     logging.info("Инструмент: %s", tool_call.name)
@@ -54,6 +56,7 @@ class Agent:
                     result = await skill.dispatch_tool_call(tool_call)
                     contents.append({"role": "user", "parts": [{"text": f"Результат {tool_call.name}:\n{result}"}]})
 
+                iteration += 1
                 response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
 
             self.messages.append({"role": "model", "content": response.text})
