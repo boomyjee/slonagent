@@ -59,6 +59,17 @@ class ExecSkill:
             )
         ]
 
+    def resolve_path(self, container_path: str) -> str:
+        if container_path.startswith("/workspace/"):
+            return os.path.join(self.workspace_dir, container_path[len("/workspace/"):])
+        extra_folders = self.config.get("exec.folders") or [] if self.config else []
+        for folder in extra_folders:
+            mount_name = os.path.basename(folder.rstrip("/\\")) or "folder"
+            prefix = f"/mnt/{mount_name}/"
+            if container_path.startswith(prefix):
+                return os.path.join(folder, container_path[len(prefix):])
+        return container_path
+
     def get_context_prompt(self) -> str:
         extra_folders = []
         if self.config:
@@ -82,7 +93,7 @@ class ExecSkill:
             )
         return "\n".join(lines)
 
-    def dispatch_tool_call(self, tool_call) -> dict:
+    async def dispatch_tool_call(self, tool_call) -> dict:
         if tool_call.name != "exec":
             return {"error": f"Unknown tool: {tool_call.name}"}
 

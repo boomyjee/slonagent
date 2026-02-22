@@ -1,4 +1,5 @@
 import os, logging, asyncio, httpx
+from typing import AsyncIterator
 from google import genai
 from google.genai import types
 
@@ -14,12 +15,13 @@ class Agent:
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self.client = genai.Client(api_key=api_key, http_options=http_options)
 
-    async def process_message(self, text: str) -> str:
+    async def process_message(self, text: str, instructions: str = "") -> AsyncIterator[str]:
         logging.info("[agent] incoming: %r", text)
 
         for skill in self.skills:
             if hasattr(skill, "is_bypass_command") and skill.is_bypass_command(text):
-                return skill.handle_bypass_command(text)
+                yield skill.handle_bypass_command(text)
+                return
 
         self.messages.append({"role": "user", "content": text})
 
@@ -31,12 +33,14 @@ class Agent:
                 tool_to_skill[f.name] = s
 
         contents = [{"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]} for m in self.messages[-20:]]
-        system = "\n\n".join(s.get_context_prompt() for s in self.skills if hasattr(s, "get_context_prompt"))
+        skill_context = "\n\n".join(s.get_context_prompt() for s in self.skills if hasattr(s, "get_context_prompt"))
+        system = "\n\n".join(filter(None, [instructions, skill_context]))
 
         try:
             config = types.GenerateContentConfig(system_instruction=system, temperature=0.7, tools=tools)
             response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
-            if response.function_calls:
+
+            while response.function_calls:
                 contents.append(response.candidates[0].content)
                 for tool_call in response.function_calls:
                     logging.info("Инструмент: %s", tool_call.name)
@@ -45,19 +49,17 @@ class Agent:
                         logging.warning("Tool %s not found in skills", tool_call.name)
                         continue
 
-                    result = str(skill.dispatch_tool_call(tool_call))
+                    result = await skill.dispatch_tool_call(tool_call)
                     contents.append({"role": "user", "parts": [{"text": f"Результат {tool_call.name}:\n{result}"}]})
 
                 response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
 
-            answer = response.text
-            self.messages.append({"role": "model", "content": answer})
-            async def notify():
-                for s in self.skills:
-                    if hasattr(s, "on_message_processed"):
-                        await s.on_message_processed(self.messages)
-            asyncio.create_task(notify())
-            return answer
+            self.messages.append({"role": "model", "content": response.text})
+            yield response.text
+
+            for s in self.skills:
+                if hasattr(s, "on_message_processed"): await s.on_message_processed(self.messages)
+
         except Exception as e:
             logging.exception("Ошибка при обращении к Gemini")
-            return f"Ошибка: {e}"
+            yield f"Ошибка: {e}"

@@ -43,7 +43,7 @@ class MemorySkill:
             "Используй инструмент read_history, чтобы искать в архиве прошлых диалогов."
         )
 
-    def dispatch_tool_call(self, tool_call) -> dict:
+    async def dispatch_tool_call(self, tool_call) -> dict:
         if tool_call.name == "read_history":
             query = tool_call.args.get("query", "").lower()
             if not os.path.exists(self.history_file):
