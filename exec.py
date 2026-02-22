@@ -117,31 +117,39 @@ class ExecSkill:
         timeout = tool_call.args.get("timeout", self.default_timeout)
         workdir = tool_call.args.get("workdir", "/workspace")
 
-        mounts = {f"{self.workspace_dir}:/workspace"}
+        desired = {f"{self.workspace_dir}:/workspace"}
         for host, container in self._mounts().items():
-            mounts.add(f"{host}:{container}:ro")
+            desired.add(f"{host}:{container}:ro")
+        env_image = f"{self.container_name}_env"
 
         try:
-            result = subprocess.run(
-                [self.runtime, "inspect", "--format", "{{.State.Running}}", self.container_name],
-                capture_output=True, text=True,
+            inspect = subprocess.run(
+                [self.runtime, "inspect", "--format",
+                 "{{.State.Running}}\n{{range .Mounts}}{{.Source}}:{{.Destination}}:{{if .RW}}rw{{else}}ro{{end}}\n{{end}}",
+                 self.container_name],
+                capture_output=True, text=True, encoding="utf-8",
             )
-            running = result.returncode == 0 and result.stdout.strip() == "true"
+            if inspect.returncode != 0:
+                img = subprocess.run([self.runtime, "image", "exists", env_image], capture_output=True)
+                image = env_image if img.returncode == 0 else self.image
+                volume_args = [arg for m in desired for arg in ("-v", m)]
+                subprocess.run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], check=True)
+                logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
+            else:
+                lines = inspect.stdout.strip().splitlines()
+                running = lines[0] == "true"
+                actual = {l.strip() for l in lines[1:] if l.strip()}
 
-            if not running or mounts != self._running_mounts:
-                if running:
-                    logging.info("[exec] Монтирования изменились, перезапуск контейнера")
-                subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
-                volume_args = [arg for mount in mounts for arg in ("-v", mount)]
-                subprocess.run([
-                    self.runtime, "run", "-d",
-                    "--name", self.container_name,
-                    *volume_args,
-                    self.image,
-                    "sleep", "infinity",
-                ], check=True)
-                self._running_mounts = mounts
-                logging.info("[exec] Контейнер %s запущен", self.container_name)
+                if not running:
+                    subprocess.run([self.runtime, "start", self.container_name], check=True)
+                    logging.info("[exec] Контейнер %s запущен", self.container_name)
+                elif actual != desired:
+                    logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
+                    subprocess.run([self.runtime, "commit", self.container_name, env_image], check=True)
+                    subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
+                    volume_args = [arg for m in desired for arg in ("-v", m)]
+                    subprocess.run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
+                    logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
         except Exception as e:
             return {"error": f"Не удалось запустить контейнер: {e}"}
 
