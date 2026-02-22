@@ -1,5 +1,6 @@
 import logging
 import os
+import subprocess
 import sys
 from typing import Annotated
 from agent import Skill, tool
@@ -51,6 +52,7 @@ class MySkill(Skill):
 - метод возвращает dict
 - можно импортировать стандартные библиотеки (os, json, re, httpx и др.)
 - self.agent даёт доступ к агенту и другим скиллам через self.agent.skills
+- проверить доступные пакеты можно через list_packages; попросить установить — /install_package <пакет>
 
 Можно предложить новый скилл или обновлённую версию существующего — для этого сначала прочитай
 текущий код через get_skill_code, измени и передай сюда. После вызова пользователь получит
@@ -69,6 +71,14 @@ class MySkill(Skill):
             await self.agent.transport.send_message(f"Для активации: `/approve_skill {name}`\nДля удаления: `/delete_skill {name}`")
         return {"status": "pending"}
 
+    @tool("Показать список установленных Python-пакетов в окружении агента.")
+    def list_packages(self, filter: Annotated[str, "Фильтр по имени пакета (необязательно)."] = ""):
+        result = subprocess.run([sys.executable, "-m", "pip", "list"], capture_output=True, text=True)
+        lines = result.stdout.strip().splitlines()[2:]  # skip header
+        if filter:
+            lines = [l for l in lines if filter.lower() in l.lower()]
+        return {"packages": lines}
+
     @tool("Прочитать код существующего скилла (активного или pending) для просмотра или редактирования.")
     def get_skill_code(self, name: Annotated[str, "Имя скилла."]):
         if name in self._pending:
@@ -80,9 +90,10 @@ class MySkill(Skill):
         return {"error": f"Скилл {name!r} не найден"}
 
     _COMMANDS = {
-        "approve_skill": lambda self, arg: self.approve_skill(arg),
-        "delete_skill":  lambda self, arg: self.delete_skill(arg),
-        "skills":        lambda self, arg: self.skills_list(),
+        "approve_skill":   lambda self, arg: self.approve_skill(arg),
+        "delete_skill":    lambda self, arg: self.delete_skill(arg),
+        "install_package": lambda self, arg: self._install_package(arg),
+        "skills":          lambda self, arg: self.skills_list(),
     }
 
     def is_bypass_command(self, text: str) -> bool:
@@ -93,6 +104,17 @@ class MySkill(Skill):
         cmd = parts[0].lstrip("/")
         arg = parts[1].strip() if len(parts) > 1 else ""
         return self._COMMANDS[cmd](self, arg)
+
+    def _install_package(self, package: str) -> str:
+        if not package:
+            return "Использование: /install_package <пакет>"
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", package],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return f"✅ {result.stdout.strip().splitlines()[-1]}"
+        return f"❌ {result.stderr.strip()}"
 
     def approve_skill(self, name: str) -> str:
         if name not in self._pending:
