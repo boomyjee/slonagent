@@ -15,6 +15,8 @@ class Agent:
         self.client = genai.Client(api_key=api_key, http_options=http_options)
 
     async def process_message(self, text: str) -> str:
+        logging.info("[agent] incoming: %r", text)
+
         for skill in self.skills:
             if hasattr(skill, "is_bypass_command") and skill.is_bypass_command(text):
                 return skill.handle_bypass_command(text)

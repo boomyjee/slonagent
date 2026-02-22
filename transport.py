@@ -14,7 +14,6 @@ class TelegramTransport:
 
     async def _handle_message(self, message: Message):
         text = message.text or ""
-        logging.info("[tg] from=%s text=%r", message.from_user.username or message.from_user.id, text)
 
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
         try:

@@ -34,10 +34,14 @@ class ConfigSkill:
     # ── bypass interface ──────────────────────────────────────────────────────
 
     def is_bypass_command(self, text: str) -> bool:
-        return bool(re.match(r"^/?config\s+(read|write)\b", text.strip(), re.IGNORECASE))
+        return bool(re.match(r"^/config(\s|$)", text.strip(), re.IGNORECASE))
 
     def handle_bypass_command(self, text: str) -> str:
-        parts = text.strip().lstrip("/").split(None, 2)
+        parts = text.strip().split(None, 2)
+        if len(parts) < 2:
+            cfg = self._load()
+            return f"```json\n{json.dumps(cfg, ensure_ascii=False, indent=2)}\n```"
+
         subcommand = parts[1].lower()
 
         if subcommand == "read":

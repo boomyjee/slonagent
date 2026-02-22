@@ -78,7 +78,7 @@ class ExecSkill:
             lines.append(
                 "Дополнительных папок нет. Если нужен доступ к папке на хост-машине, "
                 "попроси пользователя выполнить:\n"
-                "  /config add exec.folders <абсолютный путь к папке>"
+                "  /config write exec.folders[] <абсолютный путь к папке>"
             )
         return "\n".join(lines)
 
