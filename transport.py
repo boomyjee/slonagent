@@ -84,10 +84,11 @@ class TelegramSkill(Skill):
 
 
 class TelegramTransport:
-    def __init__(self, bot_token: str, agent):
+    def __init__(self, bot_token: str, allowed_user_ids: set[int], agent):
         proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self.bot = Bot(token=bot_token, session=AiohttpSession(proxy=proxy) if proxy else None)
         self.agent = agent
+        self.allowed_user_ids = allowed_user_ids
         self.dp = Dispatcher()
         self.dp.message()(self._handle_message)
 
@@ -137,6 +138,9 @@ class TelegramTransport:
         await self._current_message.answer(f"```{lang}\n{code}\n```", parse_mode="Markdown")
 
     async def _handle_message(self, message: Message):
+        if message.from_user.id not in self.allowed_user_ids:
+            return
+
         if message.media_group_id:
             group_id = message.media_group_id
             self._media_groups.setdefault(group_id, []).append(message)
