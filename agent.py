@@ -59,8 +59,9 @@ class Skill:
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, skills: list = None, max_iterations: int = 20):
+    def __init__(self, model_name: str, include_thoughts: bool = False, api_key: str = None, skills: list = None, max_iterations: int = 20):
         self.model_name = model_name
+        self.include_thoughts = include_thoughts
         self.skills = skills or []
         self.messages = []
         self.max_iterations = max_iterations
@@ -103,7 +104,12 @@ class Agent:
                 await transport.send_thinking("\n\n".join(thought_parts))
 
         try:
-            config = types.GenerateContentConfig(system_instruction=system, temperature=0.7, tools=tools)
+            config = types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=1.0,
+                tools=tools,
+                thinking_config=types.ThinkingConfig(include_thoughts=self.include_thoughts),
+            )
             response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
             await send_thinking(response)
 
