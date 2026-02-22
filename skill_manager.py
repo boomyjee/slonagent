@@ -50,14 +50,19 @@ class MySkill(Skill):
 - все параметры аннотированы через Annotated[тип, "описание"]
 - метод возвращает dict
 - можно импортировать стандартные библиотеки (os, json, re, httpx и др.)
-- self.agent даёт доступ к агенту и другим скиллам через self.agent.skills""")
-    def propose_skill(
+- self.agent даёт доступ к агенту и другим скиллам через self.agent.skills
+
+После вызова пользователь автоматически получит сообщение с кодом и инструкцией по активации.""")
+    async def propose_skill(
         self,
         name: Annotated[str, "Имя скилла (snake_case)."],
         code: Annotated[str, "Полный Python-код скилла."],
     ):
         self._pending[name] = code
-        return {"status": "pending", "name": name, "code": code}
+        if self.agent and self.agent.transport:
+            await self.agent.transport.send_code("python", code)
+            await self.agent.transport.send_message(f"Для активации: `/approve_skill {name}`\nДля удаления: `/delete_skill {name}`")
+        return {"status": "pending"}
 
     _COMMANDS = {
         "approve_skill": lambda self, arg: self.approve_skill(arg),

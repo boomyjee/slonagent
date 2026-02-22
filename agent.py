@@ -73,12 +73,13 @@ class Agent:
         self.client = genai.Client(api_key=api_key, http_options=http_options)
 
     async def process_message(self, message_parts: list, instructions: str = "", transport=None):
+        self.transport = transport
         text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
         logging.info("[agent] incoming: %r", text)
 
         for skill in self.skills:
             if hasattr(skill, "is_bypass_command") and skill.is_bypass_command(text):
-                if transport: await transport.on_content(skill.handle_bypass_command(text))
+                if transport: await transport.send_message(skill.handle_bypass_command(text))
                 return
 
         self.messages.append({"role": "user", "parts": message_parts})
@@ -118,11 +119,11 @@ class Agent:
                 response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
 
             self.messages.append({"role": "model", "parts": [{"text": response.text}]})
-            if transport: await transport.on_content(response.text)
+            if transport: await transport.send_message(response.text)
 
             for s in self.skills:
                 if hasattr(s, "on_message_processed"): await s.on_message_processed(self.messages)
 
         except Exception as e:
             logging.exception("Ошибка при обращении к Gemini")
-            if transport: await transport.on_content(f"Ошибка: {e}")
+            if transport: await transport.send_message(f"Ошибка: {e}")

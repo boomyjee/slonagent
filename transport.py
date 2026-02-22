@@ -127,11 +127,14 @@ class TelegramTransport:
         except Exception:
             pass
 
-    async def on_content(self, text: str):
+    async def send_message(self, text: str):
         try:
             await self._current_message.answer(text, parse_mode="Markdown")
         except Exception:
             await self._current_message.answer(text)
+
+    async def send_code(self, lang: str, code: str):
+        await self._current_message.answer(f"```{lang}\n{code}\n```", parse_mode="Markdown")
 
     async def _handle_message(self, message: Message):
         if message.media_group_id:
