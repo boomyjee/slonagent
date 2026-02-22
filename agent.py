@@ -95,9 +95,17 @@ class Agent:
         skill_context = "\n\n".join(s.get_context_prompt() for s in self.skills if hasattr(s, "get_context_prompt"))
         system = "\n\n".join(filter(None, [instructions, skill_context]))
 
+        async def send_thinking(response):
+            if not transport: return
+            parts = response.candidates[0].content.parts
+            thought_parts = [p.text for p in parts if getattr(p, "thought", False) and p.text]
+            if thought_parts:
+                await transport.send_thinking("\n\n".join(thought_parts))
+
         try:
             config = types.GenerateContentConfig(system_instruction=system, temperature=0.7, tools=tools)
             response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
+            await send_thinking(response)
 
             iteration = 0
             while response.function_calls and iteration < self.max_iterations:
@@ -117,6 +125,7 @@ class Agent:
 
                 iteration += 1
                 response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
+                await send_thinking(response)
 
             self.messages.append({"role": "model", "parts": [{"text": response.text}]})
             if transport: await transport.send_message(response.text)

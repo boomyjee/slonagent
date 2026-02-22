@@ -134,6 +134,12 @@ class TelegramTransport:
         except Exception:
             await self._current_message.answer(text)
 
+    async def send_thinking(self, text: str):
+        await self._current_message.answer(
+            f"<blockquote expandable>{text}</blockquote>",
+            parse_mode="HTML",
+        )
+
     async def send_code(self, lang: str, code: str):
         await self._current_message.answer(f"```{lang}\n{code}\n```", parse_mode="Markdown")
 
