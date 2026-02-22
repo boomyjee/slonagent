@@ -5,22 +5,12 @@ import logging
 import subprocess
 from google.genai import types
 
-
-
 class ExecSkill:
-    """
-    Скилл для выполнения команд внутри Docker-контейнера.
-
-    По умолчанию монтируется директория workspace.
-    Дополнительные папки хост-машины берутся из config.exec.folders
-    и монтируются в контейнер как /mnt/<имя_папки>.
-    """
-
     def __init__(
         self,
         workspace_dir: str | None = None,
         image: str = "python:3.11-slim",
-        default_timeout: int = 60,
+        default_timeout: int = 120,
         runtime: str = "podman",
         container_name: str = None,
     ):
@@ -96,6 +86,8 @@ class ExecSkill:
             "## Инструмент exec",
             "Ты можешь выполнять команды в Docker-контейнере.",
             "Директория /workspace всегда доступна для чтения и записи.",
+            "Контейнер персистентный — установленные пакеты (apt, pip и т.д.) сохраняются между командами.",
+            "В контейнере есть права root, можно устанавливать любые системные пакеты через apt-get.",
         ]
         mounts = self._mounts()
         if mounts:
@@ -162,6 +154,8 @@ class ExecSkill:
                 docker_cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
         except FileNotFoundError:
