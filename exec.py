@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 import subprocess
 from google.genai import types
@@ -20,16 +21,17 @@ class ExecSkill:
         image: str = "python:3.11-slim",
         default_timeout: int = 60,
         runtime: str = "podman",
-        config=None,
     ):
-        root = os.path.dirname(os.path.abspath(__file__))
-        self.workspace_dir = workspace_dir or os.path.join(root, "workspace")
+        if workspace_dir is None:
+            root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
+            workspace_dir = os.path.join(root, "workspace")
+        self.workspace_dir = workspace_dir
         os.makedirs(self.workspace_dir, exist_ok=True)
 
         self.image = image
         self.default_timeout = default_timeout
         self.runtime = runtime
-        self.config = config
+        self.agent = None
 
         self.tools = [
             types.FunctionDeclaration(
@@ -61,7 +63,9 @@ class ExecSkill:
         ]
 
     def _mounts(self) -> dict[str, str]:
-        folders = self.config.get("exec.folders") or [] if self.config else []
+        from config import ConfigSkill
+        config = next((s for s in self.agent.skills if isinstance(s, ConfigSkill)), None) if self.agent else None
+        folders = config.get("exec.folders") or [] if config else []
         result = {}
         for f in folders:
             if len(f) >= 2 and f[1] == ":":

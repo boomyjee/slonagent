@@ -19,8 +19,8 @@ class TelegramOutputSkill:
     Отправляет файлы и изображения напрямую в чат во время tool call.
     """
 
-    def __init__(self, path_resolver):
-        self.path_resolver = path_resolver
+    def __init__(self):
+        self.agent = None
         self._message = None
         self.tools = [
             types.FunctionDeclaration(
@@ -59,10 +59,12 @@ class TelegramOutputSkill:
         self._message = message
 
     async def dispatch_tool_call(self, tool_call) -> dict:
+        from exec import ExecSkill
+        exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None)
         paths = tool_call.args.get("paths", [])
         host_paths = []
         for p in paths:
-            host_path = self.path_resolver(p)
+            host_path = exec_skill.resolve_path(p) if exec_skill else None
             if host_path is None:
                 return {"error": f"Доступ запрещён: {p}"}
             if not os.path.exists(host_path):
@@ -88,14 +90,15 @@ class TelegramOutputSkill:
 
 
 class TelegramTransport:
-    def __init__(self, bot_token: str, agent, path_resolver):
+    def __init__(self, bot_token: str, agent):
         proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self.bot = Bot(token=bot_token, session=AiohttpSession(proxy=proxy) if proxy else None)
         self.agent = agent
         self.dp = Dispatcher()
         self.dp.message()(self._handle_message)
 
-        self._output_skill = TelegramOutputSkill(path_resolver=path_resolver)
+        self._output_skill = TelegramOutputSkill()
+        self._output_skill.agent = agent
         agent.skills.append(self._output_skill)
 
     async def _handle_message(self, message: Message):

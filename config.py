@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import sys
 
 HELP = (
     "config read                 — показать весь конфиг\n"
@@ -26,7 +27,10 @@ class ConfigSkill:
 
     tools = []
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str = None):
+        if config_path is None:
+            root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
+            config_path = os.path.join(root, "config.json")
         self.config_path = config_path
         if not os.path.exists(config_path):
             self._save({})

@@ -1,4 +1,5 @@
 import os
+import sys
 import httpx
 import logging
 from google import genai
@@ -6,7 +7,10 @@ from google.genai import types
 
 
 class MemorySkill:
-    def __init__(self, memory_dir: str, api_key: str, consolidation_model_name: str = "gemini-3-flash-preview"):
+    def __init__(self, api_key: str, memory_dir: str = None, consolidation_model_name: str = "gemini-3-flash-preview"):
+        if memory_dir is None:
+            root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
+            memory_dir = os.path.join(root, "memory")
         os.makedirs(memory_dir, exist_ok=True)
         self.memory_file = os.path.join(memory_dir, "MEMORY.md")
         self.history_file = os.path.join(memory_dir, "HISTORY.md")

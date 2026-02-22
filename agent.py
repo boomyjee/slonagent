@@ -9,6 +9,8 @@ class Agent:
         self.model_name = model_name
         self.skills = skills or []
         self.messages = []
+        for skill in self.skills:
+            skill.agent = self
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
