@@ -4,6 +4,7 @@ import subprocess
 from google.genai import types
 
 
+
 class ExecSkill:
     """
     Скилл для выполнения команд внутри Docker-контейнера.
@@ -36,7 +37,7 @@ class ExecSkill:
                 description=(
                     "Выполнить команду внутри Docker-контейнера. "
                     "Всегда доступна директория /workspace. "
-                    "Дополнительные папки из exec.folders монтируются как /mnt/<имя_папки>."
+                    "Папки хост-машины монтируются по WSL-схеме: C:\\\\foo → /mnt/c/foo."
                 ),
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
@@ -59,32 +60,37 @@ class ExecSkill:
             )
         ]
 
-    def resolve_path(self, container_path: str) -> str:
+    def _mounts(self) -> dict[str, str]:
+        folders = self.config.get("exec.folders") or [] if self.config else []
+        result = {}
+        for f in folders:
+            if len(f) >= 2 and f[1] == ":":
+                drive, rest = f[0].lower(), f[2:].replace("\\", "/").lstrip("/")
+                result[f] = f"/mnt/{drive}/{rest}"
+            else:
+                result[f] = f.replace("\\", "/")
+        return result
+
+    def resolve_path(self, container_path: str) -> str | None:
         if container_path.startswith("/workspace/"):
             return os.path.join(self.workspace_dir, container_path[len("/workspace/"):])
-        extra_folders = self.config.get("exec.folders") or [] if self.config else []
-        for folder in extra_folders:
-            mount_name = os.path.basename(folder.rstrip("/\\")) or "folder"
-            prefix = f"/mnt/{mount_name}/"
+        for host, container in self._mounts().items():
+            prefix = container.rstrip("/") + "/"
             if container_path.startswith(prefix):
-                return os.path.join(folder, container_path[len(prefix):])
-        return container_path
+                return os.path.join(host, container_path[len(prefix):].replace("/", os.sep))
+        return None
 
     def get_context_prompt(self) -> str:
-        extra_folders = []
-        if self.config:
-            extra_folders = self.config.get("exec.folders") or []
-
         lines = [
             "## Инструмент exec",
             "Ты можешь выполнять команды в Docker-контейнере.",
             "Директория /workspace всегда доступна для чтения и записи.",
         ]
-        if extra_folders:
+        mounts = self._mounts()
+        if mounts:
             lines.append("Дополнительно примонтированы папки хост-машины:")
-            for folder in extra_folders:
-                mount_name = os.path.basename(folder.rstrip("/\\")) or "folder"
-                lines.append(f"  - {folder}  →  /mnt/{mount_name}  (только чтение)")
+            for host, container in mounts.items():
+                lines.append(f"  - {host}  →  {container}  (только чтение)")
         else:
             lines.append(
                 "Дополнительных папок нет. Если нужен доступ к папке на хост-машине, "
@@ -107,14 +113,9 @@ class ExecSkill:
         host_workspace = self.workspace_dir
         container_workspace = "/workspace"
 
-        extra_folders = []
-        if self.config:
-            extra_folders = self.config.get("exec.folders") or []
-
         volume_args = ["-v", f"{host_workspace}:{container_workspace}"]
-        for folder in extra_folders:
-            mount_name = os.path.basename(folder.rstrip("/\\")) or "folder"
-            volume_args += ["-v", f"{folder}:/mnt/{mount_name}:ro"]
+        for host, container in self._mounts().items():
+            volume_args += ["-v", f"{host}:{container}:ro"]
 
         docker_cmd = [
             self.runtime,

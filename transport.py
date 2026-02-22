@@ -63,6 +63,8 @@ class TelegramOutputSkill:
         host_paths = []
         for p in paths:
             host_path = self.path_resolver(p)
+            if host_path is None:
+                return {"error": f"Доступ запрещён: {p}"}
             if not os.path.exists(host_path):
                 return {"error": f"Файл не найден: {host_path}"}
             host_paths.append(host_path)
