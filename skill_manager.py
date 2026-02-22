@@ -52,7 +52,12 @@ class MySkill(Skill):
 - можно импортировать стандартные библиотеки (os, json, re, httpx и др.)
 - self.agent даёт доступ к агенту и другим скиллам через self.agent.skills
 
-После вызова пользователь автоматически получит сообщение с кодом и инструкцией по активации.""")
+Можно предложить новый скилл или обновлённую версию существующего — для этого сначала прочитай
+текущий код через get_skill_code, измени и передай сюда. После вызова пользователь получит
+код на модерацию и инструкцию по активации.
+
+ВАЖНО: код выполняется напрямую в процессе агента без какой-либо песочницы.
+Пиши только безопасный и понятный код — пользователь проверит его перед активацией.""")
     async def propose_skill(
         self,
         name: Annotated[str, "Имя скилла (snake_case)."],
@@ -63,6 +68,16 @@ class MySkill(Skill):
             await self.agent.transport.send_code("python", code)
             await self.agent.transport.send_message(f"Для активации: `/approve_skill {name}`\nДля удаления: `/delete_skill {name}`")
         return {"status": "pending"}
+
+    @tool("Прочитать код существующего скилла (активного или pending) для просмотра или редактирования.")
+    def get_skill_code(self, name: Annotated[str, "Имя скилла."]):
+        if name in self._pending:
+            return {"status": "pending", "code": self._pending[name]}
+        path = os.path.join(self._skills_dir, name + ".py")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return {"status": "active", "code": f.read()}
+        return {"error": f"Скилл {name!r} не найден"}
 
     _COMMANDS = {
         "approve_skill": lambda self, arg: self.approve_skill(arg),
@@ -83,6 +98,8 @@ class MySkill(Skill):
         if name not in self._pending:
             return f"Нет pending-скилла {name!r}"
         code = self._pending.pop(name)
+        if name in self._active:
+            self.agent.skills.remove(self._active.pop(name))
         result = self._instantiate(name, code)
         if "error" in result:
             self._pending[name] = code
