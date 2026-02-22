@@ -1,6 +1,6 @@
 import os, logging, json
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument
+from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions
 from aiogram.client.session.aiohttp import AiohttpSession
 from google.genai import types
 
@@ -110,7 +110,9 @@ class TelegramTransport:
             lines = "\n".join(f"  {k}: {v}" for k, v in args.items())
             self._tool_call_text = f"<b>[{name}]</b>\n{lines}"
         self._tool_msg = await self._current_message.answer(
-            f"<blockquote expandable>{self._tool_call_text}</blockquote>", parse_mode="HTML"
+            f"<blockquote expandable>{self._tool_call_text}</blockquote>",
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def on_tool_result(self, name: str, result):
@@ -122,7 +124,8 @@ class TelegramTransport:
         try:
             await self._tool_msg.edit_text(
                 f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
         except Exception:
             pass
