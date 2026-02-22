@@ -1,4 +1,4 @@
-import os, logging
+import os, logging, json
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -101,19 +101,52 @@ class TelegramTransport:
         self._output_skill.agent = agent
         agent.skills.append(self._output_skill)
 
+    async def on_tool_call(self, name: str, args: dict):
+        if not args:
+            self._tool_call_text = f"<b>[{name}]</b>"
+        elif len(args) == 1:
+            self._tool_call_text = f"<b>[{name}]</b> {next(iter(args.values()))}"
+        else:
+            lines = "\n".join(f"  {k}: {v}" for k, v in args.items())
+            self._tool_call_text = f"<b>[{name}]</b>\n{lines}"
+        self._tool_msg = await self._current_message.answer(
+            f"<blockquote expandable>{self._tool_call_text}</blockquote>", parse_mode="HTML"
+        )
+
+    async def on_tool_result(self, name: str, result):
+        if isinstance(result, dict):
+            parts = [f"<b>[{k}]</b>\n{v}" for k, v in result.items() if v not in (None, "", [], {})]
+            result_text = "\n".join(parts) if parts else "(пусто)"
+        else:
+            result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2)
+        try:
+            await self._tool_msg.edit_text(
+                f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+    async def on_content(self, text: str):
+        try:
+            await self._current_message.answer(text, parse_mode="Markdown")
+        except Exception:
+            await self._current_message.answer(text)
+
     async def _handle_message(self, message: Message):
-        text = message.text or ""
+        self._current_message = message
+        self._tool_msg = None
+        self._tool_call_text = ""
 
         self._output_skill.set_message(message)
         await self.bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
         try:
-            async for part in self.agent.process_message(text=text, instructions=TELEGRAM_INSTRUCTIONS):
-                if isinstance(part, str):
-                    try:
-                        await message.answer(part, parse_mode="Markdown")
-                    except Exception:
-                        await message.answer(part)
+            await self.agent.process_message(
+                text=message.text or "",
+                instructions=TELEGRAM_INSTRUCTIONS,
+                transport=self,
+            )
         except Exception as e:
             logging.exception("Error processing message")
             await message.answer(f"Произошла ошибка при обработке: {e}")

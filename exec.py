@@ -5,6 +5,7 @@ import logging
 import subprocess
 from google.genai import types
 
+
 class ExecSkill:
     def __init__(
         self,
@@ -117,37 +118,37 @@ class ExecSkill:
         timeout = tool_call.args.get("timeout", self.default_timeout)
         workdir = tool_call.args.get("workdir", "/workspace")
 
-        desired = {f"{self.workspace_dir}:/workspace"}
+        volume_args = ["-v", f"{self.workspace_dir}:/workspace"]
         for host, container in self._mounts().items():
-            desired.add(f"{host}:{container}:ro")
+            volume_args += ["-v", f"{host}:{container}:ro"]
+
+        desired_destinations = {"/workspace"} | {container for _, container in self._mounts().items()}
         env_image = f"{self.container_name}_env"
 
         try:
             inspect = subprocess.run(
                 [self.runtime, "inspect", "--format",
-                 "{{.State.Running}}\n{{range .Mounts}}{{.Source}}:{{.Destination}}:{{if .RW}}rw{{else}}ro{{end}}\n{{end}}",
+                 "{{.State.Running}}\n{{range .Mounts}}{{.Destination}}\n{{end}}",
                  self.container_name],
                 capture_output=True, text=True, encoding="utf-8",
             )
             if inspect.returncode != 0:
                 img = subprocess.run([self.runtime, "image", "exists", env_image], capture_output=True)
                 image = env_image if img.returncode == 0 else self.image
-                volume_args = [arg for m in desired for arg in ("-v", m)]
                 subprocess.run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], check=True)
                 logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
             else:
                 lines = inspect.stdout.strip().splitlines()
                 running = lines[0] == "true"
-                actual = {l.strip() for l in lines[1:] if l.strip()}
+                actual_destinations = {l.strip() for l in lines[1:] if l.strip()}
 
                 if not running:
                     subprocess.run([self.runtime, "start", self.container_name], check=True)
                     logging.info("[exec] Контейнер %s запущен", self.container_name)
-                elif actual != desired:
+                elif actual_destinations != desired_destinations:
                     logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
                     subprocess.run([self.runtime, "commit", self.container_name, env_image], check=True)
                     subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
-                    volume_args = [arg for m in desired for arg in ("-v", m)]
                     subprocess.run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
                     logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
         except Exception as e:
@@ -186,9 +187,9 @@ class ExecSkill:
             logging.warning("[exec] stderr:\n%s", proc.stderr.rstrip())
 
         result = {
-            "exit_code": proc.returncode,
-            "stdout": proc.stdout,
             "stderr": proc.stderr,
+            "stdout": proc.stdout,
+            "exit_code": proc.returncode,
         }
         return result
 
