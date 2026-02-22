@@ -1,5 +1,6 @@
 import os
 import sys
+import hashlib
 import logging
 import subprocess
 from google.genai import types
@@ -21,6 +22,7 @@ class ExecSkill:
         image: str = "python:3.11-slim",
         default_timeout: int = 60,
         runtime: str = "podman",
+        container_name: str = None,
     ):
         if workspace_dir is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
@@ -31,6 +33,11 @@ class ExecSkill:
         self.image = image
         self.default_timeout = default_timeout
         self.runtime = runtime
+        if container_name is None:
+            suffix = hashlib.md5(self.workspace_dir.encode()).hexdigest()[:8]
+            container_name = f"slonagent_{suffix}"
+        self.container_name = container_name
+        self._running_mounts = None
         self.agent = None
 
         self.tools = [
@@ -103,6 +110,10 @@ class ExecSkill:
             )
         return "\n".join(lines)
 
+    def stop(self):
+        subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
+        logging.info("[exec] Контейнер %s остановлен", self.container_name)
+
     async def dispatch_tool_call(self, tool_call) -> dict:
         if tool_call.name != "exec":
             return {"error": f"Unknown tool: {tool_call.name}"}
@@ -114,28 +125,37 @@ class ExecSkill:
         timeout = tool_call.args.get("timeout", self.default_timeout)
         workdir = tool_call.args.get("workdir", "/workspace")
 
-        host_workspace = self.workspace_dir
-        container_workspace = "/workspace"
-
-        volume_args = ["-v", f"{host_workspace}:{container_workspace}"]
+        mounts = {f"{self.workspace_dir}:/workspace"}
         for host, container in self._mounts().items():
-            volume_args += ["-v", f"{host}:{container}:ro"]
+            mounts.add(f"{host}:{container}:ro")
 
-        docker_cmd = [
-            self.runtime,
-            "run",
-            "--rm",
-            *volume_args,
-            "-w",
-            workdir,
-            self.image,
-            "bash",
-            "-lc",
-            command,
-        ]
+        try:
+            result = subprocess.run(
+                [self.runtime, "inspect", "--format", "{{.State.Running}}", self.container_name],
+                capture_output=True, text=True,
+            )
+            running = result.returncode == 0 and result.stdout.strip() == "true"
+
+            if not running or mounts != self._running_mounts:
+                if running:
+                    logging.info("[exec] Монтирования изменились, перезапуск контейнера")
+                subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
+                volume_args = [arg for mount in mounts for arg in ("-v", mount)]
+                subprocess.run([
+                    self.runtime, "run", "-d",
+                    "--name", self.container_name,
+                    *volume_args,
+                    self.image,
+                    "sleep", "infinity",
+                ], check=True)
+                self._running_mounts = mounts
+                logging.info("[exec] Контейнер %s запущен", self.container_name)
+        except Exception as e:
+            return {"error": f"Не удалось запустить контейнер: {e}"}
+
+        docker_cmd = [self.runtime, "exec", "-w", workdir, self.container_name, "bash", "-lc", command]
 
         logging.info("[exec] Запуск команды: %s", command)
-        logging.info("[exec] %s cmd: %s", self.runtime, " ".join(docker_cmd))
 
         try:
             proc = subprocess.run(
