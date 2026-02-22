@@ -5,6 +5,7 @@ nanobot/
 # Рабочие данные агента (генерируются в рантайме)
 workspace/
 memory/
+config.json
 
 # Python
 venv/

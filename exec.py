@@ -8,7 +8,9 @@ class ExecSkill:
     """
     Скилл для выполнения команд внутри Docker-контейнера.
 
-    По умолчанию в контейнер пробрасывается директория workspace.
+    По умолчанию монтируется директория workspace.
+    Дополнительные папки хост-машины берутся из config.exec.folders
+    и монтируются в контейнер как /mnt/<имя_папки>.
     """
 
     def __init__(
@@ -17,6 +19,7 @@ class ExecSkill:
         image: str = "python:3.11-slim",
         default_timeout: int = 60,
         runtime: str = "podman",
+        config=None,
     ):
         root = os.path.dirname(os.path.abspath(__file__))
         self.workspace_dir = workspace_dir or os.path.join(root, "workspace")
@@ -25,11 +28,16 @@ class ExecSkill:
         self.image = image
         self.default_timeout = default_timeout
         self.runtime = runtime
+        self.config = config
 
         self.tools = [
             types.FunctionDeclaration(
                 name="exec",
-                description="Выполнить команду внутри Docker-контейнера с примонтированной директорией workspace.",
+                description=(
+                    "Выполнить команду внутри Docker-контейнера. "
+                    "Всегда доступна директория /workspace. "
+                    "Дополнительные папки из exec.folders монтируются как /mnt/<имя_папки>."
+                ),
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
@@ -51,6 +59,29 @@ class ExecSkill:
             )
         ]
 
+    def get_context_prompt(self) -> str:
+        extra_folders = []
+        if self.config:
+            extra_folders = self.config.get("exec.folders") or []
+
+        lines = [
+            "## Инструмент exec",
+            "Ты можешь выполнять команды в Docker-контейнере.",
+            "Директория /workspace всегда доступна для чтения и записи.",
+        ]
+        if extra_folders:
+            lines.append("Дополнительно примонтированы папки хост-машины:")
+            for folder in extra_folders:
+                mount_name = os.path.basename(folder.rstrip("/\\")) or "folder"
+                lines.append(f"  - {folder}  →  /mnt/{mount_name}  (только чтение)")
+        else:
+            lines.append(
+                "Дополнительных папок нет. Если нужен доступ к папке на хост-машине, "
+                "попроси пользователя выполнить:\n"
+                "  /config add exec.folders <абсолютный путь к папке>"
+            )
+        return "\n".join(lines)
+
     def dispatch_tool_call(self, tool_call) -> dict:
         if tool_call.name != "exec":
             return {"error": f"Unknown tool: {tool_call.name}"}
@@ -65,12 +96,20 @@ class ExecSkill:
         host_workspace = self.workspace_dir
         container_workspace = "/workspace"
 
+        extra_folders = []
+        if self.config:
+            extra_folders = self.config.get("exec.folders") or []
+
+        volume_args = ["-v", f"{host_workspace}:{container_workspace}"]
+        for folder in extra_folders:
+            mount_name = os.path.basename(folder.rstrip("/\\")) or "folder"
+            volume_args += ["-v", f"{folder}:/mnt/{mount_name}:ro"]
+
         docker_cmd = [
             self.runtime,
             "run",
             "--rm",
-            "-v",
-            f"{host_workspace}:{container_workspace}",
+            *volume_args,
             "-w",
             workdir,
             self.image,
