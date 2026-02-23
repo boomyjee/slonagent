@@ -93,11 +93,12 @@ class ExecSkill(Skill):
         if timeout is None:
             timeout = self.default_timeout
 
+        mounts = self._mounts()
         volume_args = ["-v", f"{self.workspace_dir}:/workspace"]
-        for host, container in self._mounts().items():
+        for host, container in mounts.items():
             volume_args += ["-v", f"{host}:{container}:ro"]
 
-        desired_destinations = {"/workspace"} | {container for _, container in self._mounts().items()}
+        desired_destinations = {"/workspace"} | set(mounts.values())
         env_image = f"{self.container_name}_env"
 
         try:

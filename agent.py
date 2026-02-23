@@ -144,7 +144,7 @@ class Agent:
                 )
                 await send_thinking(response)
 
-            self.messages.append({"role": "model", "parts": [{"text": response.text}]})
+            self.messages.append({"role": "model", "parts": [{"text": response.text or ""}]})
             if transport: await transport.send_message(response.text or "")
 
             for s in self.skills:

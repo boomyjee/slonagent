@@ -1,7 +1,4 @@
-import os
-import sys
-import httpx
-import logging
+import asyncio, os, sys, httpx, logging
 from typing import Annotated
 from agent import Skill, tool
 from google import genai
@@ -49,7 +46,7 @@ class MemorySkill(Skill):
             return
 
         logging.info("Запускаю консолидацию: %d сообщений...", len(messages_to_consolidate))
-        current_memory = "";
+        current_memory = ""
         if os.path.exists(self.memory_file):
             with open(self.memory_file, encoding="utf-8") as f: current_memory = f.read()
 
@@ -84,10 +81,9 @@ class MemorySkill(Skill):
                 *messages_to_consolidate,
                 {"role": "user", "parts": [{"text": "Вызови save_memory."}]},
             ]
-            response = self._client.models.generate_content(
-                model=self.consolidation_model_name,
-                contents=contents,
-                config=config
+            response = await asyncio.to_thread(
+                self._client.models.generate_content,
+                model=self.consolidation_model_name, contents=contents, config=config,
             )
             if not response.function_calls:
                 logging.warning("Консолидация: LLM не вызвала save_memory.")
