@@ -15,7 +15,7 @@ class ExecSkill(Skill):
     ):
         if workspace_dir is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
-            workspace_dir = os.path.join(root, "workspace")
+            workspace_dir = os.path.join(root, "memory", "workspace")
         self.workspace_dir = workspace_dir
         os.makedirs(self.workspace_dir, exist_ok=True)
 
