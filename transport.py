@@ -145,6 +145,7 @@ class TelegramTransport:
         await self._answer(
             f"<blockquote expandable>{html.escape(text)}</blockquote>",
             parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def send_code(self, lang: str, code: str):
