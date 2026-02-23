@@ -130,10 +130,13 @@ class TelegramTransport:
         try:
             await self._current_message.answer(text, parse_mode=parse_mode, **kwargs)
         except Exception as e:
-            if "message is too long" not in str(e):
+            if "message is too long" in str(e):
+                for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
+                    await self._current_message.answer(chunk)
+            elif parse_mode:
+                await self._current_message.answer(text)
+            else:
                 raise
-            for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
-                await self._current_message.answer(chunk)
 
     async def send_message(self, text: str):
         await self._answer(text, parse_mode="Markdown")
