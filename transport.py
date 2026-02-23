@@ -1,3 +1,4 @@
+import html
 import io, os, asyncio, logging, json, mimetypes
 from typing import Annotated
 from aiogram import Bot, Dispatcher
@@ -136,7 +137,7 @@ class TelegramTransport:
 
     async def send_thinking(self, text: str):
         await self._current_message.answer(
-            f"<blockquote expandable>{text}</blockquote>",
+            f"<blockquote expandable>{html.escape(text)}</blockquote>",
             parse_mode="HTML",
         )
 
