@@ -1,4 +1,4 @@
-import os, sys, hashlib, logging, subprocess
+import asyncio, os, sys, hashlib, logging, subprocess
 from typing import Annotated
 from agent import Skill, tool
 from google.genai import types
@@ -71,6 +71,10 @@ class ExecSkill(Skill):
             )
         return "\n".join(lines)
 
+    @staticmethod
+    async def _run(*args, **kwargs):
+        return await asyncio.to_thread(subprocess.run, *args, **kwargs)
+
     def stop(self):
         subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
         logging.info("[exec] Контейнер %s остановлен", self.container_name)
@@ -97,16 +101,16 @@ class ExecSkill(Skill):
         env_image = f"{self.container_name}_env"
 
         try:
-            inspect = subprocess.run(
+            inspect = await self._run(
                 [self.runtime, "inspect", "--format",
                  "{{.State.Running}}\n{{range .Mounts}}{{.Destination}}\n{{end}}",
                  self.container_name],
                 capture_output=True, text=True, encoding="utf-8",
             )
             if inspect.returncode != 0:
-                img = subprocess.run([self.runtime, "image", "exists", env_image], capture_output=True)
+                img = await self._run([self.runtime, "image", "exists", env_image], capture_output=True)
                 image = env_image if img.returncode == 0 else self.image
-                subprocess.run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], check=True)
+                await self._run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], check=True)
                 logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
             else:
                 lines = inspect.stdout.strip().splitlines()
@@ -114,13 +118,13 @@ class ExecSkill(Skill):
                 actual_destinations = {l.strip() for l in lines[1:] if l.strip()}
 
                 if not running:
-                    subprocess.run([self.runtime, "start", self.container_name], check=True)
+                    await self._run([self.runtime, "start", self.container_name], check=True)
                     logging.info("[exec] Контейнер %s запущен", self.container_name)
                 elif actual_destinations != desired_destinations:
                     logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
-                    subprocess.run([self.runtime, "commit", self.container_name, env_image], check=True)
-                    subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
-                    subprocess.run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
+                    await self._run([self.runtime, "commit", self.container_name, env_image], check=True)
+                    await self._run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
+                    await self._run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
                     logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
         except Exception as e:
             return {"error": f"Не удалось запустить контейнер: {e}"}
@@ -129,7 +133,7 @@ class ExecSkill(Skill):
         logging.info("[exec] Запуск команды: %s", command)
 
         try:
-            proc = subprocess.run(
+            proc = await self._run(
                 docker_cmd,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=timeout,
