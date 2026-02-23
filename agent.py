@@ -1,4 +1,4 @@
-import os, inspect, logging, httpx
+import asyncio, os, inspect, logging, httpx
 from typing import Annotated, get_type_hints, get_args, get_origin
 from google import genai
 from google.genai import types
@@ -110,7 +110,10 @@ class Agent:
                 tools=tools,
                 thinking_config=types.ThinkingConfig(include_thoughts=self.include_thoughts),
             )
-            response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
+            response = await asyncio.to_thread(
+                self.client.models.generate_content,
+                model=self.model_name, contents=contents, config=config,
+            )
             await send_thinking(response)
 
             iteration = 0
@@ -130,7 +133,10 @@ class Agent:
                     contents.append({"role": "user", "parts": [{"text": f"Результат {tool_call.name}:\n{result}"}, *extra]})
 
                 iteration += 1
-                response = self.client.models.generate_content(model=self.model_name, contents=contents, config=config)
+                response = await asyncio.to_thread(
+                    self.client.models.generate_content,
+                    model=self.model_name, contents=contents, config=config,
+                )
                 await send_thinking(response)
 
             self.messages.append({"role": "model", "parts": [{"text": response.text}]})
