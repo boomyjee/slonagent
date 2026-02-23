@@ -5,6 +5,7 @@ from memory import MemorySkill
 from exec import ExecSkill
 from config import ConfigSkill
 from skill_manager import SkillManager
+from clawhub import Clawhub
 from agent import Agent
 
 load_dotenv()
@@ -18,6 +19,7 @@ agent = Agent(
         ConfigSkill(),
         MemorySkill(consolidation_model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"]),
         ExecSkill(),
+        Clawhub(),
         SkillManager(),
     ]
 )
