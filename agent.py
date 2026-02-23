@@ -103,7 +103,7 @@ class Agent:
 
         async def send_thinking(response):
             if not transport: return
-            parts = response.candidates[0].content.parts
+            parts = response.candidates[0].content.parts or []
             thought_parts = [p.text for p in parts if getattr(p, "thought", False) and p.text]
             if thought_parts:
                 await transport.send_thinking("\n\n".join(thought_parts))
