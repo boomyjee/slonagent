@@ -72,8 +72,13 @@ class Agent:
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self.client = genai.Client(api_key=api_key, http_options=http_options)
+        self._process_message_lock = asyncio.Lock()
 
     async def process_message(self, message_parts: list, instructions: str = "", transport=None):
+        async with self._process_message_lock:
+            await self._process_message(message_parts, instructions, transport)
+
+    async def _process_message(self, message_parts: list, instructions: str = "", transport=None):
         self.transport = transport
         text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
         logging.info("[agent] incoming: %r", text)
