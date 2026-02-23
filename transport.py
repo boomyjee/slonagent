@@ -101,8 +101,8 @@ class TelegramTransport:
         self._media_group_tasks: dict[str, asyncio.Task] = {}
 
     async def on_tool_call(self, name: str, args: dict):
-        lines = "\n".join(f"  {k}: {v}" for k, v in args.items())
-        call_text = f"<b>[{name}]</b>\n{lines}" if lines else f"<b>[{name}]</b>"
+        lines = "\n".join(f"  {html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
+        call_text = f"<b>[{html.escape(name)}]</b>\n{lines}" if lines else f"<b>[{html.escape(name)}]</b>"
         self._tool_call_text = call_text[:2000]
         self._tool_msg = await self._current_message.answer(
             f"<blockquote expandable>{self._tool_call_text}</blockquote>",
@@ -112,10 +112,10 @@ class TelegramTransport:
 
     async def on_tool_result(self, name: str, result):
         if isinstance(result, dict):
-            parts = [f"<b>[{k}]</b>\n{v}" for k, v in result.items() if v not in (None, "", [], {})]
+            parts = [f"<b>[{html.escape(k)}]</b>\n{html.escape(str(v))}" for k, v in result.items() if v not in (None, "", [], {})]
             result_text = "\n".join(parts) if parts else "(пусто)"
         else:
-            result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2)
+            result_text = html.escape(result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2))
         result_text = result_text[:2000]
         try:
             await self._tool_msg.edit_text(
