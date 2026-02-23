@@ -9,7 +9,7 @@ from google.genai import types
 
 
 class MemorySkill(Skill):
-    def __init__(self, api_key: str, memory_dir: str = None, consolidation_model_name: str = "gemini-3-flash-preview"):
+    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None):
         if memory_dir is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
             memory_dir = os.path.join(root, "memory")
