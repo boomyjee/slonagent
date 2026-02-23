@@ -129,20 +129,26 @@ class TelegramTransport:
         except Exception:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
-    async def send_message(self, text: str):
+    async def _answer(self, text: str, parse_mode: str = None, **kwargs):
         try:
-            await self._current_message.answer(text, parse_mode="Markdown")
-        except Exception:
-            await self._current_message.answer(text)
+            await self._current_message.answer(text, parse_mode=parse_mode, **kwargs)
+        except Exception as e:
+            if "message is too long" not in str(e):
+                raise
+            for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
+                await self._current_message.answer(chunk)
+
+    async def send_message(self, text: str):
+        await self._answer(text, parse_mode="Markdown")
 
     async def send_thinking(self, text: str):
-        await self._current_message.answer(
+        await self._answer(
             f"<blockquote expandable>{html.escape(text)}</blockquote>",
             parse_mode="HTML",
         )
 
     async def send_code(self, lang: str, code: str):
-        await self._current_message.answer(f"```{lang}\n{code}\n```", parse_mode="Markdown")
+        await self._answer(f"```{lang}\n{code}\n```", parse_mode="Markdown")
 
     async def _handle_message(self, message: Message):
         if message.from_user.id not in self.allowed_user_ids:
