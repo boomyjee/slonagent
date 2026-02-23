@@ -127,7 +127,7 @@ class TelegramTransport:
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
         except Exception:
-            pass
+            logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
     async def send_message(self, text: str):
         try:

@@ -26,7 +26,9 @@ class MemorySkill(Skill):
         super().__init__()
 
     def get_context_prompt(self) -> str:
-        memory = open(self.memory_file, encoding="utf-8").read() if os.path.exists(self.memory_file) else ""
+        memory = ""
+        if os.path.exists(self.memory_file):
+            with open(self.memory_file, encoding="utf-8") as f: memory = f.read()
         return (
             "## Долгосрочная память\n"
             f"{memory if memory else '(пока пусто)'}\n\n"
@@ -37,17 +39,19 @@ class MemorySkill(Skill):
     def read_history(self, query: Annotated[str, "Слово или фраза для поиска."]):
         if not os.path.exists(self.history_file):
             return {"result": "История пока пуста."}
-        matches = [line.strip() for line in open(self.history_file, encoding="utf-8") if query.lower() in line.lower()]
+        with open(self.history_file, encoding="utf-8") as f:
+            matches = [line.strip() for line in f if query.lower() in line.lower()]
         return {"result": "\n".join(matches[-10:]) if matches else f"Ничего не найдено по запросу: {query}"}
 
     async def on_message_processed(self, messages: list):
-        keep_count = 0
-        messages_to_consolidate = messages[self._consolidated: -keep_count] if keep_count > 0 else messages[self._consolidated:]
+        messages_to_consolidate = messages[self._consolidated:]
         if not messages_to_consolidate:
             return
 
-        logging.info(f"Запускаю консолидацию: {len(messages_to_consolidate)} сообщений...")
-        current_memory = open(self.memory_file, encoding="utf-8").read() if os.path.exists(self.memory_file) else ""
+        logging.info("Запускаю консолидацию: %d сообщений...", len(messages_to_consolidate))
+        current_memory = "";
+        if os.path.exists(self.memory_file):
+            with open(self.memory_file, encoding="utf-8") as f: current_memory = f.read()
 
         system = f"""Ты — агент консолидации памяти. Вызови инструмент save_memory.
 
@@ -97,7 +101,7 @@ class MemorySkill(Skill):
                 with open(self.memory_file, "w", encoding="utf-8") as f:
                     f.write(update)
 
-            self._consolidated = len(messages) - keep_count
+            self._consolidated = len(messages)
             logging.info("Консолидация завершена.")
         except Exception as e:
-            logging.error(f"Ошибка консолидации: {e}")
+            logging.error("Ошибка консолидации: %s", e)

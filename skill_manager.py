@@ -97,7 +97,7 @@ class MySkill(Skill):
     }
 
     def is_bypass_command(self, text: str) -> bool:
-        return bool(text) and text.split()[0].lstrip("/") in self._COMMANDS
+        return bool(text) and text.startswith("/") and text.split()[0][1:] in self._COMMANDS
 
     def handle_bypass_command(self, text: str) -> str:
         parts = text.split(maxsplit=1)

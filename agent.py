@@ -134,10 +134,13 @@ class Agent:
                 await send_thinking(response)
 
             self.messages.append({"role": "model", "parts": [{"text": response.text}]})
-            if transport: await transport.send_message(response.text)
+            if transport: await transport.send_message(response.text or "")
 
             for s in self.skills:
                 if hasattr(s, "on_message_processed"): await s.on_message_processed(self.messages)
+
+            if len(self.messages) > 40:
+                self.messages = self.messages[-40:]
 
         except Exception as e:
             logging.exception("Ошибка при обращении к Gemini")
