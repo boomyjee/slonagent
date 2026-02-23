@@ -101,13 +101,9 @@ class TelegramTransport:
         self._media_group_tasks: dict[str, asyncio.Task] = {}
 
     async def on_tool_call(self, name: str, args: dict):
-        if not args:
-            self._tool_call_text = f"<b>[{name}]</b>"
-        elif len(args) == 1:
-            self._tool_call_text = f"<b>[{name}]</b> {next(iter(args.values()))}"
-        else:
-            lines = "\n".join(f"  {k}: {v}" for k, v in args.items())
-            self._tool_call_text = f"<b>[{name}]</b>\n{lines}"
+        lines = "\n".join(f"  {k}: {v}" for k, v in args.items())
+        call_text = f"<b>[{name}]</b>\n{lines}" if lines else f"<b>[{name}]</b>"
+        self._tool_call_text = call_text[:2000]
         self._tool_msg = await self._current_message.answer(
             f"<blockquote expandable>{self._tool_call_text}</blockquote>",
             parse_mode="HTML",
@@ -120,6 +116,7 @@ class TelegramTransport:
             result_text = "\n".join(parts) if parts else "(пусто)"
         else:
             result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2)
+        result_text = result_text[:2000]
         try:
             await self._tool_msg.edit_text(
                 f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
