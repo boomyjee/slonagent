@@ -59,10 +59,10 @@ class Skill:
 
 
 class Agent:
-    def __init__(self, model_name: str, include_thoughts: bool = False, api_key: str = None, skills: list = None, max_iterations: int = 20):
+    def __init__(self, model_name: str, api_key: str, memory, skills: list = [], include_thoughts: bool = False, max_iterations: int = 20):
         self.model_name = model_name
         self.include_thoughts = include_thoughts
-        self.skills = skills or []
+        self.skills = [memory] + skills
         self.messages = []
         self.max_iterations = max_iterations
         for skill in self.skills:

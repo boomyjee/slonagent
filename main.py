@@ -10,21 +10,20 @@ from agent import Agent
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-_MEMORY_BACKEND = os.environ.get("MEMORY_BACKEND", "simplemem")
-if _MEMORY_BACKEND == "simplemem":
+if os.environ.get("MEMORY_BACKEND", "simplemem") == "simplemem":
     from simplemem_skill import SimplememSkill
-    memory_skill = SimplememSkill()
+    memory = SimplememSkill()
 else:
     from memory import MemorySkill
-    memory_skill = MemorySkill(consolidation_model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"])
+    memory = MemorySkill(consolidation_model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"])
 
 agent = Agent(
     model_name=os.environ["GEMINI_MODEL"],
-    include_thoughts=True,
     api_key=os.environ["GEMINI_API_KEY"],
+    memory=memory,
+    include_thoughts=True,
     skills=[
         ConfigSkill(),
-        memory_skill,
         ExecSkill(),
         Clawhub(),
         SkillManager(),
