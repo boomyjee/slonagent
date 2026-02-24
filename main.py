@@ -1,7 +1,7 @@
 import asyncio, logging, os
 from dotenv import load_dotenv
 from transport import TelegramTransport
-from memory import MemorySkill
+from simplemem_skill import SimplememSkill
 from exec import ExecSkill
 from config import ConfigSkill
 from skill_manager import SkillManager
@@ -17,7 +17,7 @@ agent = Agent(
     api_key=os.environ["GEMINI_API_KEY"],
     skills=[
         ConfigSkill(),
-        MemorySkill(consolidation_model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"]),
+        SimplememSkill(),
         ExecSkill(),
         Clawhub(),
         SkillManager(),
