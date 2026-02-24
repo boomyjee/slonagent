@@ -6,7 +6,7 @@ from google.genai import types
 
 
 class MemorySkill(Skill):
-    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None, max_context_tokens: int = 200_000, consolidate_tokens: int = 20_000):
+    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000):
         if memory_dir is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
             memory_dir = os.path.join(root, "memory")
@@ -21,7 +21,9 @@ class MemorySkill(Skill):
         self._client = genai.Client(api_key=api_key, http_options=http_options)
         self._turns: list = []
         self._pending: list = []
-        self.max_context_tokens = max_context_tokens
+        self.hard_limit_tokens = hard_limit_tokens
+        self.soft_limit_tokens = soft_limit_tokens
+        self.min_user_turns = min_user_turns
         self.consolidate_tokens = consolidate_tokens
         super().__init__()
 
@@ -55,11 +57,13 @@ class MemorySkill(Skill):
         return total
 
     def get_contents(self) -> list:
-        result, tokens = [], 0
+        result, tokens, user_ids = [], 0, set()
         for turn in reversed(self._turns):
             tokens += self._count_tokens([turn])
-            if tokens > self.max_context_tokens:
-                break
+            if isinstance(turn, dict) and (uid := turn.get("_user_message_id")) is not None:
+                user_ids.add(uid)
+            if tokens > self.hard_limit_tokens:  break
+            if tokens > self.soft_limit_tokens and len(user_ids) >= self.min_user_turns: break
             result.insert(0, turn)
         return result
 
