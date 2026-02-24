@@ -6,7 +6,7 @@ from google.genai import types
 
 
 class MemorySkill(Skill):
-    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None, max_turns: int = 100):
+    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None, max_turns: int = 100, consolidate_every: int = 10):
         if memory_dir is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
             memory_dir = os.path.join(root, "memory")
@@ -22,6 +22,7 @@ class MemorySkill(Skill):
         self._turns: list = []
         self._pending: list = []
         self.max_turns = max_turns
+        self.consolidate_every = consolidate_every
         super().__init__()
 
     def get_context_prompt(self) -> str:
@@ -48,28 +49,26 @@ class MemorySkill(Skill):
 
     async def add_turn(self, turn):
         self._turns.append(turn)
-        self._pending.append(turn)
 
-        if isinstance(turn, dict) and turn.get("role") == "model":
-            await self._consolidate()
+        if isinstance(turn, dict):
+            self._pending.append(turn)
+            if turn.get("role") == "model" and len(self._pending) >= self.consolidate_every:
+                await self._consolidate(self._pending)
+                self._pending = []
 
-    async def _consolidate(self):
-        if not self._pending:
-            return
-
-        logging.info("Запускаю консолидацию: %d сообщений...", len(self._pending))
+    async def _consolidate(self, pending):
+        logging.info("Запускаю консолидацию: %d сообщений...", len(pending))
         current_memory = ""
         if os.path.exists(self.memory_file):
             with open(self.memory_file, encoding="utf-8") as f: current_memory = f.read()
 
-        system = f"""Ты — агент консолидации памяти. Вызови инструмент save_memory.
-
-## Текущая память
-{current_memory or "(пусто)"}
-
-Передай в save_memory:
-- history_entry: краткая выжимка диалога (2–5 предложений, начни с [YYYY-MM-DD HH:MM]).
-- memory_update: полный обновлённый текст MEMORY.md (вплети новые факты в старые)."""
+        system = (
+            "Ты — агент консолидации памяти. Вызови инструмент save_memory.\n\n"
+            f"## Текущая память\n{current_memory or '(пусто)'}\n\n"
+            "Передай в save_memory:\n"
+            "- history_entry: краткая выжимка диалога (2–5 предложений, начни с [YYYY-MM-DD HH:MM]).\n"
+            "- memory_update: полный обновлённый текст MEMORY.md (вплети новые факты в старые)."
+        )
 
         save_memory_tool = types.FunctionDeclaration(
             name="save_memory",
@@ -91,7 +90,7 @@ class MemorySkill(Skill):
             )
             text_only = [
                 {"role": t["role"], "parts": [p for p in t["parts"] if "text" in p]}
-                for t in self._pending
+                for t in pending
             ]
             contents = [
                 *text_only,
@@ -113,7 +112,6 @@ class MemorySkill(Skill):
                 with open(self.memory_file, "w", encoding="utf-8") as f:
                     f.write(update)
 
-            self._pending.clear()
             logging.info("Консолидация завершена.")
         except Exception as e:
             logging.error("Ошибка консолидации: %s", e)
