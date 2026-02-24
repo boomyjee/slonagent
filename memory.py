@@ -6,7 +6,7 @@ from google.genai import types
 
 
 class MemorySkill(Skill):
-    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None):
+    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None, max_turns: int = 100):
         if memory_dir is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
             memory_dir = os.path.join(root, "memory")
@@ -21,6 +21,7 @@ class MemorySkill(Skill):
         self._client = genai.Client(api_key=api_key, http_options=http_options)
         self._turns: list = []
         self._pending: list = []
+        self.max_turns = max_turns
         super().__init__()
 
     def get_context_prompt(self) -> str:
@@ -42,24 +43,14 @@ class MemorySkill(Skill):
         return {"result": "\n".join(matches[-10:]) if matches else f"Ничего не найдено по запросу: {query}"}
 
     def get_contents(self) -> list:
-        return self._turns[-100:]
+        self._turns = self._turns[-self.max_turns:]
+        return self._turns
 
     async def add_turn(self, turn):
         self._turns.append(turn)
-        if len(self._turns) > 500:
-            self._turns = self._turns[-500:]
+        self._pending.append(turn)
 
-        if not isinstance(turn, dict):
-            return
-
-        role = turn.get("role")
-        parts = turn.get("parts", [])
-        text = " ".join(p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p).strip()
-
-        if role in ("user", "model") and text:
-            self._pending.append({"role": role, "parts": [{"text": text}]})
-
-        if role == "model":
+        if isinstance(turn, dict) and turn.get("role") == "model":
             await self._consolidate()
 
     async def _consolidate(self):
@@ -98,8 +89,12 @@ class MemorySkill(Skill):
                 system_instruction=system,
                 tools=[types.Tool(function_declarations=[save_memory_tool])],
             )
+            text_only = [
+                {"role": t["role"], "parts": [p for p in t["parts"] if "text" in p]}
+                for t in self._pending
+            ]
             contents = [
-                *self._pending,
+                *text_only,
                 {"role": "user", "parts": [{"text": "Вызови save_memory."}]},
             ]
             response = await asyncio.to_thread(
