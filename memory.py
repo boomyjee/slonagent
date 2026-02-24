@@ -19,7 +19,8 @@ class MemorySkill(Skill):
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
-        self._consolidated = 0
+        self._turns: list = []
+        self._pending: list = []
         super().__init__()
 
     def get_context_prompt(self) -> str:
@@ -40,12 +41,32 @@ class MemorySkill(Skill):
             matches = [line.strip() for line in f if query.lower() in line.lower()]
         return {"result": "\n".join(matches[-10:]) if matches else f"Ничего не найдено по запросу: {query}"}
 
-    async def on_message_processed(self, messages: list):
-        messages_to_consolidate = messages[self._consolidated:]
-        if not messages_to_consolidate:
+    def get_contents(self) -> list:
+        return self._turns[-100:]
+
+    async def add_turn(self, turn):
+        self._turns.append(turn)
+        if len(self._turns) > 500:
+            self._turns = self._turns[-500:]
+
+        if not isinstance(turn, dict):
             return
 
-        logging.info("Запускаю консолидацию: %d сообщений...", len(messages_to_consolidate))
+        role = turn.get("role")
+        parts = turn.get("parts", [])
+        text = " ".join(p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p).strip()
+
+        if role in ("user", "model") and text:
+            self._pending.append({"role": role, "parts": [{"text": text}]})
+
+        if role == "model":
+            await self._consolidate()
+
+    async def _consolidate(self):
+        if not self._pending:
+            return
+
+        logging.info("Запускаю консолидацию: %d сообщений...", len(self._pending))
         current_memory = ""
         if os.path.exists(self.memory_file):
             with open(self.memory_file, encoding="utf-8") as f: current_memory = f.read()
@@ -78,7 +99,7 @@ class MemorySkill(Skill):
                 tools=[types.Tool(function_declarations=[save_memory_tool])],
             )
             contents = [
-                *messages_to_consolidate,
+                *self._pending,
                 {"role": "user", "parts": [{"text": "Вызови save_memory."}]},
             ]
             response = await asyncio.to_thread(
@@ -97,7 +118,7 @@ class MemorySkill(Skill):
                 with open(self.memory_file, "w", encoding="utf-8") as f:
                     f.write(update)
 
-            self._consolidated = len(messages)
+            self._pending.clear()
             logging.info("Консолидация завершена.")
         except Exception as e:
             logging.error("Ошибка консолидации: %s", e)

@@ -22,7 +22,8 @@ class SimplememSkill(Skill):
             lancedb_path=os.path.join(base, "lancedb"),
         )
         self._session_id: str | None = None
-        self._recorded: int = 0
+        self._turns: list = []
+        self._pending: list = []
 
     def get_context_prompt(self) -> str:
         try:
@@ -44,36 +45,43 @@ class SimplememSkill(Skill):
     def memory_stats(self) -> dict:
         return self._orch.get_stats()
 
-    async def on_message_processed(self, messages: list):
-        new_messages = messages[self._recorded:]
-        if not new_messages:
+    def get_contents(self) -> list:
+        return self._turns[-100:]
+
+    async def add_turn(self, turn):
+        self._turns.append(turn)
+        if len(self._turns) > 500:
+            self._turns = self._turns[-500:]
+
+        if not isinstance(turn, dict):
             return
 
+        role = turn.get("role")
+        parts = turn.get("parts", [])
+        text = " ".join(p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p).strip()
+
+        if role in ("user", "model") and text:
+            self._pending.append((role, text))
+
+        if role == "model":
+            await self._flush_session()
+
+    async def _flush_session(self):
+        if not self._pending:
+            return
         try:
             if self._session_id is None:
-                first_user = next((m for m in new_messages if m.get("role") == "user"), None)
-                user_prompt = ""
-                if first_user:
-                    parts = first_user.get("parts", [])
-                    user_prompt = next(
-                        (p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p), ""
-                    )
+                user_prompt = next((t for r, t in self._pending if r == "user"), "")
                 result = await self._orch.start_session(
                     content_session_id=str(uuid.uuid4()),
                     user_prompt=user_prompt,
                 )
                 self._session_id = result["memory_session_id"]
 
-            for msg in new_messages:
-                role = msg.get("role", "user")
-                parts = msg.get("parts", [])
-                text = " ".join(
-                    p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p
-                ).strip()
-                if text:
-                    await self._orch.record_message(self._session_id, text, role=role)
+            for role, text in self._pending:
+                await self._orch.record_message(self._session_id, text, role=role)
+            self._pending.clear()
 
-            self._recorded = len(messages)
             await self._orch.stop_session(self._session_id)
             await self._orch.end_session(self._session_id)
             self._session_id = None

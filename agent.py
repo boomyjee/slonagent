@@ -62,8 +62,8 @@ class Agent:
     def __init__(self, model_name: str, api_key: str, memory, skills: list = [], include_thoughts: bool = False, max_iterations: int = 20):
         self.model_name = model_name
         self.include_thoughts = include_thoughts
+        self.memory = memory
         self.skills = [memory] + skills
-        self.messages = []
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
@@ -88,7 +88,7 @@ class Agent:
                 if transport: await transport.send_message(skill.handle_bypass_command(text))
                 return
 
-        self.messages.append({"role": "user", "parts": message_parts})
+        await self.memory.add_turn({"role": "user", "parts": message_parts})
 
         tools = []
         tool_to_skill = {}
@@ -97,7 +97,6 @@ class Agent:
                 tools.append(types.Tool(function_declarations=[f]))
                 tool_to_skill[f.name] = s
 
-        contents = self.messages[-20:]
         skill_context = "\n\n".join(s.get_context_prompt() for s in self.skills if hasattr(s, "get_context_prompt"))
         system = "\n\n".join(filter(None, [instructions, skill_context]))
 
@@ -117,13 +116,13 @@ class Agent:
             )
             response = await asyncio.to_thread(
                 self.client.models.generate_content,
-                model=self.model_name, contents=contents, config=config,
+                model=self.model_name, contents=self.memory.get_contents(), config=config,
             )
             await send_thinking(response)
 
             iteration = 0
             while response.function_calls and iteration < self.max_iterations:
-                contents.append(response.candidates[0].content)
+                await self.memory.add_turn(response.candidates[0].content)
                 for tool_call in response.function_calls:
                     logging.info("Инструмент: %s", tool_call.name)
                     skill = tool_to_skill.get(tool_call.name)
@@ -135,23 +134,17 @@ class Agent:
                     result = await skill.dispatch_tool_call(tool_call)
                     if transport: await transport.on_tool_result(tool_call.name, result)
                     extra = result.pop("_parts", []) if isinstance(result, dict) else []
-                    contents.append({"role": "user", "parts": [{"text": f"Результат {tool_call.name}:\n{result}"}, *extra]})
+                    await self.memory.add_turn({"role": "user", "parts": [{"text": f"Результат {tool_call.name}:\n{result}"}, *extra]})
 
                 iteration += 1
                 response = await asyncio.to_thread(
                     self.client.models.generate_content,
-                    model=self.model_name, contents=contents, config=config,
+                    model=self.model_name, contents=self.memory.get_contents(), config=config,
                 )
                 await send_thinking(response)
 
-            self.messages.append({"role": "model", "parts": [{"text": response.text or ""}]})
+            await self.memory.add_turn({"role": "model", "parts": [{"text": response.text or ""}]})
             if transport: await transport.send_message(response.text or "")
-
-            for s in self.skills:
-                if hasattr(s, "on_message_processed"): await s.on_message_processed(self.messages)
-
-            if len(self.messages) > 40:
-                self.messages = self.messages[-40:]
 
         except Exception as e:
             logging.exception("Ошибка при обращении к Gemini")
