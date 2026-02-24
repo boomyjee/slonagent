@@ -6,7 +6,6 @@ from exec import ExecSkill
 from config import ConfigSkill
 from skill_manager import SkillManager
 from clawhub import Clawhub
-from lightrag_skill import LightRAGSkill
 from agent import Agent
 
 load_dotenv()
@@ -22,7 +21,6 @@ agent = Agent(
         ExecSkill(),
         Clawhub(),
         SkillManager(),
-        LightRAGSkill(),
     ]
 )
 transport = TelegramTransport(
