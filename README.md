@@ -75,6 +75,7 @@ GEMINI_MODEL=gemini-2.0-flash
 GEMINI_MEMORY_MODEL=gemini-2.0-flash
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_USERS=123456789
+MEMORY_BACKEND=simplemem   # simplemem (по умолчанию) или legacy
 
 # Опционально, если нужен прокси
 HTTP_PROXY=http://user:pass@host:port
