@@ -74,11 +74,11 @@ class Agent:
         self.client = genai.Client(api_key=api_key, http_options=http_options)
         self._process_message_lock = asyncio.Lock()
 
-    async def process_message(self, message_parts: list, instructions: str = "", transport=None):
+    async def process_message(self, message_parts: list, instructions: str = "", transport=None, user_message_id=None):
         async with self._process_message_lock:
-            await self._process_message(message_parts, instructions, transport)
+            await self._process_message(message_parts, instructions, transport, user_message_id)
 
-    async def _process_message(self, message_parts: list, instructions: str = "", transport=None):
+    async def _process_message(self, message_parts: list, instructions: str = "", transport=None, user_message_id=None):
         self.transport = transport
         text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
         logging.info("[agent] incoming: %r", text)
@@ -88,7 +88,7 @@ class Agent:
                 if transport: await transport.send_message(skill.handle_bypass_command(text))
                 return
 
-        await self.memory.add_turn({"role": "user", "parts": message_parts})
+        await self.memory.add_turn({"role": "user", "parts": message_parts, "_user_message_id": user_message_id})
 
         tools = []
         tool_to_skill = {}

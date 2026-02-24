@@ -233,6 +233,7 @@ class TelegramTransport:
                 message_parts=message_parts,
                 instructions=TELEGRAM_INSTRUCTIONS,
                 transport=self,
+                user_message_id=first.message_id,
             )
         except Exception as e:
             logging.exception("Error processing message")

@@ -6,7 +6,7 @@ from google.genai import types
 
 
 class MemorySkill(Skill):
-    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None, max_turns: int = 100, consolidate_every: int = 10):
+    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None, max_context_tokens: int = 200_000, consolidate_tokens: int = 20_000):
         if memory_dir is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
             memory_dir = os.path.join(root, "memory")
@@ -21,8 +21,8 @@ class MemorySkill(Skill):
         self._client = genai.Client(api_key=api_key, http_options=http_options)
         self._turns: list = []
         self._pending: list = []
-        self.max_turns = max_turns
-        self.consolidate_every = consolidate_every
+        self.max_context_tokens = max_context_tokens
+        self.consolidate_tokens = consolidate_tokens
         super().__init__()
 
     def get_context_prompt(self) -> str:
@@ -43,16 +43,32 @@ class MemorySkill(Skill):
             matches = [line.strip() for line in f if query.lower() in line.lower()]
         return {"result": "\n".join(matches[-10:]) if matches else f"Ничего не найдено по запросу: {query}"}
 
+    @staticmethod
+    def _count_tokens(turns: list) -> int:
+        total = 0
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            for part in turn.get("parts", []):
+                if isinstance(part, dict) and "text" in part:
+                    total += len(part["text"]) // 4
+        return total
+
     def get_contents(self) -> list:
-        self._turns = self._turns[-self.max_turns:]
-        return self._turns
+        result, tokens = [], 0
+        for turn in reversed(self._turns):
+            tokens += self._count_tokens([turn])
+            if tokens > self.max_context_tokens:
+                break
+            result.insert(0, turn)
+        return result
 
     async def add_turn(self, turn):
         self._turns.append(turn)
 
         if isinstance(turn, dict):
             self._pending.append(turn)
-            if turn.get("role") == "model" and len(self._pending) >= self.consolidate_every:
+            if turn.get("role") == "model" and self._count_tokens(self._pending) >= self.consolidate_tokens:
                 await self._consolidate(self._pending)
                 self._pending = []
 
