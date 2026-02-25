@@ -1,15 +1,16 @@
 import asyncio, logging, os, sys, uuid
 from typing import Annotated
-from agent import Skill, tool
+from agent import tool
+from memory import BaseMemory
 
 _LIB = os.path.join(os.path.dirname(__file__), "lib", "SimpleMem")
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 
-class SimplememSkill(Skill):
-    def __init__(self, memory_dir: str = None):
-        super().__init__()
+class SimplememSkill(BaseMemory):
+    def __init__(self, memory_dir: str = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000):
+        super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens)
 
         root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
         base = memory_dir or os.path.join(root, "memory", "simplemem")
@@ -21,9 +22,6 @@ class SimplememSkill(Skill):
             db_path=os.path.join(base, "cross_memory.db"),
             lancedb_path=os.path.join(base, "lancedb"),
         )
-        self._session_id: str | None = None
-        self._turns: list = []
-        self._pending: list = []
 
     def get_context_prompt(self) -> str:
         try:
@@ -45,46 +43,28 @@ class SimplememSkill(Skill):
     def memory_stats(self) -> dict:
         return self._orch.get_stats()
 
-    def get_contents(self) -> list:
-        return self._turns[-100:]
-
-    async def add_turn(self, turn):
-        self._turns.append(turn)
-        if len(self._turns) > 500:
-            self._turns = self._turns[-500:]
-
-        if not isinstance(turn, dict):
-            return
-
-        role = turn.get("role")
-        parts = turn.get("parts", [])
-        text = " ".join(p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p).strip()
-
-        if role in ("user", "model") and text:
-            self._pending.append((role, text))
-
-        if role == "model":
-            await self._flush_session()
-
-    async def _flush_session(self):
-        if not self._pending:
+    async def _consolidate(self, pending):
+        messages = [
+            (t["role"], " ".join(p.get("text", "") for p in t.get("parts", []) if isinstance(p, dict) and "text" in p).strip())
+            for t in pending
+            if isinstance(t, dict) and t.get("role") in ("user", "model")
+        ]
+        messages = [(role, text) for role, text in messages if text]
+        if not messages:
             return
         try:
-            if self._session_id is None:
-                user_prompt = next((t for r, t in self._pending if r == "user"), "")
-                result = await self._orch.start_session(
-                    content_session_id=str(uuid.uuid4()),
-                    user_prompt=user_prompt,
-                )
-                self._session_id = result["memory_session_id"]
+            user_prompt = next((text for role, text in messages if role == "user"), "")
+            result = await self._orch.start_session(
+                content_session_id=str(uuid.uuid4()),
+                user_prompt=user_prompt,
+            )
+            session_id = result["memory_session_id"]
 
-            for role, text in self._pending:
-                await self._orch.record_message(self._session_id, text, role=role)
-            self._pending.clear()
+            for role, text in messages:
+                await self._orch.record_message(session_id, text, role=role)
 
-            await self._orch.stop_session(self._session_id)
-            await self._orch.end_session(self._session_id)
-            self._session_id = None
+            await self._orch.stop_session(session_id)
+            await self._orch.end_session(session_id)
             logging.info("[SimplememSkill] сессия сохранена.")
         except Exception as e:
             logging.error("[SimplememSkill] ошибка: %s", e)
