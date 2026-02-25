@@ -16,11 +16,17 @@ class SimpleMemMemory(BaseMemory):
         base = memory_dir or os.path.join(root, "memory", "simplemem")
         os.makedirs(base, exist_ok=True)
 
+        from main import SimpleMemSystem
         from cross.orchestrator import create_orchestrator
+
+        simplemem = SimpleMemSystem(
+            db_path=os.path.join(base, "simplemem_lancedb"),
+        )
         self._orch = create_orchestrator(
             project="slonagent",
             db_path=os.path.join(base, "cross_memory.db"),
             lancedb_path=os.path.join(base, "lancedb"),
+            simplemem=simplemem,
         )
 
     def get_context_prompt(self) -> str:
