@@ -1,14 +1,14 @@
 import asyncio, logging, os, sys, uuid
 from typing import Annotated
 from agent import tool
-from memory import BaseMemory
+from src.memory.base import BaseMemory
 
-_LIB = os.path.join(os.path.dirname(__file__), "lib", "SimpleMem")
+_LIB = os.path.join(os.path.dirname(__file__), "..", "..", "lib", "SimpleMem")
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 
-class SimplememSkill(BaseMemory):
+class SimpleMemMemory(BaseMemory):
     def __init__(self, memory_dir: str = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000):
         super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens)
 
@@ -29,7 +29,7 @@ class SimplememSkill(BaseMemory):
             if ctx:
                 return f"## Долгосрочная память\n{ctx}"
         except Exception as e:
-            logging.debug("[SimplememSkill] get_context_for_prompt: %s", e)
+            logging.debug("[SimpleMemMemory] get_context_for_prompt: %s", e)
         return ""
 
     @tool("Семантический поиск по долгосрочной памяти прошлых диалогов.")
@@ -65,6 +65,6 @@ class SimplememSkill(BaseMemory):
 
             await self._orch.stop_session(session_id)
             await self._orch.end_session(session_id)
-            logging.info("[SimplememSkill] сессия сохранена.")
+            logging.info("[SimpleMemMemory] сессия сохранена.")
         except Exception as e:
-            logging.error("[SimplememSkill] ошибка: %s", e)
+            logging.error("[SimpleMemMemory] ошибка: %s", e)

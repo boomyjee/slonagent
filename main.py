@@ -11,11 +11,11 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 if os.environ.get("MEMORY_BACKEND", "simplemem") == "simplemem":
-    from simplemem_skill import SimplememSkill
-    memory = SimplememSkill()
+    from src.memory.simplemem import SimpleMemMemory
+    memory = SimpleMemMemory()
 else:
-    from memory import MemorySkill
-    memory = MemorySkill(consolidation_model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"])
+    from src.memory.file import FileMemory
+    memory = FileMemory(consolidation_model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"])
 
 agent = Agent(
     model_name=os.environ["GEMINI_MODEL"],

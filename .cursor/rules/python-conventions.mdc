@@ -1,0 +1,33 @@
+---
+description: Python-конвенции проекта: структура папок, именование файлов и классов
+alwaysApply: true
+---
+
+# Python-конвенции проекта
+
+## Структура пакетов
+
+`__init__.py` файлы **не создаём**. Используем namespace packages (Python 3.3+).
+
+## Именование файлов и классов
+
+Файл называется по смыслу модуля в `snake_case`, класс внутри — в `PascalCase`:
+
+| Файл | Класс |
+|------|-------|
+| `src/memory/base.py` | `BaseMemory` |
+| `src/memory/file.py` | `FileMemory` |
+| `src/memory/simplemem.py` | `SimpleMemMemory` |
+
+## Импорты
+
+Используем абсолютные импорты от корня проекта (где лежит `main.py`):
+
+```python
+# ✅ GOOD
+from src.memory.base import BaseMemory
+from src.memory.simplemem import SimpleMemMemory
+
+# ❌ BAD
+from .base import BaseMemory
+```
