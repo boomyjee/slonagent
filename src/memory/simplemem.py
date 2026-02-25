@@ -9,23 +9,28 @@ if _LIB not in sys.path:
 
 
 class SimpleMemMemory(BaseMemory):
-    def __init__(self, memory_dir: str = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000):
+    def __init__(self, model_name: str, api_key: str, memory_dir: str = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000):
         memory_dir = memory_dir or os.path.join(os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__)), "memory", "simplemem")
         super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens, memory_dir=memory_dir)
 
         from main import SimpleMemSystem
         self._simplemem = SimpleMemSystem(
+            api_key=api_key,
+            model=model_name,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             db_path=os.path.join(memory_dir, "lancedb"),
+            enable_planning=True,
         )
+
+    def _search(self, query: str) -> list[str]:
+        entries = self._simplemem.hybrid_retriever.retrieve(query)
+        return [e.lossless_restatement for e in entries if e.lossless_restatement]
 
     def get_context_prompt(self, user_text: str = "") -> str:
         if not user_text:
             return ""
         try:
-            entries = self._simplemem.vector_store.semantic_search(user_text, top_k=10)
-            if not entries:
-                return ""
-            lines = [e.lossless_restatement for e in entries if e.lossless_restatement]
+            lines = self._search(user_text)
             if not lines:
                 return ""
             return "## Релевантные факты из памяти\n" + "\n".join(f"- {l}" for l in lines)
@@ -36,10 +41,10 @@ class SimpleMemMemory(BaseMemory):
     @tool("Семантический поиск по долгосрочной памяти прошлых диалогов.")
     def search_memory(self, query: Annotated[str, "Поисковый запрос на естественном языке"]) -> dict:
         try:
-            entries = self._simplemem.vector_store.semantic_search(query, top_k=10)
-            if not entries:
+            lines = self._search(query)
+            if not lines:
                 return {"result": "Ничего не найдено."}
-            return {"results": [{"content": e.lossless_restatement} for e in entries]}
+            return {"results": [{"content": l} for l in lines]}
         except Exception as e:
             logging.error("[SimpleMemMemory] search_memory: %s", e)
             return {"error": str(e)}
