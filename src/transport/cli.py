@@ -8,6 +8,9 @@ class CliTransport:
     async def send_message(self, text: str):
         print(f"\nАгент: {text}\n")
 
+    async def send_system_prompt(self, text: str):
+        print(f"[system]\n{text}\n")
+
     async def send_thinking(self, text: str):
         print(f"[думает...]\n")
 

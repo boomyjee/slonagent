@@ -127,30 +127,37 @@ class TelegramTransport:
         except Exception:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
-    async def _answer(self, text: str, parse_mode: str = None, **kwargs):
-        try:
-            await self._current_message.answer(text, parse_mode=parse_mode, **kwargs)
-        except Exception as e:
-            if "message is too long" in str(e):
-                for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
-                    await self._current_message.answer(chunk, link_preview_options=self._no_link_preview)
-            elif parse_mode:
-                await self._current_message.answer(text, link_preview_options=self._no_link_preview)
-            else:
-                raise
+    async def _answer(self, text: str, expandable: bool = False, prefix: str = ""):
+        max_chunk = 4000
+        if expandable:
+            for chunk in [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]:
+                await self._current_message.answer(
+                    f"<blockquote expandable>{html.escape(prefix + chunk)}</blockquote>",
+                    parse_mode="HTML",
+                    link_preview_options=self._no_link_preview,
+                )
+        else:
+            try:
+                await self._current_message.answer(text, parse_mode="Markdown",
+                                                   link_preview_options=self._no_link_preview)
+            except Exception as e:
+                if "message is too long" in str(e):
+                    for chunk in [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]:
+                        await self._current_message.answer(chunk, link_preview_options=self._no_link_preview)
+                else:
+                    await self._current_message.answer(text, link_preview_options=self._no_link_preview)
 
     async def send_message(self, text: str):
-        await self._answer(text, parse_mode="Markdown")
+        await self._answer(text)
+
+    async def send_system_prompt(self, text: str):
+        await self._answer(text, expandable=True, prefix="🔧 ")
 
     async def send_thinking(self, text: str):
-        await self._answer(
-            f"<blockquote expandable>{html.escape(text)}</blockquote>",
-            parse_mode="HTML",
-            link_preview_options=self._no_link_preview,
-        )
+        await self._answer(text, expandable=True)
 
     async def send_code(self, lang: str, code: str):
-        await self._answer(f"```{lang}\n{code}\n```", parse_mode="Markdown")
+        await self._answer(f"```{lang}\n{code}\n```")
 
     async def _handle_message(self, message: Message):
         if message.from_user.id not in self.allowed_user_ids:

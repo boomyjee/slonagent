@@ -104,7 +104,7 @@ class Agent:
         skill_contexts = [s.get_context_prompt(user_text) for s in self.skills]
         system = "\n\n".join(filter(None, [instructions, *skill_contexts]))
 
-        await transport.send_thinking(system)
+        await transport.send_system_prompt(system)
 
         async def send_thinking(response):
             if not transport: return
