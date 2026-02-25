@@ -1,4 +1,4 @@
-import html
+import html, sys
 import io, os, asyncio, logging, json, mimetypes
 from typing import Annotated
 from aiogram import Bot, Dispatcher
@@ -248,6 +248,10 @@ class TelegramTransport:
 class CliTransport:
     def __init__(self, agent):
         self.agent = agent
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8")
 
     async def send_message(self, text: str):
         print(f"\nАгент: {text}\n")

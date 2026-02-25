@@ -1,6 +1,6 @@
-import asyncio, logging, os
+import asyncio, logging, os, sys
 from dotenv import load_dotenv
-from transport import TelegramTransport
+from transport import TelegramTransport, CliTransport
 from exec import ExecSkill
 from config_skill import ConfigSkill
 from skill_manager import SkillManager
@@ -29,9 +29,12 @@ agent = Agent(
         SkillManager(),
     ]
 )
-transport = TelegramTransport(
-    bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
-    allowed_user_ids={int(uid) for uid in os.environ["TELEGRAM_ALLOWED_USERS"].split(",")},
-    agent=agent,
-)
+if "--cli" in sys.argv:
+    transport = CliTransport(agent)
+else:
+    transport = TelegramTransport(
+        bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
+        allowed_user_ids={int(uid) for uid in os.environ["TELEGRAM_ALLOWED_USERS"].split(",")},
+        agent=agent,
+    )
 asyncio.run(transport.start())

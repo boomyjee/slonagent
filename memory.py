@@ -84,7 +84,7 @@ class MemorySkill(Skill):
             if tokens > self.hard_limit_tokens:  break
             if tokens > self.soft_limit_tokens and len(user_ids) >= self.min_user_turns: break
             result.insert(0, turn)
-        return result
+        return [{k: v for k, v in t.items() if not k.startswith("_")} if isinstance(t, dict) else t for t in result]
 
     async def add_turn(self, turn):
         self._turns.append(turn)
