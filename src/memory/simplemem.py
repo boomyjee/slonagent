@@ -19,18 +19,14 @@ class SimpleMemMemory(BaseMemory):
             model=model_name,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             db_path=os.path.join(memory_dir, "lancedb"),
-            enable_planning=True,
         )
-
-    def _search(self, query: str) -> list[str]:
-        entries = self._simplemem.hybrid_retriever.retrieve(query)
-        return [e.lossless_restatement for e in entries if e.lossless_restatement]
 
     def get_context_prompt(self, user_text: str = "") -> str:
         if not user_text:
             return ""
         try:
-            lines = self._search(user_text)
+            entries = self._simplemem.vector_store.semantic_search(user_text, top_k=10)
+            lines = [e.lossless_restatement for e in entries if e.lossless_restatement]
             if not lines:
                 return ""
             return "## Релевантные факты из памяти\n" + "\n".join(f"- {l}" for l in lines)
@@ -41,7 +37,8 @@ class SimpleMemMemory(BaseMemory):
     @tool("Семантический поиск по долгосрочной памяти прошлых диалогов.")
     def search_memory(self, query: Annotated[str, "Поисковый запрос на естественном языке"]) -> dict:
         try:
-            lines = self._search(query)
+            entries = self._simplemem.vector_store.semantic_search(query, top_k=10)
+            lines = [e.lossless_restatement for e in entries if e.lossless_restatement]
             if not lines:
                 return {"result": "Ничего не найдено."}
             return {"results": [{"content": l} for l in lines]}
