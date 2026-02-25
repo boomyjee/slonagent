@@ -23,6 +23,7 @@ class Skill:
                                     items=types.Schema(type=_GEMINI_TYPES.get(get_args(hint)[0], types.Type.STRING)))
             return types.Schema(type=_GEMINI_TYPES.get(hint, types.Type.STRING), description=desc)
 
+        class_name = type(self).__name__.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider")
         self.tools = []
         for name, fn in inspect.getmembers(type(self), predicate=inspect.isfunction):
             if not getattr(fn, "_is_tool", False): continue
@@ -36,12 +37,13 @@ class Skill:
                 for k in params
             }
             required = [k for k, p in params.items() if p.default is inspect.Parameter.empty]
+            tool_name = f"{class_name}_{name}".lower()
             self.tools.append(types.FunctionDeclaration(
-                name=name,
+                name=tool_name,
                 description=fn._tool_description,
                 parameters=types.Schema(type=types.Type.OBJECT, properties=properties, required=required),
             ))
-            self._tool_names.add(name)
+            self._tool_names.add(tool_name)
 
     def get_context_prompt(self, user_text: str = "") -> str:
         return ""
@@ -53,7 +55,8 @@ class Skill:
         if tool_call.name not in self._tool_names:
             return {"error": f"Unknown tool: {tool_call.name}"}
 
-        method = getattr(self, tool_call.name)
+        method_name = tool_call.name.split("_", 1)[1]
+        method = getattr(self, method_name)
         args = dict(tool_call.args or {})
 
         if inspect.iscoroutinefunction(method):
