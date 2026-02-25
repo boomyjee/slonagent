@@ -8,12 +8,6 @@ from agent import Skill, tool
 from google.genai import types
 
 
-TELEGRAM_INSTRUCTIONS = (
-    "Форматируй ответы в Telegram Markdown: "
-    "*жирный*, _курсив_, `inline-код`, ```блок кода```. "
-    "Команды, которые нужно скопировать, всегда оборачивай в `inline-код`. "
-    "Не используй ** для жирного."
-)
 
 
 class TelegramSkill(Skill):
@@ -21,6 +15,14 @@ class TelegramSkill(Skill):
         self.bot = bot
         self._message = None
         super().__init__()
+
+    def get_context_prompt(self, user_text: str = "") -> str:
+        return (
+            "Форматируй ответы в Telegram Markdown: "
+            "*жирный*, _курсив_, `inline-код`, ```блок кода```. "
+            "Команды, которые нужно скопировать, всегда оборачивай в `inline-код`. "
+            "Не используй ** для жирного."
+        )
 
     def set_message(self, message):
         self._message = message
@@ -96,7 +98,7 @@ class TelegramTransport:
 
         self._skill = TelegramSkill(self.bot)
         self._skill.agent = agent
-        agent.skills.append(self._skill)
+        agent.skills.insert(0, self._skill)
 
         self._media_groups: dict[str, list[Message]] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
@@ -238,7 +240,6 @@ class TelegramTransport:
         try:
             await self.agent.process_message(
                 message_parts=message_parts,
-                instructions=TELEGRAM_INSTRUCTIONS,
                 transport=self,
                 user_message_id=first.message_id,
             )

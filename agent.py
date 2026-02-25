@@ -77,11 +77,11 @@ class Agent:
         self.client = genai.Client(api_key=api_key, http_options=http_options)
         self._process_message_lock = asyncio.Lock()
 
-    async def process_message(self, message_parts: list, instructions: str = "", transport=None, user_message_id=None):
+    async def process_message(self, message_parts: list, transport=None, user_message_id=None):
         async with self._process_message_lock:
-            await self._process_message(message_parts, instructions, transport, user_message_id)
+            await self._process_message(message_parts, transport, user_message_id)
 
-    async def _process_message(self, message_parts: list, instructions: str = "", transport=None, user_message_id=None):
+    async def _process_message(self, message_parts: list, transport=None, user_message_id=None):
         self.transport = transport
         text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
         logging.info("[agent] incoming: %r", text)
@@ -104,10 +104,6 @@ class Agent:
 
         
         system_parts = []
-        if instructions:
-            system_parts.append(instructions)
-            await transport.send_system_prompt(instructions)
-
         for skill in self.skills:
             if skill_context := skill.get_context_prompt(user_text):
                 system_parts.append(skill_context)
