@@ -97,7 +97,7 @@ class TelegramTransport:
         self.dp.message()(self._handle_message)
 
         self._skill = TelegramSkill(self.bot)
-        self._skill.agent = agent
+        self._skill.register(agent)
         agent.skills.insert(0, self._skill)
 
         self._media_groups: dict[str, list[Message]] = {}

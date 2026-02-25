@@ -35,11 +35,14 @@ class Memory:
     def count_tokens(turns: list) -> int:
         total = 0
         for turn in turns:
-            if not isinstance(turn, dict):
-                continue
-            for part in turn.get("parts", []):
-                if isinstance(part, dict) and "text" in part:
-                    total += len(part["text"]) // 4
+            if isinstance(turn, dict):
+                parts = turn.get("parts", [])
+                for part in parts:
+                    if isinstance(part, dict) and "text" in part:
+                        total += len(part["text"]) // 4
+            else:
+                for part in getattr(turn, "parts", None) or []:
+                    total += len(getattr(part, "text", "") or "") // 4
         return total
 
     def get_contents(self) -> list:
@@ -50,7 +53,8 @@ class Memory:
                 user_ids.add(uid)
             if tokens > self.hard_limit_tokens: break
             if tokens > self.soft_limit_tokens and len(user_ids) >= self.min_user_turns: break
-            result.insert(0, turn)
+            result.append(turn)
+        result.reverse()
         return [{k: v for k, v in t.items() if not k.startswith("_")} if isinstance(t, dict) else t for t in result]
 
     async def add_turn(self, turn):

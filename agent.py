@@ -113,6 +113,12 @@ class Agent:
 
     async def _process_message(self, message_parts: list, transport=None, user_message_id=None):
         self.transport = transport
+        try:
+            await self._run_message(message_parts, transport, user_message_id)
+        finally:
+            self.transport = None
+
+    async def _run_message(self, message_parts: list, transport=None, user_message_id=None):
         text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
         logging.info("[agent] incoming: %r", text)
 
@@ -130,9 +136,9 @@ class Agent:
 
         system_parts = []
         for skill in self.skills:
-            for f in skill.tools:
-                tools.append(types.Tool(function_declarations=[f]))
-                tool_to_skill[f.name] = skill
+            if skill.tools:
+                for f in skill.tools: tool_to_skill[f.name] = skill
+                tools.append(types.Tool(function_declarations=skill.tools))
 
             skill_context = skill.get_context_prompt(user_text)
             tools_info = "\n".join(f"⚙️ {t.name}: {t.description}" for t in skill.tools)
@@ -170,6 +176,9 @@ class Agent:
             iteration = 0
             while response.function_calls and iteration < self.max_iterations:
                 await self.memory.add_turn(response.candidates[0].content)
+
+                fn_response_parts = []
+                extra_parts = []
                 for tool_call in response.function_calls:
                     logging.info("Инструмент: %s", tool_call.name)
                     skill = tool_to_skill.get(tool_call.name)
@@ -180,8 +189,14 @@ class Agent:
                     if transport: await transport.on_tool_call(tool_call.name, dict(tool_call.args or {}))
                     result = await skill.dispatch_tool_call(tool_call)
                     if transport: await transport.on_tool_result(tool_call.name, result)
-                    extra = result.pop("_parts", []) if isinstance(result, dict) else []
-                    await self.memory.add_turn({"role": "user", "parts": [{"text": f"Результат {tool_call.name}:\n{result}"}, *extra]})
+                    extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
+                    fn_response_parts.append(types.Part.from_function_response(
+                        name=tool_call.name,
+                        response=result if isinstance(result, dict) else {"result": result},
+                    ))
+
+                if fn_response_parts:
+                    await self.memory.add_turn({"role": "user", "parts": [*fn_response_parts, *extra_parts]})
 
                 iteration += 1
                 logging.info("[agent] → LLM iteration %d", iteration)
