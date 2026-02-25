@@ -1,4 +1,4 @@
-import asyncio, os, sys, httpx, logging
+import asyncio, os, sys, httpx, logging, json
 from typing import Annotated
 from agent import Skill, tool
 from google import genai
@@ -19,13 +19,32 @@ class MemorySkill(Skill):
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
-        self._turns: list = []
-        self._pending: list = []
+        self._state_file = os.path.join(memory_dir, "CONTEXT.json")
         self.hard_limit_tokens = hard_limit_tokens
         self.soft_limit_tokens = soft_limit_tokens
         self.min_user_turns = min_user_turns
         self.consolidate_tokens = consolidate_tokens
+        self._turns, self._pending = self._load_context()
         super().__init__()
+
+    def _load_context(self) -> tuple[list, list]:
+        if not os.path.exists(self._state_file):
+            return [], []
+        try:
+            with open(self._state_file, encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("turns", []), data.get("pending", [])
+        except Exception as e:
+            logging.warning("[MemorySkill] не удалось загрузить state: %s", e)
+            return [], []
+
+    def _save_context(self):
+        try:
+            turns = [t for t in self._turns if isinstance(t, dict)]
+            with open(self._state_file, "w", encoding="utf-8") as f:
+                json.dump({"turns": turns, "pending": self._pending}, f, ensure_ascii=False)
+        except Exception as e:
+            logging.warning("[MemorySkill] не удалось сохранить state: %s", e)
 
     def get_context_prompt(self) -> str:
         memory = ""
@@ -72,9 +91,11 @@ class MemorySkill(Skill):
 
         if isinstance(turn, dict):
             self._pending.append(turn)
-            if turn.get("role") == "model" and self._count_tokens(self._pending) >= self.consolidate_tokens:
-                await self._consolidate(self._pending)
-                self._pending = []
+            if turn.get("role") == "model":
+                if self._count_tokens(self._pending) >= self.consolidate_tokens:
+                    await self._consolidate(self._pending)
+                    self._pending = []
+                self._save_context()
 
     async def _consolidate(self, pending):
         logging.info("Запускаю консолидацию: %d сообщений...", len(pending))
