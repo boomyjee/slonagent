@@ -4,6 +4,7 @@ from agent import Skill
 
 class BaseMemory(Skill):
     def __init__(self, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000, state_file: str = None):
+        super().__init__()
         self.hard_limit_tokens = hard_limit_tokens
         self.soft_limit_tokens = soft_limit_tokens
         self.min_user_turns = min_user_turns
