@@ -10,7 +10,7 @@ if _LIB not in sys.path:
 
 
 class SimpleMemProvider(BaseProvider):
-    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 20_000):
+    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 1_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
         
         from simplemem import SimpleMemSystem

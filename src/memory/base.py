@@ -3,7 +3,7 @@ from agent import Skill
 from memory import load_json, save_json, Memory
 
 class BaseProvider(Skill):
-    def __init__(self, consolidate_tokens: int = 20_000):
+    def __init__(self, consolidate_tokens: int = 1_000):
         super().__init__()
         self.consolidate_tokens = consolidate_tokens
         self._pending_file = os.path.join(Memory.memory_dir, f"PENDING_{type(self).__name__.lower()}.json")

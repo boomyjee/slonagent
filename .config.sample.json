@@ -27,8 +27,7 @@
             {
                 "__class__": "src.memory.simplemem.SimpleMemProvider",
                 "model_name": "gemini-3-flash-preview",
-                "api_key": "$GEMINI_API_KEY",
-                "consolidate_tokens": 2000
+                "api_key": "$GEMINI_API_KEY"
             }
         ]
     }
