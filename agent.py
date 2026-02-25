@@ -96,22 +96,28 @@ class Agent:
 
         await self.memory.add_turn({"role": "user", "parts": message_parts, "_user_message_id": user_message_id})
 
-        tools = []
-        tool_to_skill = {}
-        for s in self.skills:
-            for f in s.tools:
-                tools.append(types.Tool(function_declarations=[f]))
-                tool_to_skill[f.name] = s
 
         user_text = " ".join(p.get("text", "") for p in message_parts if isinstance(p, dict) and "text" in p).strip()
+        tools = []
+        tool_to_skill = {}
 
-        
         system_parts = []
         for skill in self.skills:
-            if skill_context := skill.get_context_prompt(user_text):
-                system_parts.append(skill_context)
-                await transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
+            for f in skill.tools:
+                tools.append(types.Tool(function_declarations=[f]))
+                tool_to_skill[f.name] = skill
 
+            skill_context = skill.get_context_prompt(user_text)
+            tools_info = "\n".join(f"⚙️ {t.name}: {t.description}" for t in skill.tools)
+
+            if skill_context: system_parts.append(skill_context)
+            if skill_context or tools_info:
+                await transport.send_system_prompt(
+                    f"[{skill.__class__.__name__}]\n"
+                    +skill_context+"\n"
+                    +tools_info
+                )
+                
         system = "\n\n".join(system_parts)
 
         async def send_thinking(response):
