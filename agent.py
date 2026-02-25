@@ -90,11 +90,11 @@ class Skill:
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, memory, skills: list = [], include_thoughts: bool = False, max_iterations: int = 20):
+    def __init__(self, model_name: str, api_key: str, memory, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20):
         self.model_name = model_name
         self.include_thoughts = include_thoughts
         self.memory = memory
-        self.skills = memory.providers + skills
+        self.skills = memory.providers + (skills or [])
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
@@ -106,6 +106,8 @@ class Agent:
         self._process_message_lock = asyncio.Lock()
 
     async def process_message(self, message_parts: list, transport=None, user_message_id=None):
+        if self._process_message_lock.locked():
+            logging.info("[agent] message queued, waiting for lock")
         async with self._process_message_lock:
             await self._process_message(message_parts, transport, user_message_id)
 
@@ -136,11 +138,11 @@ class Agent:
             tools_info = "\n".join(f"⚙️ {t.name}: {t.description}" for t in skill.tools)
 
             if skill_context: system_parts.append(skill_context)
-            if skill_context or tools_info:
+            if transport and (skill_context or tools_info):
                 await transport.send_system_prompt(
                     f"[{skill.__class__.__name__}]\n"
-                    +skill_context+"\n"
-                    +tools_info
+                    + skill_context + "\n"
+                    + tools_info
                 )
                 
         async def send_thinking(response):

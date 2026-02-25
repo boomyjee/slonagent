@@ -14,7 +14,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 def resolve(v):
     if isinstance(v, str) and v.startswith("$"):
-        return os.environ[v[1:]]
+        key = v[1:]
+        if key not in os.environ:
+            raise KeyError(f"Переменная окружения ${key} не задана (проверь .config.json → env)")
+        return os.environ[key]
     if isinstance(v, dict):
         return {k: resolve(val) for k, val in v.items()}
     if isinstance(v, list):
