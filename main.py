@@ -1,46 +1,37 @@
-import asyncio, logging, os, sys
-from dotenv import load_dotenv
-
-from src.transport.telegram import TelegramTransport
-from src.transport.cli import CliTransport
-
-from src.skills.sandbox import SandboxSkill
-from src.skills.config import ConfigSkill
-from src.skills.skill_writer import SkillWriterSkill
-from src.skills.clawhub import ClawhubSkill
-
-from src.memory.simplemem import SimpleMemProvider
-from src.memory.file import FileProvider
+import asyncio, importlib, json, logging, os, sys
 
 from agent import Agent
 from memory import Memory
+from src.transport.cli import CliTransport
+from src.transport.telegram import TelegramTransport
 
-load_dotenv()
+with open(".config.json", encoding="utf-8") as f:
+    config = json.load(f)
+
+os.environ.update(config.get("env", {}))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
+
+def instantiate(cfg: dict, cls=None):
+    if cls is None:
+        module_path, cls_name = cfg["__class__"].rsplit(".", 1)
+        cls = getattr(importlib.import_module(module_path), cls_name)
+    return cls(**{k: v for k, v in cfg.items() if k != "__class__"})
+
+
+agent_cfg = config["agent"]
 agent = Agent(
-    model_name=os.environ["GEMINI_MODEL"],
-    api_key=os.environ["GEMINI_API_KEY"],
-    include_thoughts=True,
-    memory = Memory(
-        providers=[
-            #SimpleMemProvider(model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"], consolidate_tokens=1000)
-            FileProvider(model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"])
-        ]
-    ),
-    skills=[
-        ConfigSkill(),
-        SandboxSkill(),
-        # ClawhubSkill(),
-        SkillWriterSkill(),
-    ]
+    model_name=agent_cfg["model_name"],
+    api_key=agent_cfg["api_key"],
+    include_thoughts=agent_cfg.get("include_thoughts", False),
+    memory=Memory(providers=[instantiate(p) for p in agent_cfg["memory_providers"]]),
+    skills=[instantiate(s) for s in agent_cfg["skills"]],
 )
+
 if "--cli" in sys.argv:
     transport = CliTransport(agent)
 else:
-    transport = TelegramTransport(
-        bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
-        allowed_user_ids={int(uid) for uid in os.environ["TELEGRAM_ALLOWED_USERS"].split(",")},
-        agent=agent,
-    )
+    tg = config["telegram_transport"]
+    transport = TelegramTransport(bot_token=tg["bot_token"], allowed_user_ids=tg["allowed_user_ids"], agent=agent)
+
 asyncio.run(transport.start())
