@@ -90,6 +90,7 @@ class TelegramTransport:
         self.bot = Bot(token=bot_token, session=AiohttpSession(proxy=proxy) if proxy else None)
         self.agent = agent
         self.allowed_user_ids = allowed_user_ids
+        self._no_link_preview = LinkPreviewOptions(is_disabled=True)
         self.dp = Dispatcher()
         self.dp.message()(self._handle_message)
 
@@ -107,7 +108,7 @@ class TelegramTransport:
         self._tool_msg = await self._current_message.answer(
             f"<blockquote expandable>{self._tool_call_text}</blockquote>",
             parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            link_preview_options=self._no_link_preview,
         )
 
     async def on_tool_result(self, name: str, result):
@@ -121,7 +122,7 @@ class TelegramTransport:
             await self._tool_msg.edit_text(
                 f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
                 parse_mode="HTML",
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
+                link_preview_options=self._no_link_preview,
             )
         except Exception:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
@@ -132,9 +133,9 @@ class TelegramTransport:
         except Exception as e:
             if "message is too long" in str(e):
                 for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
-                    await self._current_message.answer(chunk)
+                    await self._current_message.answer(chunk, link_preview_options=self._no_link_preview)
             elif parse_mode:
-                await self._current_message.answer(text)
+                await self._current_message.answer(text, link_preview_options=self._no_link_preview)
             else:
                 raise
 
@@ -145,7 +146,7 @@ class TelegramTransport:
         await self._answer(
             f"<blockquote expandable>{html.escape(text)}</blockquote>",
             parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            link_preview_options=self._no_link_preview,
         )
 
     async def send_code(self, lang: str, code: str):
@@ -237,7 +238,7 @@ class TelegramTransport:
             )
         except Exception as e:
             logging.exception("Error processing message")
-            await first.answer(f"Произошла ошибка при обработке: {e}")
+            await first.answer(f"Произошла ошибка при обработке: {e}", link_preview_options=self._no_link_preview)
 
     async def start(self):
         logging.info("Starting TelegramTransport...")
