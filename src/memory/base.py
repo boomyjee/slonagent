@@ -1,15 +1,18 @@
-import json, logging, os
+import json, logging, os, sys
 from agent import Skill
 
 
 class BaseMemory(Skill):
-    def __init__(self, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000, state_file: str = None):
+    def __init__(self, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000, memory_dir: str = None):
         super().__init__()
         self.hard_limit_tokens = hard_limit_tokens
         self.soft_limit_tokens = soft_limit_tokens
         self.min_user_turns = min_user_turns
         self.consolidate_tokens = consolidate_tokens
-        self._state_file = state_file
+        if memory_dir is None:
+            memory_dir = os.path.join(os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__)), "memory")
+        os.makedirs(memory_dir, exist_ok=True)
+        self._state_file = os.path.join(memory_dir, "CONTEXT.json")
         self._turns, self._pending = self._load_context()
 
     def _load_context(self) -> tuple[list, list]:

@@ -20,7 +20,7 @@ class FileMemory(BaseMemory):
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
 
-        super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens, state_file=os.path.join(memory_dir, "CONTEXT.json"))
+        super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens, memory_dir=memory_dir)
 
     def get_context_prompt(self, user_text: str = "") -> str:
         memory = ""

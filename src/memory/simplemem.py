@@ -10,22 +10,19 @@ if _LIB not in sys.path:
 
 class SimpleMemMemory(BaseMemory):
     def __init__(self, memory_dir: str = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000):
-        super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens)
-
-        root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
-        base = memory_dir or os.path.join(root, "memory", "simplemem")
-        os.makedirs(base, exist_ok=True)
+        memory_dir = memory_dir or os.path.join(os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__)), "memory", "simplemem")
+        super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens, memory_dir=memory_dir)
 
         from main import SimpleMemSystem
         from cross.orchestrator import create_orchestrator
 
         simplemem = SimpleMemSystem(
-            db_path=os.path.join(base, "simplemem_lancedb"),
+            db_path=os.path.join(memory_dir, "simplemem_lancedb"),
         )
         self._orch = create_orchestrator(
             project="slonagent",
-            db_path=os.path.join(base, "cross_memory.db"),
-            lancedb_path=os.path.join(base, "lancedb"),
+            db_path=os.path.join(memory_dir, "cross_memory.db"),
+            lancedb_path=os.path.join(memory_dir, "lancedb"),
             simplemem=simplemem,
         )
 
