@@ -2,15 +2,16 @@
     "env": {
         "HTTP_PROXY": "http://user:pass@host:port",
         "HTTPS_PROXY": "http://user:pass@host:port",
-        "HF_HUB_OFFLINE": "1"
+        "HF_HUB_OFFLINE": "1",
+        "GEMINI_API_KEY": "YOUR_API_KEY"
     },
     "telegram_transport": {
         "bot_token": "YOUR_BOT_TOKEN",
         "allowed_user_ids": [123456789]
     },
     "agent": {
-        "model_name": "gemini-2.0-flash",
-        "api_key": "YOUR_API_KEY",
+        "model_name": "gemini-3-flash-preview",
+        "api_key": "$GEMINI_API_KEY",
         "include_thoughts": true,
         "skills": [
             {"__class__": "src.skills.config.ConfigSkill"},
@@ -20,8 +21,14 @@
         "memory_providers": [
             {
                 "__class__": "src.memory.file.FileProvider",
-                "model_name": "gemini-2.0-flash",
-                "api_key": "YOUR_API_KEY"
+                "model_name": "gemini-3-flash-preview",
+                "api_key": "$GEMINI_API_KEY"
+            },
+            {
+                "__class__": "src.memory.simplemem.SimpleMemProvider",
+                "model_name": "gemini-3-flash-preview",
+                "api_key": "$GEMINI_API_KEY",
+                "consolidate_tokens": 2000
             }
         ]
     }

@@ -12,14 +12,24 @@ os.environ.update(config.get("env", {}))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 
+def resolve(v):
+    if isinstance(v, str) and v.startswith("$"):
+        return os.environ[v[1:]]
+    if isinstance(v, dict):
+        return {k: resolve(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [resolve(i) for i in v]
+    return v
+
+
 def instantiate(cfg: dict, cls=None):
     if cls is None:
         module_path, cls_name = cfg["__class__"].rsplit(".", 1)
         cls = getattr(importlib.import_module(module_path), cls_name)
-    return cls(**{k: v for k, v in cfg.items() if k != "__class__"})
+    return cls(**{k: resolve(v) for k, v in cfg.items() if k != "__class__"})
 
 
-agent_cfg = config["agent"]
+agent_cfg = resolve(config["agent"])
 agent = Agent(
     model_name=agent_cfg["model_name"],
     api_key=agent_cfg["api_key"],
