@@ -23,7 +23,7 @@ def bypass(command: str):
 class Skill:
     def __init__(self):
         self.agent = None
-        self._tool_names = set()
+        self._tool_map = {}  # tool_name → method_name
         self._bypass_handlers = {}
         for name, fn in inspect.getmembers(type(self), predicate=inspect.isfunction):
             if getattr(fn, "_is_bypass", False):
@@ -56,7 +56,7 @@ class Skill:
                 description=fn._tool_description,
                 parameters=types.Schema(type=types.Type.OBJECT, properties=properties, required=required),
             ))
-            self._tool_names.add(tool_name)
+            self._tool_map[tool_name] = name
 
     def is_bypass_command(self, text: str) -> bool:
         cmd = text.strip().split()[0] if text.strip() else ""
@@ -77,10 +77,10 @@ class Skill:
         self.agent = agent
 
     async def dispatch_tool_call(self, tool_call) -> dict:
-        if tool_call.name not in self._tool_names:
+        if tool_call.name not in self._tool_map:
             return {"error": f"Unknown tool: {tool_call.name}"}
 
-        method_name = tool_call.name.split("_", 1)[1]
+        method_name = self._tool_map[tool_call.name]
         method = getattr(self, method_name)
         args = dict(tool_call.args or {})
 
@@ -143,8 +143,6 @@ class Agent:
                     +tools_info
                 )
                 
-        system = "\n\n".join(system_parts)
-
         async def send_thinking(response):
             if not transport: return
             parts = response.candidates[0].content.parts or []

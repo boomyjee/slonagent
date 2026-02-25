@@ -22,11 +22,11 @@ def save_json(path, data):
 class Memory:
     memory_dir = os.path.join(os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__)), "memory")
 
-    def __init__(self, providers: list = [], hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10):
+    def __init__(self, providers: list = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10):
         self.hard_limit_tokens = hard_limit_tokens
         self.soft_limit_tokens = soft_limit_tokens
         self.min_user_turns = min_user_turns
-        self.providers = providers
+        self.providers = providers or []
         os.makedirs(Memory.memory_dir, exist_ok=True)
         self._state_file = os.path.join(Memory.memory_dir, "CONTEXT.json")
         self._turns = load_json(self._state_file, [])
@@ -59,6 +59,4 @@ class Memory:
             save_json(self._state_file, [t for t in self._turns if isinstance(t, dict)])
         for provider in self.providers:
             await provider.add_turn(turn)
-
-
 
