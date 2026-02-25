@@ -101,10 +101,19 @@ class Agent:
                 tool_to_skill[f.name] = s
 
         user_text = " ".join(p.get("text", "") for p in message_parts if isinstance(p, dict) and "text" in p).strip()
-        skill_contexts = [s.get_context_prompt(user_text) for s in self.skills]
-        system = "\n\n".join(filter(None, [instructions, *skill_contexts]))
 
-        await transport.send_system_prompt(system)
+        
+        system_parts = []
+        if instructions:
+            system_parts.append(instructions)
+            await transport.send_system_prompt(instructions)
+
+        for skill in self.skills:
+            if skill_context := skill.get_context_prompt(user_text):
+                system_parts.append(skill_context)
+                await transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
+
+        system = "\n\n".join(system_parts)
 
         async def send_thinking(response):
             if not transport: return
@@ -115,7 +124,7 @@ class Agent:
 
         try:
             config = types.GenerateContentConfig(
-                system_instruction=system,
+                system_instruction="\n\n".join(system_parts),
                 temperature=1.0,
                 tools=tools,
                 thinking_config=types.ThinkingConfig(include_thoughts=self.include_thoughts),

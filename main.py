@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 if os.environ.get("MEMORY_BACKEND", "simplemem") == "simplemem":
     from src.memory.simplemem import SimpleMemMemory
-    memory = SimpleMemMemory(consolidate_tokens=0)
+    memory = SimpleMemMemory()
 else:
     from src.memory.file import FileMemory
     memory = FileMemory(consolidation_model_name=os.environ["GEMINI_MEMORY_MODEL"], api_key=os.environ["GEMINI_API_KEY"])
@@ -26,7 +26,7 @@ agent = Agent(
     skills=[
         ConfigSkill(),
         ExecSkill(),
-        ClawhubSkill(),
+        # ClawhubSkill(),
         SkillWriterSkill(),
     ]
 )
