@@ -108,7 +108,7 @@ class SandboxSkill(Skill):
             if inspect.returncode != 0:
                 img = await self._run([self.runtime, "image", "exists", env_image], capture_output=True)
                 image = env_image if img.returncode == 0 else self.image
-                await self._run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], check=True)
+                await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], check=True)
                 logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
             else:
                 lines = inspect.stdout.strip().splitlines()
@@ -122,7 +122,7 @@ class SandboxSkill(Skill):
                     logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
                     await self._run([self.runtime, "commit", self.container_name, env_image], check=True)
                     await self._run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
-                    await self._run([self.runtime, "run", "-d", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
+                    await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
                     logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
         except Exception as e:
             return {"error": f"Не удалось запустить контейнер: {e}"}
