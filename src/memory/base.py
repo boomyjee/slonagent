@@ -6,7 +6,7 @@ class BaseProvider(Skill):
     def __init__(self, consolidate_tokens: int = 20_000):
         super().__init__()
         self.consolidate_tokens = consolidate_tokens
-        self._pending_file = os.path.join(Memory.memory_dir, f"{type(self).__name__.lower()}_pending.json")
+        self._pending_file = os.path.join(Memory.memory_dir, f"PENDING_{type(self).__name__.lower()}.json")
         self._pending = load_json(self._pending_file,[])
 
     async def add_turn(self, turn):
