@@ -156,7 +156,7 @@ class TelegramTransport:
         await self._answer(text, expandable=True, prefix="🔧 ")
 
     async def send_thinking(self, text: str):
-        await self._answer(text, expandable=True)
+        await self._answer(text, expandable=True, prefix="🧠 ")
 
     async def send_code(self, lang: str, code: str):
         await self._answer(f"```{lang}\n{code}\n```")
