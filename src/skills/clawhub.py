@@ -9,11 +9,11 @@ class ClawhubSkill(Skill):
         self._loaded_skills: dict[str, str] = {}  # name -> content
 
     def _skills_dir(self) -> str | None:
-        from src.skills.exec import ExecSkill
-        exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None) if self.agent else None
-        if exec_skill is None:
+        from src.skills.sandbox import SandboxSkill
+        sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None) if self.agent else None
+        if sandbox is None:
             return None
-        return os.path.join(exec_skill.workspace_dir, "skills")
+        return os.path.join(sandbox.workspace_dir, "skills")
 
     def get_context_prompt(self, user_text: str = "") -> str:
         skills_dir = self._skills_dir()

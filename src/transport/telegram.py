@@ -28,11 +28,11 @@ class TelegramSkill(Skill):
         self._message = message
 
     def _resolve_paths(self, paths: list[str]) -> list[str] | dict:
-        from src.skills.exec import ExecSkill
-        exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None)
+        from src.skills.sandbox import SandboxSkill
+        sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         host_paths = []
         for p in paths:
-            host_path = exec_skill.resolve_path(p) if exec_skill else None
+            host_path = sandbox.resolve_path(p) if sandbox else None
             if host_path is None:
                 return {"error": f"Доступ запрещён: {p}"}
             if not os.path.exists(host_path):
@@ -72,9 +72,9 @@ class TelegramSkill(Skill):
         tg_file_id: Annotated[str, "tg_file_id из метаданных прикреплённого файла."],
         dest_path: Annotated[str, "Путь назначения внутри контейнера (например /workspace/photo.jpg)."],
     ):
-        from src.skills.exec import ExecSkill
-        exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None)
-        host_dest = exec_skill.resolve_path(dest_path) if exec_skill else None
+        from src.skills.sandbox import SandboxSkill
+        sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
+        host_dest = sandbox.resolve_path(dest_path) if sandbox else None
 
         if host_dest is None:
             return {"error": f"Путь запрещён или недоступен: {dest_path}"}
