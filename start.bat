@@ -1,2 +1,2 @@
 set PYTHONPYCACHEPREFIX=.cache\pycache
-venv\Scripts\python main.py
+venv\Scripts\python main.py %*
