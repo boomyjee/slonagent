@@ -38,8 +38,6 @@ class ConfigSkill(Skill):
         if not os.path.exists(config_path):
             self._save({})
 
-    # ── bypass interface ──────────────────────────────────────────────────────
-
     def is_bypass_command(self, text: str) -> bool:
         return bool(re.match(r"^/config(\s|$)", text.strip(), re.IGNORECASE))
 
@@ -106,12 +104,8 @@ class ConfigSkill(Skill):
 
         return f"Неизвестная подкоманда.\n{HELP}"
 
-    # ── public read API for other skills ─────────────────────────────────────
-
     def get(self, key: str, default=None):
         return self._get(self._load(), key, default)
-
-    # ── internals ─────────────────────────────────────────────────────────────
 
     def _load(self) -> dict:
         try:
