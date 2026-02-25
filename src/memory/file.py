@@ -22,7 +22,7 @@ class FileMemory(BaseMemory):
 
         super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens, state_file=os.path.join(memory_dir, "CONTEXT.json"))
 
-    def get_context_prompt(self) -> str:
+    def get_context_prompt(self, user_text: str = "") -> str:
         memory = ""
         if os.path.exists(self.memory_file):
             with open(self.memory_file, encoding="utf-8") as f: memory = f.read()

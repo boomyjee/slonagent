@@ -15,7 +15,7 @@ class ClawhubSkill(Skill):
             return None
         return os.path.join(exec_skill.workspace_dir, "skills")
 
-    def get_context_prompt(self) -> str:
+    def get_context_prompt(self, user_text: str = "") -> str:
         skills_dir = self._skills_dir()
         if not skills_dir:
             return ""

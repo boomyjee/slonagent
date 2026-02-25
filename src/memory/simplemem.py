@@ -29,9 +29,9 @@ class SimpleMemMemory(BaseMemory):
             simplemem=simplemem,
         )
 
-    def get_context_prompt(self) -> str:
+    def get_context_prompt(self, user_text: str = "") -> str:
         try:
-            ctx = self._orch.get_context_for_prompt()
+            ctx = self._orch.get_context_for_prompt(user_prompt=user_text or None)
             if ctx:
                 return f"## Долгосрочная память\n{ctx}"
         except Exception as e:

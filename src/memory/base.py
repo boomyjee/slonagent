@@ -55,9 +55,6 @@ class BaseMemory(Skill):
             result.insert(0, turn)
         return [{k: v for k, v in t.items() if not k.startswith("_")} if isinstance(t, dict) else t for t in result]
 
-    def get_context_prompt(self) -> str:
-        return ""
-
     async def add_turn(self, turn):
         self._turns.append(turn)
         if isinstance(turn, dict):

@@ -43,6 +43,9 @@ class Skill:
             ))
             self._tool_names.add(name)
 
+    def get_context_prompt(self, user_text: str = "") -> str:
+        return ""
+
     def register(self, agent):
         self.agent = agent
 
@@ -97,8 +100,9 @@ class Agent:
                 tools.append(types.Tool(function_declarations=[f]))
                 tool_to_skill[f.name] = s
 
-        skill_context = "\n\n".join(s.get_context_prompt() for s in self.skills if hasattr(s, "get_context_prompt"))
-        system = "\n\n".join(filter(None, [instructions, skill_context]))
+        user_text = " ".join(p.get("text", "") for p in message_parts if isinstance(p, dict) and "text" in p).strip()
+        skill_contexts = [s.get_context_prompt(user_text) for s in self.skills]
+        system = "\n\n".join(filter(None, [instructions, *skill_contexts]))
 
         async def send_thinking(response):
             if not transport: return

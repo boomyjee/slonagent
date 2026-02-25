@@ -50,7 +50,7 @@ class ExecSkill(Skill):
                 return os.path.join(host, container_path[len(prefix):].replace("/", os.sep))
         return None
 
-    def get_context_prompt(self) -> str:
+    def get_context_prompt(self, user_text: str = "") -> str:
         lines = [
             "## Инструмент exec",
             "Ты можешь выполнять команды в Docker-контейнере.",
