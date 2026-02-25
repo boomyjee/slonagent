@@ -1,8 +1,7 @@
 ---
-description: Python-конвенции проекта: структура папок, именование файлов и классов
+description: Python-конвенции проекта
 alwaysApply: true
 ---
-
 # Python-конвенции проекта
 
 ## Структура пакетов
@@ -14,10 +13,10 @@ alwaysApply: true
 Файл называется по смыслу модуля в `snake_case`, класс внутри — в `PascalCase`:
 
 | Файл | Класс |
-|------|-------|
-| `src/memory/base.py` | `BaseMemory` |
-| `src/memory/file.py` | `FileMemory` |
-| `src/memory/simplemem.py` | `SimpleMemMemory` |
+|---|----|
+| `src/memory/base.py` | `BaseProvider` |
+| `src/memory/file.py` | `FileProvider` |
+| `src/memory/simplemem.py` | `SimpleMemProvider` |
 
 ## Импорты
 
@@ -25,9 +24,21 @@ alwaysApply: true
 
 ```python
 # ✅ GOOD
-from src.memory.base import BaseMemory
-from src.memory.simplemem import SimpleMemMemory
+from src.memory.base import BaseProvider
+from memory import Memory
 
 # ❌ BAD
-from .base import BaseMemory
+from .base import BaseProvider
+```
+
+## Приватные методы и публичное использование
+
+Если метод начинается с `_`, но используется из другого класса/модуля — убираем `_`:
+
+```python
+# ❌ BAD — приватный метод, но зовём снаружи
+Memory._count_tokens(turns)
+
+# ✅ GOOD — убрали _ раз метод публичный
+Memory.count_tokens(turns)
 ```

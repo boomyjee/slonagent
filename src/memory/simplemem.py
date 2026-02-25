@@ -1,24 +1,24 @@
 import logging, os, sys
 from typing import Annotated
 from agent import tool
-from src.memory.base import BaseMemory
+from src.memory.base import BaseProvider
+from memory import Memory
 
 _LIB = os.path.join(os.path.dirname(__file__), "..", "..", "lib", "SimpleMem")
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 
-class SimpleMemMemory(BaseMemory):
-    def __init__(self, model_name: str, api_key: str, memory_dir: str = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000):
-        memory_dir = memory_dir or os.path.join(os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__)), "memory", "simplemem")
-        super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens, memory_dir=memory_dir)
-
-        from main import SimpleMemSystem
+class SimpleMemProvider(BaseProvider):
+    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 20_000):
+        super().__init__(consolidate_tokens=consolidate_tokens)
+        
+        from simplemem import SimpleMemSystem
         self._simplemem = SimpleMemSystem(
             api_key=api_key,
             model=model_name,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            db_path=os.path.join(memory_dir, "lancedb"),
+            db_path=os.path.join(Memory.memory_dir, "simplemem", "lancedb"),
         )
 
     def get_context_prompt(self, user_text: str = "") -> str:
@@ -31,7 +31,7 @@ class SimpleMemMemory(BaseMemory):
                 return ""
             return "## Релевантные факты из памяти\n" + "\n".join(f"- {l}" for l in lines)
         except Exception as e:
-            logging.debug("[SimpleMemMemory] get_context_prompt: %s", e)
+            logging.debug("[SimpleMemProvider] get_context_prompt: %s", e)
         return ""
 
     @tool("Семантический поиск по долгосрочной памяти прошлых диалогов.")
@@ -43,7 +43,7 @@ class SimpleMemMemory(BaseMemory):
                 return {"result": "Ничего не найдено."}
             return {"results": [{"content": l} for l in lines]}
         except Exception as e:
-            logging.error("[SimpleMemMemory] search_memory: %s", e)
+            logging.error("[SimpleMemProvider] search_memory: %s", e)
             return {"error": str(e)}
 
     async def _consolidate(self, pending):
@@ -63,6 +63,6 @@ class SimpleMemMemory(BaseMemory):
             ]
             self._simplemem.add_dialogues(dialogues)
             self._simplemem.finalize()
-            logging.info("[SimpleMemMemory] консолидация: %d сообщений.", len(messages))
+            logging.info("[SimpleMemProvider] консолидация: %d сообщений.", len(messages))
         except Exception as e:
-            logging.error("[SimpleMemMemory] ошибка консолидации: %s", e)
+            logging.error("[SimpleMemProvider] ошибка консолидации: %s", e)

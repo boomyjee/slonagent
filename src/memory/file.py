@@ -1,26 +1,22 @@
-import asyncio, logging, os, sys, httpx
+import asyncio, logging, os, httpx
 from typing import Annotated
 from agent import tool
 from google import genai
 from google.genai import types
-from src.memory.base import BaseMemory
+from src.memory.base import BaseProvider
 
 
-class FileMemory(BaseMemory):
-    def __init__(self, consolidation_model_name: str, api_key: str, memory_dir: str = None, hard_limit_tokens: int = 500_000, soft_limit_tokens: int = 50_000, min_user_turns: int = 10, consolidate_tokens: int = 20_000):
-        if memory_dir is None:
-            root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
-            memory_dir = os.path.join(root, "memory")
-        os.makedirs(memory_dir, exist_ok=True)
-        self.memory_file = os.path.join(memory_dir, "MEMORY.md")
-        self.history_file = os.path.join(memory_dir, "HISTORY.md")
-        self.consolidation_model_name = consolidation_model_name
+class FileProvider(BaseProvider):
+    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 20_000):
+        super().__init__(consolidate_tokens=consolidate_tokens)
+        from memory import Memory
+        self.memory_file = os.path.join(Memory.memory_dir, "MEMORY.md")
+        self.history_file = os.path.join(Memory.memory_dir, "HISTORY.md")
+        self.model_name = model_name
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
-
-        super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens, memory_dir=memory_dir)
 
     def get_context_prompt(self, user_text: str = "") -> str:
         memory = ""
@@ -82,7 +78,7 @@ class FileMemory(BaseMemory):
             ]
             response = await asyncio.to_thread(
                 self._client.models.generate_content,
-                model=self.consolidation_model_name, contents=contents, config=config,
+                model=self.model_name, contents=contents, config=config,
             )
             if not response.function_calls:
                 logging.warning("Консолидация: LLM не вызвала save_memory.")

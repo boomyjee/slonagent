@@ -69,7 +69,7 @@ class Agent:
         self.model_name = model_name
         self.include_thoughts = include_thoughts
         self.memory = memory
-        self.skills = [memory] + skills
+        self.skills = memory.providers + skills
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
