@@ -134,10 +134,12 @@ class Agent:
                 tools=tools,
                 thinking_config=types.ThinkingConfig(include_thoughts=self.include_thoughts),
             )
+            logging.info("[agent] → LLM %s", self.model_name)
             response = await asyncio.to_thread(
                 self.client.models.generate_content,
                 model=self.model_name, contents=self.memory.get_contents(), config=config,
             )
+            logging.info("[agent] ← LLM")
             await send_thinking(response)
 
             iteration = 0
@@ -157,10 +159,12 @@ class Agent:
                     await self.memory.add_turn({"role": "user", "parts": [{"text": f"Результат {tool_call.name}:\n{result}"}, *extra]})
 
                 iteration += 1
+                logging.info("[agent] → LLM iteration %d", iteration)
                 response = await asyncio.to_thread(
                     self.client.models.generate_content,
                     model=self.model_name, contents=self.memory.get_contents(), config=config,
                 )
+                logging.info("[agent] ← LLM iteration %d", iteration)
                 await send_thinking(response)
 
             if transport: await transport.send_message(response.text or "")
