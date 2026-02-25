@@ -4,7 +4,7 @@ from agent import Skill, tool
 from google.genai import types
 
 
-class ExecSkill(Skill):
+class SandboxSkill(Skill):
     def __init__(
         self,
         workspace_dir: str | None = None,
@@ -52,23 +52,20 @@ class ExecSkill(Skill):
 
     def get_context_prompt(self, user_text: str = "") -> str:
         lines = [
-            "## Инструмент exec",
-            "Ты можешь выполнять команды в Docker-контейнере.",
-            "Директория /workspace всегда доступна для чтения и записи.",
-            "Контейнер персистентный — установленные пакеты (apt, pip и т.д.) сохраняются между командами.",
-            "В контейнере есть права root, можно устанавливать любые системные пакеты через apt-get.",
+            "## Sandbox",
+            "Изолированный Docker-контейнер с правами root.",
+            "Персистентный — файлы, установленные пакеты и состояние сохраняются между вызовами.",
+            "Доступные пути: /workspace — рабочая директория (чтение и запись).",
         ]
         mounts = self._mounts()
         if mounts:
-            lines.append("Дополнительно примонтированы папки хост-машины:")
+            lines.append("Примонтированные папки хост-машины (только чтение):")
             for host, container in mounts.items():
-                lines.append(f"  - {host}  →  {container}  (только чтение)")
-        else:
-            lines.append(
-                "Дополнительных папок нет. Если нужен доступ к папке на хост-машине, "
-                "попроси пользователя выполнить:\n"
-                "  /config write exec.folders[] <абсолютный путь к папке>"
-            )
+                lines.append(f"  - {host}  →  {container}")
+        lines.append(
+            "Чтобы примонтировать папку с хост-машины, попроси пользователя выполнить:\n"
+            "  /config write exec.folders[] <абсолютный путь к папке>"
+        )
         return "\n".join(lines)
 
     @staticmethod
@@ -157,6 +154,32 @@ class ExecSkill(Skill):
         if proc.stderr: logging.warning("[exec] stderr:\n%s", proc.stderr.rstrip())
 
         return {"stdout": proc.stdout, "stderr": proc.stderr, "exit_code": proc.returncode}
+
+    @tool("Прочитать текстовый файл из workspace.")
+    def read_file(
+        self,
+        path: Annotated[str, "Путь к файлу внутри контейнера (например /workspace/notes.txt)."],
+        offset: Annotated[int, "Начальная строка (1-based). По умолчанию 1."] = 1,
+        limit: Annotated[int, "Максимальное число строк. По умолчанию 200."] = 200,
+    ):
+        host_path = self.resolve_path(path)
+        if host_path is None:
+            return {"error": f"Доступ запрещён: {path}"}
+        if not os.path.exists(host_path):
+            return {"error": f"Файл не найден: {path}"}
+        try:
+            with open(host_path, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            start = max(0, offset - 1)
+            chunk = lines[start:start + limit]
+            return {
+                "content": "".join(chunk),
+                "total_lines": len(lines),
+                "returned_lines": len(chunk),
+                "offset": start + 1,
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
     @tool("Посмотреть изображение из workspace — передаёт его напрямую в Gemini Vision.")
     def view_image(

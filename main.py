@@ -2,7 +2,7 @@ import asyncio, logging, os, sys
 from dotenv import load_dotenv
 from src.transport.telegram import TelegramTransport
 from src.transport.cli import CliTransport
-from src.skills.exec import ExecSkill
+from src.skills.sandbox import SandboxSkill
 from src.skills.config import ConfigSkill
 from src.skills.skill_writer import SkillWriterSkill
 from src.skills.clawhub import ClawhubSkill
@@ -25,7 +25,7 @@ agent = Agent(
     include_thoughts=True,
     skills=[
         ConfigSkill(),
-        ExecSkill(),
+        SandboxSkill(),
         # ClawhubSkill(),
         SkillWriterSkill(),
     ]
