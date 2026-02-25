@@ -6,7 +6,7 @@ from typing import Annotated
 from agent import Skill, tool
 
 
-class SkillManager(Skill):
+class SkillWriterSkill(Skill):
     def __init__(self, skills_dir: str = None):
         super().__init__()
         if skills_dir is None:
@@ -30,7 +30,7 @@ class SkillManager(Skill):
         for name, code in self._saved_code.items():
             result = self._instantiate(name, code)
             if "error" in result:
-                logging.warning("[SkillManager] Не удалось загрузить %s: %s", name, result["error"])
+                logging.warning("[SkillWriterSkill] Не удалось загрузить %s: %s", name, result["error"])
         self._saved_code.clear()
 
     @tool("""Предложить новый инструмент для добавления в агент.

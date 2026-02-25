@@ -26,7 +26,7 @@ class TelegramSkill(Skill):
         self._message = message
 
     def _resolve_paths(self, paths: list[str]) -> list[str] | dict:
-        from exec import ExecSkill
+        from src.skills.exec import ExecSkill
         exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None)
         host_paths = []
         for p in paths:
@@ -70,7 +70,7 @@ class TelegramSkill(Skill):
         tg_file_id: Annotated[str, "tg_file_id из метаданных прикреплённого файла."],
         dest_path: Annotated[str, "Путь назначения внутри контейнера (например /workspace/photo.jpg)."],
     ):
-        from exec import ExecSkill
+        from src.skills.exec import ExecSkill
         exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None)
         host_dest = exec_skill.resolve_path(dest_path) if exec_skill else None
 
@@ -186,7 +186,7 @@ class TelegramTransport:
 
         for message in messages:
             text = message.text or message.caption
-            if text: message_parts.append({"text":text})
+            if text: message_parts.append({"text": text})
 
             if message.photo:
                 tg_file = await self.bot.get_file(message.photo[-1].file_id)
@@ -228,7 +228,6 @@ class TelegramTransport:
 
             message_parts.append({"text": json.dumps(file_meta, ensure_ascii=False)})
 
-
         try:
             await self.agent.process_message(
                 message_parts=message_parts,
@@ -243,33 +242,3 @@ class TelegramTransport:
     async def start(self):
         logging.info("Starting TelegramTransport...")
         await self.dp.start_polling(self.bot)
-
-
-class CliTransport:
-    def __init__(self, agent):
-        self.agent = agent
-
-    async def send_message(self, text: str):
-        print(f"\nАгент: {text}\n")
-
-    async def send_thinking(self, text: str):
-        print(f"[думает...]\n")
-
-    async def on_tool_call(self, name: str, args: dict):
-        print(f"[{name}] {args}")
-
-    async def on_tool_result(self, name: str, result):
-        print(f"[{name}] -> {result}")
-
-    async def start(self):
-        print("CLI режим. Введите сообщение (Ctrl+C для выхода).")
-        while True:
-            try:
-                text = await asyncio.get_event_loop().run_in_executor(None, input, "Вы: ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if text.strip():
-                await self.agent.process_message(
-                    message_parts=[{"text": text}],
-                    transport=self,
-                )

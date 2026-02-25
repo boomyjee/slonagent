@@ -29,7 +29,7 @@ class ExecSkill(Skill):
         super().__init__()
 
     def _mounts(self) -> dict[str, str]:
-        from config_skill import ConfigSkill
+        from src.skills.config import ConfigSkill
         config = next((s for s in self.agent.skills if isinstance(s, ConfigSkill)), None) if self.agent else None
         folders = config.get("exec.folders") or [] if config else []
         result = {}

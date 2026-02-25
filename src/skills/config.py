@@ -66,12 +66,10 @@ class ConfigSkill(Skill):
                 return f"Использование:\n{HELP}"
 
             rest = parts[2]
-            # split key from optional value
             kv = rest.split(None, 1)
             key_expr = kv[0]
             value_str = kv[1] if len(kv) > 1 else None
 
-            # toggle array: key ends with []
             if key_expr.endswith("[]"):
                 key = key_expr[:-2]
                 if value_str is None:
@@ -93,7 +91,6 @@ class ConfigSkill(Skill):
                 self._save(cfg)
                 return f"✓ {action} {key}: {json.dumps(value, ensure_ascii=False)}"
 
-            # delete: no value
             if value_str is None:
                 cfg = self._load()
                 if not self._delete(cfg, key_expr):
@@ -101,7 +98,6 @@ class ConfigSkill(Skill):
                 self._save(cfg)
                 return f"✓ Удалён: {key_expr}"
 
-            # set value
             cfg = self._load()
             value = self._parse_value(value_str)
             self._set(cfg, key_expr, value)

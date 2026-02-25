@@ -3,13 +3,13 @@ import os
 import glob
 
 
-class Clawhub(Skill):
+class ClawhubSkill(Skill):
     def __init__(self):
         super().__init__()
         self._loaded_skills: dict[str, str] = {}  # name -> content
 
     def _skills_dir(self) -> str | None:
-        from exec import ExecSkill
+        from src.skills.exec import ExecSkill
         exec_skill = next((s for s in self.agent.skills if isinstance(s, ExecSkill)), None) if self.agent else None
         if exec_skill is None:
             return None

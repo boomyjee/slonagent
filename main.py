@@ -1,10 +1,11 @@
 import asyncio, logging, os, sys
 from dotenv import load_dotenv
-from transport import TelegramTransport, CliTransport
-from exec import ExecSkill
-from config_skill import ConfigSkill
-from skill_manager import SkillManager
-from clawhub import Clawhub
+from src.transport.telegram import TelegramTransport
+from src.transport.cli import CliTransport
+from src.skills.exec import ExecSkill
+from src.skills.config import ConfigSkill
+from src.skills.skill_writer import SkillWriterSkill
+from src.skills.clawhub import ClawhubSkill
 from agent import Agent
 
 load_dotenv()
@@ -25,8 +26,8 @@ agent = Agent(
     skills=[
         ConfigSkill(),
         ExecSkill(),
-        Clawhub(),
-        SkillManager(),
+        ClawhubSkill(),
+        SkillWriterSkill(),
     ]
 )
 if "--cli" in sys.argv:
