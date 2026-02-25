@@ -1,4 +1,4 @@
-import asyncio, logging, os, sys, uuid
+import logging, os, sys
 from typing import Annotated
 from agent import tool
 from src.memory.base import BaseMemory
@@ -14,39 +14,38 @@ class SimpleMemMemory(BaseMemory):
         super().__init__(hard_limit_tokens=hard_limit_tokens, soft_limit_tokens=soft_limit_tokens, min_user_turns=min_user_turns, consolidate_tokens=consolidate_tokens, memory_dir=memory_dir)
 
         from main import SimpleMemSystem
-        from cross.orchestrator import create_orchestrator
-
-        simplemem = SimpleMemSystem(
-            db_path=os.path.join(memory_dir, "simplemem_lancedb"),
-        )
-        self._orch = create_orchestrator(
-            project="slonagent",
-            db_path=os.path.join(memory_dir, "cross_memory.db"),
-            lancedb_path=os.path.join(memory_dir, "lancedb"),
-            simplemem=simplemem,
+        self._simplemem = SimpleMemSystem(
+            db_path=os.path.join(memory_dir, "lancedb"),
         )
 
     def get_context_prompt(self, user_text: str = "") -> str:
+        if not user_text:
+            return ""
         try:
-            ctx = self._orch.get_context_for_prompt(user_prompt=user_text or None)
-            if ctx:
-                return f"## Долгосрочная память\n{ctx}"
+            entries = self._simplemem.vector_store.semantic_search(user_text, top_k=10)
+            if not entries:
+                return ""
+            lines = [e.lossless_restatement for e in entries if e.lossless_restatement]
+            if not lines:
+                return ""
+            return "## Релевантные факты из памяти\n" + "\n".join(f"- {l}" for l in lines)
         except Exception as e:
-            logging.debug("[SimpleMemMemory] get_context_for_prompt: %s", e)
+            logging.debug("[SimpleMemMemory] get_context_prompt: %s", e)
         return ""
 
     @tool("Семантический поиск по долгосрочной памяти прошлых диалогов.")
     def search_memory(self, query: Annotated[str, "Поисковый запрос на естественном языке"]) -> dict:
-        results = self._orch.search(query, top_k=10)
-        if not results:
-            return {"result": "Ничего не найдено."}
-        return {"results": [{"content": e.content, "session": e.content_session_id} for e in results]}
-
-    @tool("Статистика долгосрочной памяти: сколько сессий, событий и наблюдений сохранено.")
-    def memory_stats(self) -> dict:
-        return self._orch.get_stats()
+        try:
+            entries = self._simplemem.vector_store.semantic_search(query, top_k=10)
+            if not entries:
+                return {"result": "Ничего не найдено."}
+            return {"results": [{"content": e.lossless_restatement} for e in entries]}
+        except Exception as e:
+            logging.error("[SimpleMemMemory] search_memory: %s", e)
+            return {"error": str(e)}
 
     async def _consolidate(self, pending):
+        from models.memory_entry import Dialogue
         messages = [
             (t["role"], " ".join(p.get("text", "") for p in t.get("parts", []) if isinstance(p, dict) and "text" in p).strip())
             for t in pending
@@ -56,18 +55,12 @@ class SimpleMemMemory(BaseMemory):
         if not messages:
             return
         try:
-            user_prompt = next((text for role, text in messages if role == "user"), "")
-            result = await self._orch.start_session(
-                content_session_id=str(uuid.uuid4()),
-                user_prompt=user_prompt,
-            )
-            session_id = result["memory_session_id"]
-
-            for role, text in messages:
-                await self._orch.record_message(session_id, text, role=role)
-
-            await self._orch.stop_session(session_id)
-            await self._orch.end_session(session_id)
-            logging.info("[SimpleMemMemory] сессия сохранена.")
+            dialogues = [
+                Dialogue(dialogue_id=i, speaker=role, content=text)
+                for i, (role, text) in enumerate(messages)
+            ]
+            self._simplemem.add_dialogues(dialogues)
+            self._simplemem.finalize()
+            logging.info("[SimpleMemMemory] консолидация: %d сообщений.", len(messages))
         except Exception as e:
-            logging.error("[SimpleMemMemory] ошибка: %s", e)
+            logging.error("[SimpleMemMemory] ошибка консолидации: %s", e)
