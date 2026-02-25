@@ -11,10 +11,23 @@ def tool(description: str):
         return fn
     return decorator
 
+
+def bypass(command: str):
+    def decorator(fn):
+        fn._is_bypass = True
+        fn._bypass_command = command
+        return fn
+    return decorator
+
+
 class Skill:
     def __init__(self):
         self.agent = None
         self._tool_names = set()
+        self._bypass_handlers = {}
+        for name, fn in inspect.getmembers(type(self), predicate=inspect.isfunction):
+            if getattr(fn, "_is_bypass", False):
+                self._bypass_handlers[fn._bypass_command] = fn
 
         def param_schema(hint, desc):
             _GEMINI_TYPES = { str: types.Type.STRING, int: types.Type.INTEGER, float: types.Type.NUMBER, bool: types.Type.BOOLEAN }
@@ -44,6 +57,18 @@ class Skill:
                 parameters=types.Schema(type=types.Type.OBJECT, properties=properties, required=required),
             ))
             self._tool_names.add(tool_name)
+
+    def is_bypass_command(self, text: str) -> bool:
+        cmd = text.strip().split()[0] if text.strip() else ""
+        return cmd.startswith("/") and cmd[1:] in self._bypass_handlers
+
+    async def dispatch_bypass(self, text: str) -> str:
+        parts = text.strip().split(maxsplit=1)
+        cmd = parts[0][1:]
+        args = parts[1] if len(parts) > 1 else ""
+        fn = self._bypass_handlers[cmd]
+        result = fn(self, args) if not inspect.iscoroutinefunction(fn) else await fn(self, args)
+        return str(result)
 
     def get_context_prompt(self, user_text: str = "") -> str:
         return ""
@@ -90,8 +115,8 @@ class Agent:
         logging.info("[agent] incoming: %r", text)
 
         for skill in self.skills:
-            if hasattr(skill, "is_bypass_command") and skill.is_bypass_command(text):
-                if transport: await transport.send_message(skill.handle_bypass_command(text))
+            if skill.is_bypass_command(text):
+                if transport: await transport.send_message(await skill.dispatch_bypass(text))
                 return
 
         await self.memory.add_turn({"role": "user", "parts": message_parts, "_user_message_id": user_message_id})

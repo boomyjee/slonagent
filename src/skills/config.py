@@ -1,9 +1,7 @@
 import json
-import logging
 import os
-import re
 import sys
-from agent import Skill
+from agent import Skill, bypass
 
 HELP = (
     "config read                 — показать весь конфиг\n"
@@ -13,21 +11,7 @@ HELP = (
     "config write <key>[] <value>— добавить/удалить значение в массиве (toggle)"
 )
 
-
 class ConfigSkill(Skill):
-    """
-    Управляет JSON-конфигом агента.
-    LLM не видит конфиг и не может его менять.
-    Команды перехватываются в Agent.process_message до LLM.
-
-    Синтаксис:
-      config read [key]
-      config write key [value]          — set; без value — delete
-      config write key[] value          — toggle в массиве
-    """
-
-    tools = []
-
     def __init__(self, config_path: str = None):
         super().__init__()
         if config_path is None:
@@ -38,45 +22,38 @@ class ConfigSkill(Skill):
         if not os.path.exists(config_path):
             self._save({})
 
-    def is_bypass_command(self, text: str) -> bool:
-        return bool(re.match(r"^/config(\s|$)", text.strip(), re.IGNORECASE))
+    @bypass("config")
+    def config_command(self, args: str) -> str:
+        parts = args.strip().split(None, 1)
+        if not parts:
+            return f"```json\n{json.dumps(self._load(), ensure_ascii=False, indent=2)}\n```"
 
-    def handle_bypass_command(self, text: str) -> str:
-        parts = text.strip().split(None, 2)
-        if len(parts) < 2:
-            cfg = self._load()
-            return f"```json\n{json.dumps(cfg, ensure_ascii=False, indent=2)}\n```"
-
-        subcommand = parts[1].lower()
+        subcommand = parts[0].lower()
+        rest = parts[1] if len(parts) > 1 else ""
 
         if subcommand == "read":
             cfg = self._load()
-            if len(parts) >= 3:
-                key = parts[2].strip()
-                value = self._get(cfg, key)
+            if rest:
+                value = self._get(cfg, rest.strip())
                 if value is None:
-                    return f"Ключ не найден: {key}"
-                return f"{key} = {json.dumps(value, ensure_ascii=False, indent=2)}"
+                    return f"Ключ не найден: {rest.strip()}"
+                return f"{rest.strip()} = {json.dumps(value, ensure_ascii=False, indent=2)}"
             return f"```json\n{json.dumps(cfg, ensure_ascii=False, indent=2)}\n```"
 
         if subcommand == "write":
-            if len(parts) < 3:
+            if not rest:
                 return f"Использование:\n{HELP}"
-
-            rest = parts[2]
             kv = rest.split(None, 1)
             key_expr = kv[0]
             value_str = kv[1] if len(kv) > 1 else None
 
+            cfg = self._load()
             if key_expr.endswith("[]"):
                 key = key_expr[:-2]
                 if value_str is None:
-                    return "Для toggle-операции нужно значение: config write key[] <value>"
+                    return "Для toggle-операции нужно значение: /config write key[] <value>"
                 value = self._parse_value(value_str)
-                cfg = self._load()
-                current = self._get(cfg, key)
-                if current is None:
-                    current = []
+                current = self._get(cfg, key) or []
                 if not isinstance(current, list):
                     return f"Ошибка: {key} не является массивом (тип: {type(current).__name__})"
                 if value in current:
@@ -90,17 +67,14 @@ class ConfigSkill(Skill):
                 return f"✓ {action} {key}: {json.dumps(value, ensure_ascii=False)}"
 
             if value_str is None:
-                cfg = self._load()
                 if not self._delete(cfg, key_expr):
                     return f"Ключ не найден: {key_expr}"
                 self._save(cfg)
                 return f"✓ Удалён: {key_expr}"
 
-            cfg = self._load()
-            value = self._parse_value(value_str)
-            self._set(cfg, key_expr, value)
+            self._set(cfg, key_expr, self._parse_value(value_str))
             self._save(cfg)
-            return f"✓ {key_expr} = {json.dumps(value, ensure_ascii=False)}"
+            return f"✓ {key_expr} = {json.dumps(self._parse_value(value_str), ensure_ascii=False)}"
 
         return f"Неизвестная подкоманда.\n{HELP}"
 

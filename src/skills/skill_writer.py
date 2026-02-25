@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 from typing import Annotated
-from agent import Skill, tool
+from agent import Skill, tool, bypass
 
 
 class SkillWriterSkill(Skill):
@@ -89,23 +89,8 @@ class MySkill(Skill):
                 return {"status": "active", "code": f.read()}
         return {"error": f"Скилл {name!r} не найден"}
 
-    _COMMANDS = {
-        "approve_skill":   lambda self, arg: self.approve_skill(arg),
-        "delete_skill":    lambda self, arg: self.delete_skill(arg),
-        "install_package": lambda self, arg: self._install_package(arg),
-        "skills":          lambda self, arg: self.skills_list(),
-    }
-
-    def is_bypass_command(self, text: str) -> bool:
-        return bool(text) and text.startswith("/") and text.split()[0][1:] in self._COMMANDS
-
-    def handle_bypass_command(self, text: str) -> str:
-        parts = text.split(maxsplit=1)
-        cmd = parts[0].lstrip("/")
-        arg = parts[1].strip() if len(parts) > 1 else ""
-        return self._COMMANDS[cmd](self, arg)
-
-    def _install_package(self, package: str) -> str:
+    @bypass("install_package")
+    def install_package(self, package: str) -> str:
         if not package:
             return "Использование: /install_package <пакет>"
         result = subprocess.run(
@@ -116,6 +101,7 @@ class MySkill(Skill):
             return f"✅ {result.stdout.strip().splitlines()[-1]}"
         return f"❌ {result.stderr.strip()}"
 
+    @bypass("approve_skill")
     def approve_skill(self, name: str) -> str:
         if name not in self._pending:
             return f"Нет pending-скилла {name!r}"
@@ -130,6 +116,7 @@ class MySkill(Skill):
             f.write(code)
         return f"Скилл {name!r} активирован, тулы: {result['tools']}"
 
+    @bypass("delete_skill")
     def delete_skill(self, name: str) -> str:
         if name in self._pending:
             self._pending.pop(name)
@@ -140,13 +127,14 @@ class MySkill(Skill):
             return f"Скилл {name!r} удалён"
         return f"Скилл {name!r} не найден"
 
-    def skills_list(self) -> str:
+    @bypass("skills")
+    def skills_list(self, args: str = "") -> str:
         rows = [f"pending  {n}" for n in sorted(self._pending)]
         rows += [f"active   {n}" for n in sorted(self._active)]
         return "\n".join(rows) if rows else "Скиллов нет"
 
     def _instantiate(self, name: str, code: str) -> dict:
-        namespace = {"Skill": Skill, "tool": tool, "Annotated": Annotated}
+        namespace = {"Skill": Skill, "tool": tool, "bypass": bypass, "Annotated": Annotated}
         try:
             exec(code, namespace)
         except Exception as e:
