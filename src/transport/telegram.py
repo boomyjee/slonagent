@@ -230,7 +230,8 @@ class TelegramTransport:
             }
             if field == "document" and os.path.splitext(filename or "")[1].lower() in text_extensions:
                 try:
-                    file_meta["content"] = (await self._download_file(attachment.file_id)).decode("utf-8", errors="replace")
+                    content = (await self._download_file(attachment.file_id)).decode("utf-8", errors="replace")
+                    message_parts.append({"text": f"[Файл: {filename}, tg_file_id={attachment.file_id}]\n\n{content}"})
                 except Exception:
                     logging.exception("[transport] Не удалось прочитать текстовый файл %s", filename)
 
