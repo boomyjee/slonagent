@@ -1,110 +1,112 @@
 # slonagent
 
-Telegram-агент на базе Gemini с долгосрочной памятью, выполнением кода и расширяемыми скиллами.
+Telegram-агент на базе Gemini с расширяемой долгосрочной памятью и скиллами.
 
-## Что умеет
+## Возможности
 
-- Общается через Telegram, поддерживает историю диалога
-- Выполняет код и команды в Docker-контейнере через `ExecSkill`
-- Помнит всё между сессиями — через `SimplememSkill` (SimpleMem-Cross: SQLite + LanceDB)
-- Отправляет файлы, фото, документы обратно в чат
-- Показывает процесс "мышления" модели (thinking mode)
-- Поддерживает текстовые скиллы через [ClawHub](https://github.com/clawhub)
-- Хранит JSON-конфиг агента, управляемый командами `/config`
+- Общение через Telegram или CLI-режим
+- Долгосрочная память: блоки, архив (RAG), история диалогов
+- Автоматическая консолидация памяти в фоне (sleeptime agent)
+- Выполнение кода и команд через `SandboxSkill`
+- Управление конфигом агента через `ConfigSkill`
+- Написание и загрузка новых скиллов через `SkillWriterSkill`
+- Показывает процесс мышления модели (thinking mode)
 
 ## Структура
 
 ```
 slonagent/
-  agent.py          — ядро: Agent, Skill, @tool декоратор
-  main.py           — точка входа
-  transport.py      — Telegram-транспорт (aiogram)
-  memory.py         — старый скилл памяти (резервный)
-  simplemem_skill.py— долгосрочная память на SimpleMem-Cross
-  exec.py           — выполнение кода в Docker
-  config.py         — управление JSON-конфигом агента
-  clawhub.py        — загрузка текстовых скиллов из workspace/skills/
-  skill_manager.py  — управление скиллами агента
-  lib/
-    SimpleMem/      — клон https://github.com/aiming-lab/SimpleMem
+  agent.py            — ядро: Agent, Skill, @tool декоратор
+  main.py             — точка входа
+  memory.py           — скользящее окно контекста + провайдеры памяти
+  src/
+    memory/
+      letta.py        — LettaProvider: блоки + архив (LanceDB) + история
+      simplemem.py    — SimpleMemProvider: RAG на SimpleMem
+      file.py         — FileProvider: саммари + история в .md файлах
+      personality.py  — PersonalityProvider: субличности из .md файлов
+      base.py         — BaseProvider: базовый класс с консолидацией
+    skills/
+      config.py       — ConfigSkill: управление .config.json
+      sandbox.py      — SandboxSkill: выполнение кода
+      skill_writer.py — SkillWriterSkill: написание новых скиллов
+    transport/
+      telegram.py     — Telegram-транспорт (aiogram)
+      cli.py          — CLI-режим
+  memory/             — данные памяти (в .gitignore)
+    letta/            — блоки .md, archival.lancedb, history.jsonl
+    simplemem/        — LanceDB для SimpleMem
+    personalities/    — субличности .md
+    CONTEXT.json      — скользящее окно диалога
 ```
 
 ## Установка
 
-### 1. Клонировать репо
-
 ```bash
-git clone <repo-url>
+git clone https://github.com/boomyjee/slonagent.git
 cd slonagent
-```
-
-### 2. Создать виртуальное окружение
-
-```bash
 python -m venv venv
-venv\Scripts\activate      # Windows
-# source venv/bin/activate  # Linux/Mac
-```
-
-### 3. Установить зависимости проекта
-
-```bash
+venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Установить зависимости SimpleMem
+## Конфигурация
 
-```bash
-pip install -r lib/SimpleMem/requirements.txt
-pip install fastapi
+Скопируй `.config.sample.json` в `.config.json` и заполни:
+
+```json
+{
+  "env": {
+    "GEMINI_API_KEY": "...",
+    "HTTPS_PROXY": "http://user:pass@host:port"
+  },
+  "telegram_transport": {
+    "bot_token": "...",
+    "allowed_user_ids": [123456789]
+  },
+  "agent": {
+    "model_name": "gemini-2.0-flash",
+    "api_key": "$GEMINI_API_KEY",
+    "memory_providers": [
+      {"__class__": "src.memory.letta.LettaProvider"}
+    ],
+    "skills": [
+      {"__class__": "src.skills.config.ConfigSkill"},
+      {"__class__": "src.skills.sandbox.SandboxSkill"},
+      {"__class__": "src.skills.skill_writer.SkillWriterSkill"}
+    ]
+  }
+}
 ```
 
-### 5. Настроить конфиг SimpleMem
+## Запуск
 
 ```bash
-cp lib/SimpleMem/config.py.example lib/SimpleMem/config.py
-```
-
-`config.py` уже настроен на Gemini — значения берутся из переменных окружения автоматически, ничего менять не нужно.
-
-### 6. Создать `.env`
-
-```env
-GEMINI_API_KEY=...
-GEMINI_MODEL=gemini-2.0-flash
-GEMINI_MEMORY_MODEL=gemini-2.0-flash
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_USERS=123456789
-MEMORY_BACKEND=simplemem   # simplemem (по умолчанию) или legacy
-
-# Опционально, если нужен прокси
-HTTP_PROXY=http://user:pass@host:port
-HTTPS_PROXY=http://user:pass@host:port
-```
-
-### 7. Запустить
-
-```bash
-python main.py
-# или
+# Telegram
 start.bat
-```
 
-При первом запуске `SimplememSkill` скачает embedding-модель `all-MiniLM-L6-v2` (~90 MB) с HuggingFace.
+# CLI (без Telegram)
+start.bat --cli
+```
 
 ## Память
 
-Долгосрочная память хранится в `memory/simplemem/`:
-- `cross_memory.db` — SQLite: сессии, события, наблюдения
-- `lancedb/` — векторное хранилище для семантического поиска
+Провайдеры памяти подключаются в `memory_providers` в конфиге. Можно использовать несколько одновременно.
 
-Агент автоматически сохраняет каждый диалог и подтягивает релевантный контекст из прошлых сессий в системный промпт.
-
-## Команды в Telegram
-
-| Команда | Описание |
+| Провайдер | Что делает |
 |---|---|
-| `/config` | Показать весь конфиг |
-| `/config read <key>` | Показать значение ключа |
-| `/config write <key> <value>` | Установить значение |
-| `/config write <key>` | Удалить ключ |
+| `LettaProvider` | Блоки памяти (всегда в контексте) + архив с семантическим поиском (LanceDB + Gemini embeddings) + полная история диалогов |
+| `SimpleMemProvider` | RAG на базе SimpleMem (SQLite + LanceDB) |
+| `FileProvider` | Саммари + история в Markdown-файлах |
+| `PersonalityProvider` | Субличности — именованные блоки знаний, управляемые агентом |
+
+### LettaProvider
+
+Реализует все три слоя памяти из [Letta](https://github.com/letta-ai/letta):
+
+- **Core Memory** — именованные блоки (`human.md`, `persona.md`, ...) всегда в системном промпте
+- **Archival Memory** — долгосрочный архив фактов с семантическим поиском
+- **Recall Memory** — полная история диалогов с поиском по тексту и дате
+
+Блоки хранятся в `memory/letta/*.md` (совместимый с Letta формат — Markdown + YAML frontmatter).  
+После каждых ~2000 токенов запускается фоновый sleeptime-агент, который сам решает что и куда сохранить.
