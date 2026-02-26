@@ -21,6 +21,9 @@
         ],
         "memory_providers": [
             {
+                "__class__": "src.memory.knowledge.KnowledgeProvider"
+            },
+            {
                 "__class__": "src.memory.file.FileProvider",
                 "model_name": "gemini-3-flash-preview",
                 "api_key": "$GEMINI_API_KEY"
