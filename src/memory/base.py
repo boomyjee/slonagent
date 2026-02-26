@@ -17,7 +17,10 @@ class BaseProvider(Skill):
             if Memory.count_tokens(self._pending) >= self.consolidate_tokens:
                 await self._consolidate(self._pending)
                 self._pending = []
-            save_json(self._pending_file, self._pending)
+            save_json(self._pending_file, [
+                t for t in self._pending
+                if isinstance(t, dict) and all(isinstance(p, dict) for p in t.get("parts", []))
+            ])
 
     async def _consolidate(self, pending):
         pass
