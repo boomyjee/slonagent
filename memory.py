@@ -1,28 +1,29 @@
 import json, logging, os, sys, tempfile
 
-def load_json(path, default):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return default
-    except Exception as e:
-        logging.warning("load_json %s: %s", path, e)
-        return default
-
-
-def save_json(path, data):
+def save_turns_json(path, turns):
     dir_ = os.path.dirname(os.path.abspath(path))
     tmp = None
     try:
+        data = [t for t in turns if isinstance(t, dict) and all(isinstance(p, dict) for p in t.get("parts", []))]
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=dir_, delete=False, suffix=".tmp") as f:
             json.dump(data, f, ensure_ascii=False)
             tmp = f.name
         os.replace(tmp, path)
     except Exception as e:
-        logging.warning("save_json %s: %s", path, e)
+        logging.warning("save_turns_json %s: %s", path, e)
         if tmp:
             os.unlink(tmp)
+
+
+def load_turns_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        logging.warning("load_turns_json %s: %s", path, e)
+        return []
 
 
 class Memory:
@@ -35,7 +36,7 @@ class Memory:
         self.providers = providers or []
         os.makedirs(Memory.memory_dir, exist_ok=True)
         self._state_file = os.path.join(Memory.memory_dir, "CONTEXT.json")
-        self._turns = load_json(self._state_file, [])
+        self._turns = load_turns_json(self._state_file)
 
     @staticmethod
     def count_tokens(turns: list) -> int:
@@ -63,15 +64,15 @@ class Memory:
         result.reverse()
 
         if (len(result)<len(self._turns)):
-            self._turns = result;
-            save_json(self._state_file, [t for t in self._turns if isinstance(t, dict)])
+            self._turns = result
+            save_turns_json(self._state_file, self._turns)
 
         return [{k: v for k, v in t.items() if not k.startswith("_")} if isinstance(t, dict) else t for t in result]
 
     async def add_turn(self, turn):
         self._turns.append(turn)
         if isinstance(turn, dict) and turn.get("role") == "model":
-            save_json(self._state_file, [t for t in self._turns if isinstance(t, dict)])
+            save_turns_json(self._state_file, self._turns)
         for provider in self.providers:
             await provider.add_turn(turn)
 

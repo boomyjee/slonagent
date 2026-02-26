@@ -1,8 +1,8 @@
-import logging, os
+import json, logging, os
 from typing import Annotated
 from agent import tool
 from src.memory.base import BaseProvider
-from memory import Memory, load_json, save_json
+from memory import Memory
 
 
 class PersonalityProvider(BaseProvider):
@@ -11,7 +11,10 @@ class PersonalityProvider(BaseProvider):
         self._dir = os.path.join(Memory.memory_dir, "personalities")
         os.makedirs(self._dir, exist_ok=True)
         self._active_file = os.path.join(self._dir, ".active.json")
-        self._active: list[str] = load_json(self._active_file, [])
+        try:
+            self._active: list[str] = json.loads(open(self._active_file, encoding="utf-8").read())
+        except (FileNotFoundError, json.JSONDecodeError):
+            self._active: list[str] = []
 
     def _path(self, name: str) -> str:
         return os.path.join(self._dir, f"{name}.md")
@@ -79,7 +82,7 @@ class PersonalityProvider(BaseProvider):
         if unknown:
             return {"error": f"Не найдены: {', '.join(unknown)}. Доступные: {', '.join(available)}"}
         self._active = list(names)
-        save_json(self._active_file, self._active)
+        open(self._active_file, "w", encoding="utf-8").write(json.dumps(self._active, ensure_ascii=False))
         logging.info("[PersonalityProvider] активные: %s", self._active)
         return {"active": self._active}
 
