@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import logging
+from datetime import datetime
 from typing import Annotated
 
 from agent import tool
@@ -60,7 +61,10 @@ class HindsightProvider(BaseProvider):
                 max_tokens=max_tokens,
                 budget=budget,
             )
-            return [r.text for r in (response.results or []) if getattr(r, "text", None)]
+            return [
+                (r.text, getattr(r, "document_id", None))
+                for r in (response.results or []) if getattr(r, "text", None)
+            ]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(_call).result(timeout=RECALL_TIMEOUT)
@@ -74,20 +78,35 @@ class HindsightProvider(BaseProvider):
             if not isinstance(turn, dict):
                 continue
             label = "Пользователь" if turn.get("role") == "user" else "Ассистент"
-            ts = turn.get("_timestamp")
+            ts_raw = turn.get("_timestamp")
+            ts = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else ts_raw
             for part in turn.get("parts", []):
                 if not isinstance(part, dict) or "text" not in part:
                     continue
                 doc_id = part.get("_document_id")
-                item = {
-                    "content": part["text"] if doc_id else f"{label}: {part['text']}",
-                    "context": "attached document" if doc_id else "conversation",
-                }
                 if doc_id:
-                    item["document_id"] = doc_id
-                if ts:
-                    item["timestamp"] = ts
-                items.append(item)
+                    # факты из документа — без timestamp
+                    items.append({
+                        "content": part["text"],
+                        "context": "attached document",
+                        "document_id": doc_id,
+                    })
+                    # отдельный event: кто и когда загрузил документ
+                    event: dict = {
+                        "content": f"{label} загрузил документ {doc_id}",
+                        "context": "document upload event",
+                    }
+                    if ts:
+                        event["timestamp"] = ts
+                    items.append(event)
+                else:
+                    item: dict = {
+                        "content": f"{label}: {part['text']}",
+                        "context": "conversation",
+                    }
+                    if ts:
+                        item["timestamp"] = ts
+                    items.append(item)
 
         if not items:
             return
@@ -108,16 +127,22 @@ class HindsightProvider(BaseProvider):
         if not user_text:
             return ""
         try:
-            results = self._recall_sync(user_text, self._recall_max_tokens)
+            results = self._recall_sync(user_text[:1500], self._recall_max_tokens)
         except Exception as e:
             log.warning("[HindsightProvider] recall failed: %s", e)
             return ""
         if not results:
             return ""
-        memories = "\n".join(f"- {r}" for r in results)
+        conv_lines = [f"- {text}" for text, doc_id in results if not doc_id]
+        doc_lines  = [f"- {text}" for text, doc_id in results if doc_id]
+        parts = []
+        if conv_lines:
+            parts.append("Из разговоров:\n" + "\n".join(conv_lines))
+        if doc_lines:
+            parts.append("Из документов (факты принадлежат документам, не реальным событиям):\n" + "\n".join(doc_lines))
+        memories = "\n\n".join(parts)
         return (
             "<hindsight_memories>\n"
-            "Релевантные воспоминания из прошлых разговоров:\n"
             f"{memories}\n"
             "</hindsight_memories>\n\n"
             "Управляй долгосрочной памятью: hindsight_recall, hindsight_reflect"
@@ -132,8 +157,9 @@ class HindsightProvider(BaseProvider):
         max_tokens: Annotated[int, "Максимум токенов в ответе (по умолчанию 2000)"] = 2_000,
     ) -> dict:
         try:
-            results = await asyncio.to_thread(self._recall_sync, query, max_tokens, "high")
-            return {"results": results, "count": len(results)}
+            raw = await asyncio.to_thread(self._recall_sync, query[:1500], max_tokens, "high")
+            results = [{"text": t, "from_document": bool(d)} for t, d in raw]
+            return {"results": results, "count": len(results), "from_documents": sum(1 for r in results if r["from_document"])}
         except Exception as e:
             log.warning("[HindsightProvider] recall tool failed: %s", e)
             return {"error": str(e)}

@@ -72,7 +72,7 @@ class Memory:
 
     async def add_turn(self, turn):
         if isinstance(turn, dict) and "_timestamp" not in turn:
-            turn["_timestamp"] = datetime.now(timezone.utc)
+            turn["_timestamp"] = datetime.now(timezone.utc).isoformat()
         self._turns.append(turn)
         if isinstance(turn, dict) and turn.get("role") == "model":
             save_turns_json(self._state_file, self._turns)
