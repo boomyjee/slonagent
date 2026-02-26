@@ -147,23 +147,26 @@ class Agent:
         tools = []
         tool_to_skill = {}
 
+        def truncate(s: str, n: int) -> str:
+            return s[:n] + "..." if len(s) > n else s
+
         system_parts = []
+        tools_info = []
         for skill in self.skills:
             if skill.tools:
                 for f in skill.tools: tool_to_skill[f.name] = skill
                 tools.append(types.Tool(function_declarations=skill.tools))
+                tools_info.extend(f"{t.name}: {truncate(t.description, 100)}" for t in skill.tools)
 
             skill_context = skill.get_context_prompt(user_text)
-            tools_info = "\n".join(f"⚙️ {t.name}: {t.description}" for t in skill.tools)
+            if skill_context:
+                system_parts.append(skill_context)
+                if transport: await transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{truncate(skill_context, 3500)}")
 
-            if skill_context: system_parts.append(skill_context)
-            if transport and (skill_context or tools_info):
-                await transport.send_system_prompt(
-                    f"[{skill.__class__.__name__}]\n"
-                    + skill_context + "\n"
-                    + tools_info
-                )
-                
+        if transport and tools_info:
+            await transport.send_system_prompt("[Инструменты модели]\n"+"\n".join(tools_info))
+
+
         async def send_thinking(response):
             if not transport: return
             parts = response.candidates[0].content.parts or []
