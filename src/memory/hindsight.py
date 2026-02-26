@@ -152,6 +152,31 @@ class HindsightProvider(BaseProvider):
             log.warning("[HindsightProvider] recall tool failed: %s", e)
             return {"error": str(e)}
 
+    @tool("Получить полный текст документа из памяти по его document_id.")
+    async def hindsight_get_document(
+        self,
+        document_id: Annotated[str, "ID документа (из результатов recall)"],
+    ) -> dict:
+        try:
+            from hindsight_client_api import ApiClient, Configuration
+            from hindsight_client_api.api import DocumentsApi
+
+            config = Configuration(host=self._base_url)
+            async with ApiClient(config) as api_client:
+                if self._api_key:
+                    api_client.set_default_header("Authorization", f"Bearer {self._api_key}")
+                api = DocumentsApi(api_client)
+                doc = await api.get_document(bank_id=self._bank_id, document_id=document_id)
+                return {
+                    "document_id": doc.id,
+                    "original_text": doc.original_text,
+                    "memory_unit_count": doc.memory_unit_count,
+                    "created_at": str(doc.created_at),
+                }
+        except Exception as e:
+            log.warning("[HindsightProvider] get_document failed: %s", e)
+            return {"error": str(e)}
+
     @tool("Глубокий анализ памяти с рассуждением. Используй для сложных вопросов о прошлом.")
     async def hindsight_reflect(
         self,
