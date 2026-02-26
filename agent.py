@@ -247,8 +247,9 @@ class Agent:
                 logging.info("[agent] ← LLM iteration %d", iteration)
                 await send_thinking(response)
 
-            if transport: await transport.send_message(response.text or "")
-            await self.memory.add_turn({"role": "model", "parts": [{"text": response.text or ""}]})
+            reply = response.text or ""
+            if transport and reply: await transport.send_message(reply)
+            await self.memory.add_turn({"role": "model", "parts": [{"text": reply}]})
 
         except Exception as e:
             logging.exception("Ошибка при обращении к Gemini")
