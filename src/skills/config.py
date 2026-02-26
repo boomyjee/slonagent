@@ -16,9 +16,8 @@ class ConfigSkill(Skill):
         super().__init__()
         if config_path is None:
             root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
-            config_path = os.path.join(root, "memory", "config.json")
+            config_path = os.path.join(root, ".config.json")
         self.config_path = config_path
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
         if not os.path.exists(config_path):
             self._save({})
 

@@ -31,7 +31,7 @@ class SandboxSkill(Skill):
     def _mounts(self) -> dict[str, str]:
         from src.skills.config import ConfigSkill
         config = next((s for s in self.agent.skills if isinstance(s, ConfigSkill)), None) if self.agent else None
-        folders = config.get("exec.folders") or [] if config else []
+        folders = config.get("sandbox.folders") or [] if config else []
         result = {}
         for f in folders:
             if len(f) >= 2 and f[1] == ":":
