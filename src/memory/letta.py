@@ -173,7 +173,7 @@ class LettaProvider(BaseProvider):
 
     # ── context ───────────────────────────────────────────────────────────────
 
-    def get_context_prompt(self, user_text: str = "") -> str:
+    async def get_context_prompt(self, user_text: str = "") -> str:
         # Memory.compile() из Letta — рендерит все блоки в XML
         compiled = self._memory.compile()
 

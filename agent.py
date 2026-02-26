@@ -182,7 +182,7 @@ class Agent:
                 tools.append(types.Tool(function_declarations=skill.tools))
                 tools_info.extend(f"{t.name}: {truncate(t.description, 100)}" for t in skill.tools)
 
-            skill_context = skill.get_context_prompt(user_query)
+            skill_context = await skill.get_context_prompt(user_query)
             if skill_context:
                 system_parts.append(skill_context)
                 if transport: await transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{truncate(skill_context, 3500)}")

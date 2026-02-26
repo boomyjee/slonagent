@@ -1,5 +1,3 @@
-import asyncio
-import concurrent.futures
 import logging
 from datetime import datetime
 from typing import Annotated
@@ -8,8 +6,6 @@ from agent import tool
 from src.memory.base import BaseProvider
 
 log = logging.getLogger(__name__)
-
-RECALL_TIMEOUT = 10  # секунды
 
 
 class HindsightProvider(BaseProvider):
@@ -47,37 +43,17 @@ class HindsightProvider(BaseProvider):
             self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
         return self._client
 
-    def _make_client(self):
-        """Временный клиент для sync-вызовов через asyncio.run() в отдельном потоке."""
-        from hindsight_client import Hindsight
-        return Hindsight(base_url=self._base_url, api_key=self._api_key)
-
-    def _recall_sync(self, query: str, max_tokens: int, budget: str = "mid") -> list:
-        """
-        Вызывает arecall() через asyncio.run() в отдельном потоке.
-
-        asyncio.run() создаёт новый event loop и оборачивает корутину в Task —
-        это требование asyncio.timeout() в Python 3.11+.
-        ThreadPoolExecutor нужен чтобы не конфликтовать с уже запущенным loop.
-        """
-        async def _coro():
-            client = self._make_client()
-            try:
-                response = await client.arecall(
-                    bank_id=self._bank_id,
-                    query=query,
-                    max_tokens=max_tokens,
-                    budget=budget,
-                )
-                return [
-                    (r.text, getattr(r, "document_id", None))
-                    for r in (response.results or []) if getattr(r, "text", None)
-                ]
-            finally:
-                await client.aclose()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, _coro()).result(timeout=RECALL_TIMEOUT)
+    async def _recall(self, query: str, max_tokens: int, budget: str = "mid") -> list:
+        response = await self._get_client().arecall(
+            bank_id=self._bank_id,
+            query=query,
+            max_tokens=max_tokens,
+            budget=budget,
+        )
+        return [
+            (r.text, getattr(r, "document_id", None))
+            for r in (response.results or []) if getattr(r, "text", None)
+        ]
 
     # ── consolidate ───────────────────────────────────────────────────────────
 
@@ -132,11 +108,11 @@ class HindsightProvider(BaseProvider):
 
     # ── context ───────────────────────────────────────────────────────────────
 
-    def get_context_prompt(self, user_text: str = "") -> str:
+    async def get_context_prompt(self, user_text: str = "") -> str:
         if not user_text:
             return ""
         try:
-            results = self._recall_sync(user_text[:1500], self._recall_max_tokens)
+            results = await self._recall(user_text[:1500], self._recall_max_tokens)
         except Exception as e:
             log.warning("[HindsightProvider] recall failed: %s", e)
             return ""
@@ -166,7 +142,7 @@ class HindsightProvider(BaseProvider):
         max_tokens: Annotated[int, "Максимум токенов в ответе (по умолчанию 2000)"] = 2_000,
     ) -> dict:
         try:
-            raw = await asyncio.to_thread(self._recall_sync, query[:1500], max_tokens, "high")
+            raw = await self._recall(query[:1500], max_tokens, "high")
             results = [{"text": t, "from_document": bool(d)} for t, d in raw]
             return {"results": results, "count": len(results), "from_documents": sum(1 for r in results if r["from_document"])}
         except Exception as e:

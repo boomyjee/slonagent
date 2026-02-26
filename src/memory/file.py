@@ -20,7 +20,7 @@ class FileProvider(BaseProvider):
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
 
-    def get_context_prompt(self, user_text: str = "") -> str:
+    async def get_context_prompt(self, user_text: str = "") -> str:
         memory = ""
         if os.path.exists(self.memory_file):
             with open(self.memory_file, encoding="utf-8") as f: memory = f.read()

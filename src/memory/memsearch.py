@@ -152,7 +152,7 @@ class MemSearchProvider(BaseProvider):
 
     # ── context ───────────────────────────────────────────────────────────────
 
-    def get_context_prompt(self, user_text: str = "") -> str:
+    async def get_context_prompt(self, user_text: str = "") -> str:
         if not user_text:
             return ""
         try:

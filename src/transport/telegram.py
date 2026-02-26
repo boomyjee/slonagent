@@ -16,7 +16,7 @@ class TelegramSkill(Skill):
         self._message = None
         super().__init__()
 
-    def get_context_prompt(self, user_text: str = "") -> str:
+    async def get_context_prompt(self, user_text: str = "") -> str:
         return (
             "Форматируй ответы в Telegram Markdown: "
             "*жирный*, _курсив_, `inline-код`, ```блок кода```. "

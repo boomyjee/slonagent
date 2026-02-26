@@ -17,7 +17,7 @@ class SimpleMemProvider(BaseProvider):
             db_path=os.path.join(Memory.memory_dir, "simplemem", "lancedb"),
         )
 
-    def get_context_prompt(self, user_text: str = "") -> str:
+    async def get_context_prompt(self, user_text: str = "") -> str:
         if not user_text:
             return ""
         try:

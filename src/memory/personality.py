@@ -37,7 +37,7 @@ class PersonalityProvider(BaseProvider):
     def _list(self) -> list[str]:
         return sorted(f[:-3] for f in os.listdir(self._dir) if f.endswith(".md"))
 
-    def get_context_prompt(self, user_text: str = "") -> str:
+    async def get_context_prompt(self, user_text: str = "") -> str:
         all_names = self._list()
         active = [n for n in self._active if n in all_names]
 
