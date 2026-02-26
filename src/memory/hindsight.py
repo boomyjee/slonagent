@@ -44,19 +44,21 @@ class HindsightProvider(BaseProvider):
         self,
         base_url: str = "http://localhost:8888",
         bank_id: str = "slonagent",
+        api_key: str | None = None,
         consolidate_tokens: int = 3_000,
         recall_max_tokens: int = 2_000,
     ):
         super().__init__(consolidate_tokens=consolidate_tokens)
         self._base_url = base_url
         self._bank_id = bank_id
+        self._api_key = api_key
         self._recall_max_tokens = recall_max_tokens
         self._client = None
 
     def _get_client(self):
         if self._client is None:
             from hindsight_client import Hindsight
-            self._client = Hindsight(base_url=self._base_url)
+            self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
         return self._client
 
     def _recall_sync(self, query: str, max_tokens: int, budget: str = "mid") -> list[str]:
