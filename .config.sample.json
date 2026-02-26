@@ -11,7 +11,7 @@
     },
     "agent": {
         "model_name": "gemini-3-flash-preview",
-        "transcription_model_name": "gemini-2.0-flash",
+        "transcription_model_name": "gemini-3-flash-preview",
         "api_key": "$GEMINI_API_KEY",
         "include_thoughts": true,
         "skills": [
