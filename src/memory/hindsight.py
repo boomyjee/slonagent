@@ -46,16 +46,16 @@ class HindsightProvider(BaseProvider):
             self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
         return self._client
 
-    def _recall_sync(self, query: str, max_tokens: int, budget: str = "mid") -> list[str]:
+    def _recall_sync(self, query: str, max_tokens: int, budget: str = "mid") -> list:
         """
-        Вызывает recall() в отдельном потоке.
+        Вызывает arecall() через asyncio.run() в отдельном потоке.
 
-        hindsight_client.recall() внутри использует asyncio.run(), которое
-        падает если уже есть running event loop. Запуск в ThreadPoolExecutor
-        создаёт чистый поток без event loop — там asyncio.run() работает нормально.
+        asyncio.run() создаёт новый event loop и оборачивает корутину в Task —
+        это требование asyncio.timeout() в Python 3.11+.
+        ThreadPoolExecutor нужен чтобы не конфликтовать с уже запущенным loop.
         """
-        def _call():
-            response = self._get_client().recall(
+        async def _coro():
+            response = await self._get_client().arecall(
                 bank_id=self._bank_id,
                 query=query,
                 max_tokens=max_tokens,
@@ -67,7 +67,7 @@ class HindsightProvider(BaseProvider):
             ]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(_call).result(timeout=RECALL_TIMEOUT)
+            return pool.submit(asyncio.run, _coro()).result(timeout=RECALL_TIMEOUT)
 
     # ── consolidate ───────────────────────────────────────────────────────────
 
@@ -111,8 +111,7 @@ class HindsightProvider(BaseProvider):
         if not items:
             return
         try:
-            await asyncio.to_thread(
-                self._get_client().retain_batch,
+            await self._get_client().aretain_batch(
                 bank_id=self._bank_id,
                 items=items,
             )
@@ -170,17 +169,12 @@ class HindsightProvider(BaseProvider):
         query: Annotated[str, "Вопрос для анализа"],
     ) -> dict:
         try:
-            def _call():
-                response = self._get_client().reflect(
-                    bank_id=self._bank_id,
-                    query=query,
-                    budget="low",
-                )
-                return getattr(response, "answer", str(response))
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                answer = pool.submit(_call).result(timeout=30)
-            return {"answer": answer}
+            response = await self._get_client().areflect(
+                bank_id=self._bank_id,
+                query=query,
+                budget="low",
+            )
+            return {"answer": getattr(response, "answer", str(response))}
         except Exception as e:
             log.warning("[HindsightProvider] reflect failed: %s", e)
             return {"error": str(e)}
