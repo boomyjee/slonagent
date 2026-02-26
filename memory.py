@@ -61,6 +61,11 @@ class Memory:
             if tokens > self.soft_limit_tokens and len(user_ids) >= self.min_user_turns: break
             result.append(turn)
         result.reverse()
+
+        if (len(result)<len(self._turns)):
+            self._turns = result;
+            save_json(self._state_file, [t for t in self._turns if isinstance(t, dict)])
+
         return [{k: v for k, v in t.items() if not k.startswith("_")} if isinstance(t, dict) else t for t in result]
 
     async def add_turn(self, turn):
