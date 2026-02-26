@@ -228,20 +228,24 @@ class TelegramTransport:
                 ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".xml",
                 ".html", ".css", ".sh", ".sql", ".csv", ".log",
             }
+            content = None
             if field == "document" and os.path.splitext(filename or "")[1].lower() in text_extensions:
                 try:
                     content = (await self._download_file(attachment.file_id)).decode("utf-8", errors="replace")
-                    message_parts.append({"text": f"[Файл: {filename}, tg_file_id={attachment.file_id}]\n\n{content}"})
                 except Exception:
                     logging.exception("[transport] Не удалось прочитать текстовый файл %s", filename)
 
             if field == "voice":
                 try:
-                    file_meta["content"] = await self.agent.transcribe_audio(await self._download_file(attachment.file_id), "audio/ogg")
+                    content = await self.agent.transcribe_audio(await self._download_file(attachment.file_id), "audio/ogg")
                 except Exception:
                     logging.exception("[transport] Не удалось транскрибировать голосовое %s", attachment.file_id)
 
-            message_parts.append({"text": json.dumps(file_meta, ensure_ascii=False)})
+            attrs = " ".join(f'{k}="{v}"' for k, v in file_meta.items())
+            if content:
+                message_parts.append({"text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>"})
+            else:
+                message_parts.append({"text": f"<attached_file {attrs} />"})
 
         try:
             await self.agent.process_message(
