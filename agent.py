@@ -125,20 +125,20 @@ class Agent:
         )
         return resp.text
 
-    async def process_message(self, message_parts: list, transport=None, user_message_id=None):
+    async def process_message(self, message_parts: list, transport=None, user_message_id=None, user_query: str = ""):
         if self._process_message_lock.locked():
             logging.info("[agent] message queued, waiting for lock")
         async with self._process_message_lock:
-            await self._process_message(message_parts, transport, user_message_id)
+            await self._process_message(message_parts, transport, user_message_id, user_query)
 
-    async def _process_message(self, message_parts: list, transport=None, user_message_id=None):
+    async def _process_message(self, message_parts: list, transport=None, user_message_id=None, user_query: str = ""):
         self.transport = transport
         try:
-            await self._run_message(message_parts, transport, user_message_id)
+            await self._run_message(message_parts, transport, user_message_id, user_query)
         finally:
             self.transport = None
 
-    async def _run_message(self, message_parts: list, transport=None, user_message_id=None):
+    async def _run_message(self, message_parts: list, transport=None, user_message_id=None, user_query: str = ""):
         text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
         logging.info("[agent] incoming: %r", text)
 
@@ -165,7 +165,7 @@ class Agent:
                 tools.append(types.Tool(function_declarations=skill.tools))
                 tools_info.extend(f"{t.name}: {truncate(t.description, 100)}" for t in skill.tools)
 
-            skill_context = skill.get_context_prompt(user_text)
+            skill_context = skill.get_context_prompt(user_query)
             if skill_context:
                 system_parts.append(skill_context)
                 if transport: await transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{truncate(skill_context, 3500)}")

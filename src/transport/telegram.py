@@ -197,10 +197,13 @@ class TelegramTransport:
         await self.bot.send_chat_action(chat_id=first.chat.id, action="typing")
 
         message_parts = []
+        user_texts = []
 
         for message in messages:
             text = message.text or message.caption
-            if text: message_parts.append({"text": text})
+            if text:
+                message_parts.append({"text": text})
+                user_texts.append(text)
 
             if message.photo:
                 message_parts.append(
@@ -252,6 +255,7 @@ class TelegramTransport:
                 message_parts=message_parts,
                 transport=self,
                 user_message_id=first.message_id,
+                user_query=" ".join(user_texts).strip(),
             )
         except Exception as e:
             logging.exception("Error processing message")
