@@ -119,12 +119,15 @@ class HindsightProvider(BaseProvider):
         if not results:
             return ""
         conv_lines = [f"- {text}" for text, doc_id in results if not doc_id]
-        doc_lines  = [f"- {text}" for text, doc_id in results if doc_id]
+        doc_by_id: dict[str, list[str]] = {}
+        for text, doc_id in results:
+            if doc_id:
+                doc_by_id.setdefault(doc_id, []).append(f"  - {text}")
         parts = []
         if conv_lines:
             parts.append("Из разговоров:\n" + "\n".join(conv_lines))
-        if doc_lines:
-            parts.append("Из документов (факты принадлежат документам, не реальным событиям):\n" + "\n".join(doc_lines))
+        for doc_id, lines in doc_by_id.items():
+            parts.append(f"Из документа {doc_id} (факты принадлежат документу, не реальным событиям):\n" + "\n".join(lines))
         memories = "\n\n".join(parts)
         return (
             "<hindsight_memories>\n"
@@ -143,8 +146,8 @@ class HindsightProvider(BaseProvider):
     ) -> dict:
         try:
             raw = await self._recall(query[:1500], max_tokens, "high")
-            results = [{"text": t, "from_document": bool(d)} for t, d in raw]
-            return {"results": results, "count": len(results), "from_documents": sum(1 for r in results if r["from_document"])}
+            results = [{"text": t, "document_id": d} for t, d in raw]
+            return {"results": results, "count": len(results)}
         except Exception as e:
             log.warning("[HindsightProvider] recall tool failed: %s", e)
             return {"error": str(e)}
