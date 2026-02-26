@@ -1,12 +1,8 @@
-import logging, os, sys
+import logging, os
 from typing import Annotated
 from agent import tool
 from src.memory.base import BaseProvider
 from memory import Memory
-
-_LIB = os.path.join(os.path.dirname(__file__), "..", "..", "lib", "SimpleMem")
-if _LIB not in sys.path:
-    sys.path.insert(0, _LIB)
 
 
 class SimpleMemProvider(BaseProvider):
