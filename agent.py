@@ -77,6 +77,9 @@ class Skill:
     def register(self, agent):
         self.agent = agent
 
+    async def start(self):
+        pass
+
     async def dispatch_tool_call(self, tool_call) -> dict:
         if tool_call.name not in self._tool_map:
             return {"error": f"Unknown tool: {tool_call.name}"}
@@ -106,6 +109,10 @@ class Agent:
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self.client = genai.Client(api_key=api_key, http_options=http_options)
         self._process_message_lock = asyncio.Lock()
+
+    async def start(self):
+        for skill in self.skills:
+            await skill.start()
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
         resp = await asyncio.to_thread(

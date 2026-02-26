@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=Warning, module="requests")
+
 import asyncio, importlib, json, logging, os, sys
 
 from agent import Agent
@@ -40,4 +43,8 @@ else:
     tg = config["telegram_transport"]
     transport = TelegramTransport(bot_token=tg["bot_token"], allowed_user_ids=tg["allowed_user_ids"], agent=agent)
 
-asyncio.run(transport.start())
+async def run():
+    await agent.start()
+    await transport.start()
+
+asyncio.run(run())
