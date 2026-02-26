@@ -11,22 +11,6 @@ log = logging.getLogger(__name__)
 RECALL_TIMEOUT = 10  # секунды
 
 
-def _turns_to_text(turns: list) -> str:
-    lines = []
-    for turn in turns:
-        if not isinstance(turn, dict):
-            continue
-        role = turn.get("role", "")
-        text = " ".join(
-            p.get("text", "") for p in turn.get("parts", [])
-            if isinstance(p, dict) and "text" in p
-        ).strip()
-        if text:
-            label = "Пользователь" if role == "user" else "Ассистент"
-            lines.append(f"{label}: {text}")
-    return "\n".join(lines)
-
-
 class HindsightProvider(BaseProvider):
     """
     Провайдер памяти на базе Hindsight.
@@ -84,18 +68,39 @@ class HindsightProvider(BaseProvider):
     # ── consolidate ───────────────────────────────────────────────────────────
 
     async def _consolidate(self, pending: list):
-        text = _turns_to_text(pending)
-        if not text:
+        items = []
+
+        for turn in pending:
+            if not isinstance(turn, dict):
+                continue
+            label = "Пользователь" if turn.get("role") == "user" else "Ассистент"
+            ts = turn.get("_timestamp")
+            for part in turn.get("parts", []):
+                if not isinstance(part, dict) or "text" not in part:
+                    continue
+                doc_id = part.get("_document_id")
+                item = {
+                    "content": part["text"] if doc_id else f"{label}: {part['text']}",
+                    "context": "attached document" if doc_id else "conversation",
+                }
+                if doc_id:
+                    item["document_id"] = doc_id
+                if ts:
+                    item["timestamp"] = ts
+                items.append(item)
+
+        if not items:
             return
         try:
             await asyncio.to_thread(
-                self._get_client().retain,
+                self._get_client().retain_batch,
                 bank_id=self._bank_id,
-                content=text,
+                items=items,
             )
-            log.info("[HindsightProvider] retained %d chars", len(text))
+            n_doc = sum(1 for i in items if "document_id" in i)
+            log.info("[HindsightProvider] retain_batch %d items (%d doc, %d conv)", len(items), n_doc, len(items) - n_doc)
         except Exception as e:
-            log.warning("[HindsightProvider] retain failed: %s", e)
+            log.warning("[HindsightProvider] retain_batch failed: %s", e)
 
     # ── context ───────────────────────────────────────────────────────────────
 

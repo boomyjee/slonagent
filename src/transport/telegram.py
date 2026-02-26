@@ -246,7 +246,10 @@ class TelegramTransport:
 
             attrs = " ".join(f'{k}="{v}"' for k, v in file_meta.items())
             if content:
-                message_parts.append({"text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>"})
+                message_parts.append({
+                    "text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>",
+                    "_document_id": attachment.file_unique_id,
+                })
             else:
                 message_parts.append({"text": f"<attached_file {attrs} />"})
 

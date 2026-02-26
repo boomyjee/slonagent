@@ -1,4 +1,5 @@
 import json, logging, os, sys, tempfile
+from datetime import datetime, timezone
 
 def save_turns_json(path, turns):
     dir_ = os.path.dirname(os.path.abspath(path))
@@ -67,9 +68,11 @@ class Memory:
             self._turns = result
             save_turns_json(self._state_file, self._turns)
 
-        return [{k: v for k, v in t.items() if not k.startswith("_")} if isinstance(t, dict) else t for t in result]
+        return result
 
     async def add_turn(self, turn):
+        if isinstance(turn, dict) and "_timestamp" not in turn:
+            turn["_timestamp"] = datetime.now(timezone.utc)
         self._turns.append(turn)
         if isinstance(turn, dict) and turn.get("role") == "model":
             save_turns_json(self._state_file, self._turns)

@@ -110,6 +110,23 @@ class Agent:
         self.client = genai.Client(api_key=api_key, http_options=http_options)
         self._process_message_lock = asyncio.Lock()
 
+    @staticmethod
+    def _strip_contents_private(turns: list) -> list:
+        result = []
+        for t in turns:
+            if not isinstance(t, dict):
+                result.append(t)
+                continue
+            turn = {k: v for k, v in t.items() if not k.startswith("_")}
+            if "parts" in turn:
+                turn["parts"] = [
+                    {k: v for k, v in p.items() if not k.startswith("_")} if isinstance(p, dict) else p
+                    for p in turn["parts"]
+                ]
+            result.append(turn)
+        return result
+
+
     async def start(self):
         for skill in self.skills:
             await skill.start()
@@ -191,7 +208,7 @@ class Agent:
             logging.info("[agent] → LLM %s", self.model_name)
             response = await asyncio.to_thread(
                 self.client.models.generate_content,
-                model=self.model_name, contents=self.memory.get_contents(), config=config,
+                model=self.model_name, contents=self._strip_contents_private(self.memory.get_contents()), config=config,
             )
             logging.info("[agent] ← LLM")
             await send_thinking(response)
@@ -225,7 +242,7 @@ class Agent:
                 logging.info("[agent] → LLM iteration %d", iteration)
                 response = await asyncio.to_thread(
                     self.client.models.generate_content,
-                    model=self.model_name, contents=self.memory.get_contents(), config=config,
+                    model=self.model_name, contents=self._strip_contents_private(self.memory.get_contents()), config=config,
                 )
                 logging.info("[agent] ← LLM iteration %d", iteration)
                 await send_thinking(response)
