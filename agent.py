@@ -71,7 +71,7 @@ class Skill:
         result = fn(self, args) if not inspect.iscoroutinefunction(fn) else await fn(self, args)
         return str(result)
 
-    def get_context_prompt(self, user_text: str = "") -> str:
+    async def get_context_prompt(self, user_text: str = "") -> str:
         return ""
 
     def register(self, agent):
