@@ -41,10 +41,16 @@ class HindsightProvider(BaseProvider):
         self._client = None
 
     def _get_client(self):
+        """Async-клиент для использования в async контексте (один event loop)."""
         if self._client is None:
             from hindsight_client import Hindsight
             self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
         return self._client
+
+    def _make_client(self):
+        """Временный клиент для sync-вызовов через asyncio.run() в отдельном потоке."""
+        from hindsight_client import Hindsight
+        return Hindsight(base_url=self._base_url, api_key=self._api_key)
 
     def _recall_sync(self, query: str, max_tokens: int, budget: str = "mid") -> list:
         """
@@ -55,16 +61,20 @@ class HindsightProvider(BaseProvider):
         ThreadPoolExecutor нужен чтобы не конфликтовать с уже запущенным loop.
         """
         async def _coro():
-            response = await self._get_client().arecall(
-                bank_id=self._bank_id,
-                query=query,
-                max_tokens=max_tokens,
-                budget=budget,
-            )
-            return [
-                (r.text, getattr(r, "document_id", None))
-                for r in (response.results or []) if getattr(r, "text", None)
-            ]
+            client = self._make_client()
+            try:
+                response = await client.arecall(
+                    bank_id=self._bank_id,
+                    query=query,
+                    max_tokens=max_tokens,
+                    budget=budget,
+                )
+                return [
+                    (r.text, getattr(r, "document_id", None))
+                    for r in (response.results or []) if getattr(r, "text", None)
+                ]
+            finally:
+                await client.aclose()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, _coro()).result(timeout=RECALL_TIMEOUT)
