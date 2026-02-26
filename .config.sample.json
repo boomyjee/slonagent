@@ -21,7 +21,7 @@
         ],
         "memory_providers": [
             {
-                "__class__": "src.memory.knowledge.KnowledgeProvider"
+                "__class__": "src.memory.personality.PersonalityProvider"
             },
             {
                 "__class__": "src.memory.file.FileProvider",
