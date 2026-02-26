@@ -1,7 +1,49 @@
 # Hindsight: разбор архитектуры памяти
 
-> Репозиторий: https://github.com/hindsight-ai/hindsight  
+> Репозиторий: https://github.com/vectorize-io/hindsight  
 > Исходники анализировались из `lib/hindsight/`
+
+---
+
+## Запуск сервера (Podman / Docker)
+
+Hindsight поставляется как Docker-образ. Podman полностью совместим — команды идентичны.
+
+### Переменные окружения
+
+| Переменная | Описание |
+|---|---|
+| `HINDSIGHT_API_LLM_PROVIDER` | Провайдер LLM: `gemini`, `openai`, `anthropic`, `groq`, `ollama`, `lmstudio` |
+| `HINDSIGHT_API_LLM_API_KEY` | API-ключ выбранного провайдера |
+| `HINDSIGHT_API_LLM_MODEL` | Модель (опционально, иначе берётся дефолтная для провайдера) |
+
+### Запуск (встроенная PostgreSQL, всё в одном контейнере)
+
+```powershell
+podman run --rm -d `
+  -p 8888:8888 -p 9999:9999 `
+  -e HINDSIGHT_API_LLM_PROVIDER=gemini `
+  -e HINDSIGHT_API_LLM_API_KEY=<GEMINI_API_KEY> `
+  -v "$env:USERPROFILE\.hindsight:/home/hindsight/.pg0" `
+  ghcr.io/vectorize-io/hindsight:latest
+```
+
+- API: http://localhost:8888  
+- UI: http://localhost:9999
+
+### Остановка
+
+```powershell
+podman stop $(podman ps -q --filter ancestor=ghcr.io/vectorize-io/hindsight:latest)
+```
+
+### Проверка работоспособности
+
+```powershell
+Invoke-RestMethod http://localhost:8888/health
+```
+
+---
 
 ---
 
