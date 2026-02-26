@@ -182,6 +182,11 @@ class TelegramTransport:
         self._media_group_tasks.pop(group_id, None)
         await self._process_messages(messages)
 
+    async def _download_file(self, file_id: str) -> bytes:
+        buf = io.BytesIO()
+        await self.bot.download_file((await self.bot.get_file(file_id)).file_path, buf)
+        return buf.getvalue()
+
     async def _process_messages(self, messages: list[Message]):
         first = messages[0]
         self._current_message = first
@@ -198,11 +203,8 @@ class TelegramTransport:
             if text: message_parts.append({"text": text})
 
             if message.photo:
-                tg_file = await self.bot.get_file(message.photo[-1].file_id)
-                buf = io.BytesIO()
-                await self.bot.download_file(tg_file.file_path, buf)
                 message_parts.append(
-                    types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
+                    types.Part.from_bytes(data=await self._download_file(message.photo[-1].file_id), mime_type="image/jpeg")
                 )
 
             attachment, field = None, None
@@ -228,12 +230,15 @@ class TelegramTransport:
             }
             if field == "document" and os.path.splitext(filename or "")[1].lower() in text_extensions:
                 try:
-                    tg_file = await self.bot.get_file(attachment.file_id)
-                    buf = io.BytesIO()
-                    await self.bot.download_file(tg_file.file_path, buf)
-                    file_meta["content"] = buf.getvalue().decode("utf-8", errors="replace")
+                    file_meta["content"] = (await self._download_file(attachment.file_id)).decode("utf-8", errors="replace")
                 except Exception:
                     logging.exception("[transport] Не удалось прочитать текстовый файл %s", filename)
+
+            if field == "voice":
+                try:
+                    file_meta["content"] = await self.agent.transcribe_audio(await self._download_file(attachment.file_id), "audio/ogg")
+                except Exception:
+                    logging.exception("[transport] Не удалось транскрибировать голосовое %s", attachment.file_id)
 
             message_parts.append({"text": json.dumps(file_meta, ensure_ascii=False)})
 

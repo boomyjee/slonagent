@@ -2,6 +2,7 @@ import asyncio, os, inspect, logging, httpx
 from typing import Annotated, get_type_hints, get_args, get_origin
 from google import genai
 from google.genai import types
+from memory import Memory
 
 
 def tool(description: str):
@@ -90,11 +91,12 @@ class Skill:
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, memory, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20):
+    def __init__(self, model_name: str, api_key: str, memory_providers: list = None, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20, transcription_model_name: str = "gemini-2.0-flash"):
         self.model_name = model_name
         self.include_thoughts = include_thoughts
-        self.memory = memory
-        self.skills = memory.providers + (skills or [])
+        self.transcription_model_name = transcription_model_name
+        self.memory = Memory(providers=memory_providers or [])
+        self.skills = self.memory.providers + (skills or [])
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
@@ -104,6 +106,17 @@ class Agent:
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self.client = genai.Client(api_key=api_key, http_options=http_options)
         self._process_message_lock = asyncio.Lock()
+
+    async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
+        resp = await asyncio.to_thread(
+            self.client.models.generate_content,
+            model=self.transcription_model_name,
+            contents=types.Content(role="user", parts=[
+                types.Part.from_bytes(data=data, mime_type=mime_type),
+                types.Part.from_text(text="Transcribe the audio. Return only the transcript text."),
+            ]),
+        )
+        return resp.text
 
     async def process_message(self, message_parts: list, transport=None, user_message_id=None):
         if self._process_message_lock.locked():

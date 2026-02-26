@@ -1,4 +1,4 @@
-import json, logging, os, sys
+import json, logging, os, sys, tempfile
 
 def load_json(path, default):
     try:
@@ -13,8 +13,11 @@ def load_json(path, default):
 
 def save_json(path, data):
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        dir_ = os.path.dirname(os.path.abspath(path))
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=dir_, delete=False, suffix=".tmp") as f:
             json.dump(data, f, ensure_ascii=False)
+            tmp = f.name
+        os.replace(tmp, path)
     except Exception as e:
         logging.warning("save_json %s: %s", path, e)
 
