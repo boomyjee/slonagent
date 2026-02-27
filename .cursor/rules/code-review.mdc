@@ -1,0 +1,69 @@
+---
+description: Code review principles — how to write clean Python code in this project
+alwaysApply: true
+---
+
+# Принципы написания кода
+
+## Не дублируй логику
+
+Если функция уже есть — сделай публичной и используй. Не копируй.
+
+```python
+# ❌ BAD — своя копия strip-логики в file.py
+{k: v for k, v in p.items() if not k.startswith("_")}
+
+# ✅ GOOD — переиспользуем существующую
+contents = Agent.strip_contents_private(pending)
+```
+
+## Не сериализуй данные без причины
+
+Если данные уже в нужном формате — передавай как есть.
+
+```python
+# ❌ BAD — форматируем turns в текст чтобы вставить в промпт
+conversation = "\n".join(f"[{t['role']}]: ..." for t in turns)
+prompt = f"История:\n{conversation}"
+contents = [{"role": "user", "parts": [{"text": prompt}]}]
+
+# ✅ GOOD — передаём turns напрямую
+contents = [*turns, {"role": "user", "parts": [{"text": instruction}]}]
+```
+
+## Каждый метод делает одно
+
+```python
+# ❌ BAD — _summarize обновляет статистику И генерирует текст
+async def _summarize(self, name, contents):
+    entry["total_calls"] += stats["count"]   # не сюда
+    response = await llm(...)
+
+# ✅ GOOD — статистика обновляется в _consolidate, _summarize только генерирует
+async def _consolidate(self, pending):
+    entry["total_calls"] += batch["count"]   # здесь
+    await self._summarize(name, contents)
+
+async def _summarize(self, name, contents):
+    response = await llm(...)                # только это
+```
+
+## Пиши сразу в нужную структуру
+
+```python
+# ❌ BAD — промежуточный dict
+batch = {}
+batch.setdefault(name, {})["count"] += 1
+for name, b in batch.items():
+    entry["total_calls"] += b["count"]
+
+# ✅ GOOD — сразу в целевую структуру
+entry = self._tool_stats.setdefault(name, {"total_calls": 0})
+entry["total_calls"] += 1
+```
+
+## Не добавляй параметры без смысла
+
+Если значение всегда одно — захардкоди. Не создавай параметр "на всякий случай".
+
+## Импорты только наверху файла

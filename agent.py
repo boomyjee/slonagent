@@ -74,6 +74,9 @@ class Skill:
     async def get_context_prompt(self, user_text: str = "") -> str:
         return ""
 
+    async def get_tool_prompt(self, tool_name: str) -> str:
+        return ""
+
     def register(self, agent):
         self.agent = agent
 
@@ -178,9 +181,20 @@ class Agent:
         tools_info = []
         for skill in self.skills:
             if skill.tools:
-                for f in skill.tools: tool_to_skill[f.name] = skill
-                tools.append(types.Tool(function_declarations=skill.tools))
-                tools_info.extend(f"{t.name}: {truncate(t.description, 100)}" for t in skill.tools)
+                augmented = []
+                for decl in skill.tools:
+                    extra = await skill.get_tool_prompt(decl.name)
+                    if extra:
+                        augmented.append(types.FunctionDeclaration(
+                            name=decl.name,
+                            description=(decl.description or "") + "\n\n---\n" + extra,
+                            parameters=decl.parameters,
+                        ))
+                    else:
+                        augmented.append(decl)
+                for f in augmented: tool_to_skill[f.name] = skill
+                tools.append(types.Tool(function_declarations=augmented))
+                tools_info.extend(f"{t.name}: {truncate(t.description, 100)}" for t in augmented)
 
             skill_context = await skill.get_context_prompt(user_query)
             if skill_context:
