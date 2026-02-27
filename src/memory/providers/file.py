@@ -1,6 +1,6 @@
 import asyncio, logging, os, httpx
 from typing import Annotated
-from agent import tool
+from agent import tool, Agent
 from google import genai
 from google.genai import types
 from src.memory.providers.base import BaseProvider
@@ -80,7 +80,7 @@ class FileProvider(BaseProvider):
             ]
             response = await asyncio.to_thread(
                 self._client.models.generate_content,
-                model=self.model_name, contents=contents, config=config,
+                model=self.model_name, contents=Agent.strip_contents_private(contents), config=config,
             )
             if not response.function_calls:
                 logging.warning("Консолидация: LLM не вызвала save_memory.")
