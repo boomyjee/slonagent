@@ -160,7 +160,7 @@ class SandboxSkill(Skill):
         self,
         path: Annotated[str, "Путь к файлу внутри контейнера (например /workspace/notes.txt)."],
         offset: Annotated[int, "Начальная строка (1-based). По умолчанию 1."] = 1,
-        limit: Annotated[int, "Максимальное число строк. По умолчанию 200."] = 200,
+        limit: Annotated[int, "Максимальное число строк. По умолчанию 1000."] = 1000,
     ):
         host_path = self.resolve_path(path)
         if host_path is None:
