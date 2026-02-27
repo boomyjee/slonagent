@@ -16,7 +16,7 @@ from letta.services.memory_repo.block_markdown import parse_block_markdown, seri
 
 from agent import tool
 from memory import Memory as AppMemory
-from src.memory.base import BaseProvider
+from src.memory.providers.base import BaseProvider
 
 DEFAULT_LIMIT = 20_000
 EMBEDDING_MODEL = "gemini-embedding-001"

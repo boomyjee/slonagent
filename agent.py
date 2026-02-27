@@ -2,7 +2,7 @@ import asyncio, os, inspect, logging, httpx
 from typing import Annotated, get_type_hints, get_args, get_origin
 from google import genai
 from google.genai import types
-from memory import Memory
+from src.memory.memory import Memory
 
 
 def tool(description: str):

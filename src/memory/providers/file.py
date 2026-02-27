@@ -3,7 +3,7 @@ from typing import Annotated
 from agent import tool
 from google import genai
 from google.genai import types
-from src.memory.base import BaseProvider
+from src.memory.providers.base import BaseProvider
 
 
 class FileProvider(BaseProvider):

@@ -73,4 +73,3 @@ class Memory:
             save_turns_json(self._state_file, self._turns)
         for provider in self.providers:
             await provider.add_turn(turn)
-

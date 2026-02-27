@@ -1,8 +1,7 @@
-from memory import Memory
-from src.memory.compressors.base import BaseCompressor
+from src.memory.memory import Memory
 
 
-class WindowCompressor(BaseCompressor):
+class WindowCompressor:
     """Стратегия по умолчанию: скользящее окно по токен-бюджету.
 
     Старые сообщения молча удаляются при переполнении.

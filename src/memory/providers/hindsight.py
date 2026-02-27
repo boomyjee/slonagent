@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Annotated
 
 from agent import tool
-from src.memory.base import BaseProvider
+from src.memory.providers.base import BaseProvider
 
 log = logging.getLogger(__name__)
 

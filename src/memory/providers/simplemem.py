@@ -1,7 +1,7 @@
 import logging, os
 from typing import Annotated
 from agent import tool
-from src.memory.base import BaseProvider
+from src.memory.providers.base import BaseProvider
 from memory import Memory
 
 

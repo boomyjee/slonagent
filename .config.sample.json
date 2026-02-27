@@ -21,20 +21,20 @@
         },
         "memory_providers": [
             {
-                "__class__": "src.memory.hindsight.HindsightProvider",
+                "__class__": "src.memory.providers.hindsight.HindsightProvider",
                 "base_url": "http://localhost:8888",
                 "bank_id": "slonagent"
             },
             {
-                "__class__": "src.memory.personality.PersonalityProvider"
+                "__class__": "src.memory.providers.personality.PersonalityProvider"
             },
             {
-                "__class__": "src.memory.file.FileProvider",
+                "__class__": "src.memory.providers.file.FileProvider",
                 "model_name": "gemini-3-flash-preview",
                 "api_key": "$GEMINI_API_KEY"
             },
             {
-                "__class__": "src.memory.simplemem.SimpleMemProvider",
+                "__class__": "src.memory.providers.simplemem.SimpleMemProvider",
                 "model_name": "gemini-3-flash-preview",
                 "api_key": "$GEMINI_API_KEY"
             }

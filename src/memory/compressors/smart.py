@@ -21,7 +21,7 @@ from uuid import uuid4
 import httpx
 from google import genai
 
-from memory import Memory
+from src.memory.memory import Memory
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ First think in a private <scratchpad>. Then generate the <state_snapshot>.
 """
 
 
-class MemoryCompressor:
+class SmartCompressor:
     """Сжатие контекста разговора по мотивам ReMe (Alibaba).
 
     Три режима (WorkingMemoryMode):
