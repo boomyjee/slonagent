@@ -7,7 +7,8 @@ def save_turns_json(path, turns):
     try:
         data = [t for t in turns if isinstance(t, dict) and all(isinstance(p, dict) for p in t.get("parts", []))]
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=dir_, delete=False, suffix=".tmp") as f:
-            json.dump(data, f, ensure_ascii=False)
+            for turn in data:
+                f.write(json.dumps(turn, ensure_ascii=False) + "\n")
             tmp = f.name
         os.replace(tmp, path)
     except Exception as e:
@@ -19,7 +20,13 @@ def save_turns_json(path, turns):
 def load_turns_json(path):
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            content = f.read().strip()
+        if not content:
+            return []
+        # поддержка старого формата (JSON array)
+        if content.startswith("["):
+            return json.loads(content)
+        return [json.loads(line) for line in content.splitlines() if line.strip()]
     except FileNotFoundError:
         return []
     except Exception as e:
