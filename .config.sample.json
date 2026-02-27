@@ -39,6 +39,11 @@
                 "api_key": "$GEMINI_API_KEY"
             },
             {
+                "__class__": "src.memory.providers.semantic.SemanticProvider",
+                "model_name": "gemini-3-flash-preview",
+                "api_key": "$GEMINI_API_KEY"
+            },
+            {
                 "__class__": "src.memory.providers.tool.ToolProvider",
                 "model_name": "gemini-3-flash-preview",
                 "api_key": "$GEMINI_API_KEY"
