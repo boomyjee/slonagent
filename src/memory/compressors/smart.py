@@ -87,7 +87,6 @@ class SmartCompressor:
       keep_recent_count       — последние N сообщений не трогать никогда
       compact_ratio_threshold — AUTO: если после COMPACT ratio > этого → применить COMPRESS
       group_token_threshold   — COMPRESS: бить старые сообщения на группы по N токенов
-      store_dir               — куда сохранять офлоад-файлы
       cleanup_max_age_days    — удалять файлы старше N дней при запуске (0 = не чистить)
     """
 
@@ -95,7 +94,6 @@ class SmartCompressor:
         self,
         api_key: str,
         model_name: str,
-        store_dir: str = "memory/compressed",
         mode: WorkingMemoryMode = WorkingMemoryMode.AUTO,
         max_total_tokens: int = 20_000,
         max_tool_message_tokens: int = 2_000,
@@ -110,7 +108,7 @@ class SmartCompressor:
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
         self.model_name = model_name
-        self.store_dir = store_dir
+        self.store_dir = os.path.join(Memory.memory_dir, "compressed")
         self.mode = mode
         self.max_total_tokens = max_total_tokens
         self.max_tool_message_tokens = max_tool_message_tokens
