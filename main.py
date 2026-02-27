@@ -27,6 +27,22 @@ def instantiate(cfg: dict, cls=None):
 
 _CONFIG_PATH = ".config.json"
 _LAST_GOOD_PATH = ".config.last_good.json"
+_PID_PATH = ".agent.pid"
+
+def acquire_pid_lock():
+    import time, psutil
+    try:
+        pid = int(open(_PID_PATH).read().strip())
+        if all(time.sleep(0.5) or psutil.pid_exists(pid) for _ in range(4)):
+            logging.error("Агент уже запущен (PID %d). Завершаю.", pid)
+            sys.exit(1)
+    except Exception:
+        pass
+    open(_PID_PATH, "w").write(str(os.getpid()))
+
+def release_pid_lock():
+    try: os.unlink(_PID_PATH)
+    except FileNotFoundError: pass
 
 async def run():
     from agent import Agent
@@ -53,6 +69,10 @@ async def run():
         raise
 
     shutil.copy(_CONFIG_PATH, _LAST_GOOD_PATH)
-    await transport.start()
+    try:
+        await transport.start()
+    finally:
+        release_pid_lock()
 
+acquire_pid_lock()
 asyncio.run(run())
