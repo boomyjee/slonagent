@@ -1,4 +1,4 @@
-import logging, os
+import asyncio, logging, os
 from typing import Annotated
 from agent import tool
 from src.memory.providers.base import BaseProvider
@@ -55,8 +55,10 @@ class SimpleMemProvider(BaseProvider):
                 Dialogue(dialogue_id=i, speaker=role, content=text)
                 for i, (role, text) in enumerate(messages)
             ]
-            self._simplemem.add_dialogues(dialogues)
-            self._simplemem.finalize()
+            def _run():
+                self._simplemem.add_dialogues(dialogues)
+                self._simplemem.finalize()
+            await asyncio.to_thread(_run)
             logging.info("[SimpleMemProvider] консолидация: %d сообщений.", len(messages))
         except Exception as e:
             logging.error("[SimpleMemProvider] ошибка консолидации: %s", e)
