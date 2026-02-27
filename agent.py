@@ -208,7 +208,7 @@ class Agent:
             logging.info("[agent] → LLM %s", self.model_name)
             response = await asyncio.to_thread(
                 self.client.models.generate_content,
-                model=self.model_name, contents=self._strip_contents_private(self.memory.get_contents()), config=config,
+                model=self.model_name, contents=self._strip_contents_private(await self.memory.get_contents()), config=config,
             )
             logging.info("[agent] ← LLM")
             await send_thinking(response)
@@ -242,7 +242,7 @@ class Agent:
                 logging.info("[agent] → LLM iteration %d", iteration)
                 response = await asyncio.to_thread(
                     self.client.models.generate_content,
-                    model=self.model_name, contents=self._strip_contents_private(self.memory.get_contents()), config=config,
+                    model=self.model_name, contents=self._strip_contents_private(await self.memory.get_contents()), config=config,
                 )
                 logging.info("[agent] ← LLM iteration %d", iteration)
                 await send_thinking(response)

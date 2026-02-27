@@ -21,6 +21,11 @@
         ],
         "memory_providers": [
             {
+                "__class__": "src.memory.hindsight.HindsightProvider",
+                "base_url": "http://localhost:8888",
+                "bank_id": "slonagent"
+            },
+            {
                 "__class__": "src.memory.personality.PersonalityProvider"
             },
             {
