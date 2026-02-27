@@ -2,7 +2,7 @@ import json, logging, os
 from typing import Annotated
 from agent import tool
 from src.memory.providers.base import BaseProvider
-from memory import Memory
+from src.memory.memory import Memory
 
 
 class PersonalityProvider(BaseProvider):

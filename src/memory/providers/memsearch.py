@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 from agent import tool
-from memory import Memory as AppMemory
+from src.memory.memory import Memory as AppMemory
 from src.memory.providers.base import BaseProvider
 
 log = logging.getLogger(__name__)

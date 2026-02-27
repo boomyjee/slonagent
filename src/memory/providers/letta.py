@@ -15,7 +15,7 @@ from letta.schemas.memory import Memory
 from letta.services.memory_repo.block_markdown import parse_block_markdown, serialize_block
 
 from agent import tool
-from memory import Memory as AppMemory
+from src.memory.memory import Memory as AppMemory
 from src.memory.providers.base import BaseProvider
 
 DEFAULT_LIMIT = 20_000

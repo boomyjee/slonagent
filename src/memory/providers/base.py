@@ -1,6 +1,6 @@
 import os
 from agent import Skill
-from memory import load_turns_json, save_turns_json, Memory
+from src.memory.memory import load_turns_json, save_turns_json, Memory
 
 class BaseProvider(Skill):
     def __init__(self, consolidate_tokens: int = 1_000):

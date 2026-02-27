@@ -9,7 +9,7 @@ from src.memory.providers.base import BaseProvider
 class FileProvider(BaseProvider):
     def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 1_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
-        from memory import Memory
+        from src.memory.memory import Memory
         file_dir = os.path.join(Memory.memory_dir, "file")
         os.makedirs(file_dir, exist_ok=True)
         self.memory_file = os.path.join(file_dir, "MEMORY.md")
