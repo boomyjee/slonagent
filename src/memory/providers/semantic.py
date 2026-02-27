@@ -7,7 +7,7 @@ Pipeline (read):
   user_text → embed → LanceDB vector search → context string
 """
 import asyncio, json, logging, os, re, uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 import httpx
@@ -16,6 +16,7 @@ import numpy as np
 import pyarrow as pa
 from google import genai
 
+from agent import tool
 from src.memory.providers.base import BaseProvider
 from src.memory.memory import Memory
 
@@ -24,12 +25,9 @@ log = logging.getLogger(__name__)
 # ── Extraction prompt (from SimpleMem) ────────────────────────────────────────
 
 EXTRACT_PROMPT = """\
-Your task is to extract all valuable information from the following dialogues and convert them into structured memory entries.
+Your task is to extract all valuable information from the conversation above and convert them into structured memory entries.
 
 {context}
-
-[Current Dialogues]
-{dialogue_text}
 
 [Requirements]
 1. **Complete Coverage**: Generate enough memory entries to ensure ALL information in the dialogues is captured
@@ -50,17 +48,47 @@ Return a JSON array, each element is a memory entry:
 [
   {{
     "lossless_restatement": "Complete unambiguous restatement (must include all subjects, objects, time, location, etc.)",
-    "keywords": ["keyword1", "keyword2"],
+    "keywords": ["keyword1", "keyword2", ...],
     "timestamp": "YYYY-MM-DDTHH:MM:SS or null",
     "location": "location name or null",
-    "persons": ["name1", "name2"],
-    "entities": ["entity1", "entity2"],
+    "persons": ["name1", "name2", ...],
+    "entities": ["entity1", "entity2", ...],
     "topic": "topic phrase"
+  }},
+  ...
+]
+```
+
+[Example]
+Dialogues:
+[2025-11-15T14:30:00] Alice: Bob, let's meet at Starbucks tomorrow at 2pm to discuss the new product
+[2025-11-15T14:31:00] Bob: Okay, I'll prepare the materials
+
+Output:
+```json
+[
+  {{
+    "lossless_restatement": "Alice suggested at 2025-11-15T14:30:00 to meet with Bob at Starbucks on 2025-11-16T14:00:00 to discuss the new product.",
+    "keywords": ["Alice", "Bob", "Starbucks", "new product", "meeting"],
+    "timestamp": "2025-11-16T14:00:00",
+    "location": "Starbucks",
+    "persons": ["Alice", "Bob"],
+    "entities": ["new product"],
+    "topic": "Product discussion meeting arrangement"
+  }},
+  {{
+    "lossless_restatement": "Bob agreed to attend the meeting and committed to prepare relevant materials.",
+    "keywords": ["Bob", "prepare materials", "agree"],
+    "timestamp": null,
+    "location": null,
+    "persons": ["Bob"],
+    "entities": [],
+    "topic": "Meeting preparation confirmation"
   }}
 ]
 ```
 
-Return ONLY the JSON array, no other explanations.\
+Now process the conversation above. Return ONLY the JSON array, no other explanations.\
 """
 
 # ── Data model ─────────────────────────────────────────────────────────────────
@@ -190,18 +218,24 @@ class SemanticProvider(BaseProvider):
     # ── LLM extraction ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _turns_to_dialogue(turns: list) -> str:
-        lines = []
+    def _prepare_contents(turns: list) -> list:
+        """Strip private fields, embed _timestamp as text prefix to preserve temporal context."""
+        result = []
         for turn in turns:
             if not isinstance(turn, dict) or turn.get("role") not in ("user", "model"):
                 continue
-            speaker = "User" if turn["role"] == "user" else "Assistant"
-            ts = turn.get("_timestamp", "")[:19] if turn.get("_timestamp") else ""
-            for part in turn.get("parts", []):
-                if isinstance(part, dict) and (text := part.get("text")):
-                    prefix = f"[{ts}] " if ts else ""
-                    lines.append(f"{prefix}{speaker}: {text[:500]}")
-        return "\n".join(lines)
+            ts = (turn.get("_timestamp") or "")[:19]
+            parts = []
+            for i, part in enumerate(turn.get("parts", [])):
+                if not isinstance(part, dict):
+                    continue
+                clean = {k: v for k, v in part.items() if not k.startswith("_")}
+                if i == 0 and ts and "text" in clean:
+                    clean["text"] = f"[{ts}] {clean['text']}"
+                parts.append(clean)
+            if parts:
+                result.append({"role": turn["role"], "parts": parts})
+        return result
 
     def _build_context(self) -> str:
         try:
@@ -215,18 +249,15 @@ class SemanticProvider(BaseProvider):
         except Exception:
             return ""
 
-    async def _extract_entries(self, dialogue_text: str) -> list[MemoryEntry]:
+    async def _extract_entries(self, contents: list) -> list[MemoryEntry]:
         context = await asyncio.to_thread(self._build_context)
-        prompt = EXTRACT_PROMPT.format(
-            context=context,
-            dialogue_text=dialogue_text,
-        )
+        instruction = EXTRACT_PROMPT.format(context=context)
         for attempt in range(3):
             try:
                 response = await asyncio.to_thread(
                     self._client.models.generate_content,
                     model=self.model_name,
-                    contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                    contents=[*contents, {"role": "user", "parts": [{"text": instruction}]}],
                 )
                 raw = response.text or ""
                 m = re.search(r"\[.*\]", raw, re.DOTALL)
@@ -255,24 +286,32 @@ class SemanticProvider(BaseProvider):
 
     # ── consolidation & context ────────────────────────────────────────────────
 
+    def _save_last_entries(self, entries: list[MemoryEntry]):
+        path = os.path.join(Memory.memory_dir, "semantic", "last_entries.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump([asdict(e) for e in entries], f, ensure_ascii=False, indent=2)
+        except Exception as ex:
+            log.warning("[SemanticProvider] save last_entries failed: %s", ex)
+
     async def _consolidate(self, pending: list):
-        dialogue_text = self._turns_to_dialogue(pending)
-        if not dialogue_text.strip():
+        contents = self._prepare_contents(pending)
+        if not contents:
             return
-        entries = await self._extract_entries(dialogue_text)
+        entries = await self._extract_entries(contents)
         if entries:
             await asyncio.to_thread(self._add_entries, entries)
+            self._save_last_entries(entries)
         log.info("[SemanticProvider] consolidated %d turns → %d entries", len(pending), len(entries))
 
-    async def get_context_prompt(self, user_text: str = "") -> str:
-        if not user_text:
-            return ""
+    @tool("Семантический поиск по долгосрочной памяти. Используй, когда нужно вспомнить факты, события или детали из прошлых разговоров. Перефразируй запрос пользователя в виде конкретного поискового вопроса.")
+    async def search_memory(self, query: str) -> str:
         try:
-            entries = await asyncio.to_thread(self._search, user_text)
+            entries = await asyncio.to_thread(self._search, query)
         except Exception as e:
             log.warning("[SemanticProvider] search failed: %s", e)
-            return ""
+            return "Ошибка поиска."
         if not entries:
-            return ""
+            return "Ничего не найдено."
         lines = [f"- {e.lossless_restatement}" for e in entries]
-        return "## Semantic memory\n" + "\n".join(lines)
+        return "\n".join(lines)
