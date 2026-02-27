@@ -3,13 +3,12 @@ from typing import Annotated
 from agent import tool
 from src.memory.providers.base import BaseProvider
 from src.memory.memory import Memory
+from simplemem import SimpleMemSystem, Dialogue
 
 
 class SimpleMemProvider(BaseProvider):
     def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 1_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
-        
-        from simplemem import SimpleMemSystem
         self._simplemem = SimpleMemSystem(
             api_key=api_key,
             model=model_name,
@@ -43,7 +42,6 @@ class SimpleMemProvider(BaseProvider):
             return {"error": str(e)}
 
     async def _consolidate(self, pending):
-        from models.memory_entry import Dialogue
         messages = [
             (t["role"], " ".join(p.get("text", "") for p in t.get("parts", []) if isinstance(p, dict) and "text" in p).strip())
             for t in pending
