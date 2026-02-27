@@ -14,11 +14,11 @@
         "transcription_model_name": "gemini-3-flash-preview",
         "api_key": "$GEMINI_API_KEY",
         "include_thoughts": true,
-        "skills": [
-            {"__class__": "src.skills.config.ConfigSkill"},
-            {"__class__": "src.skills.sandbox.SandboxSkill"},
-            {"__class__": "src.skills.skill_writer.SkillWriterSkill"}
-        ],
+        "memory_compressor": {
+            "__class__": "src.memory.compressors.smart.SmartCompressor",
+            "api_key": "$GEMINI_API_KEY",
+            "model_name": "gemini-3-flash-preview"
+        },
         "memory_providers": [
             {
                 "__class__": "src.memory.hindsight.HindsightProvider",
@@ -38,6 +38,11 @@
                 "model_name": "gemini-3-flash-preview",
                 "api_key": "$GEMINI_API_KEY"
             }
+        ],
+        "skills": [
+            {"__class__": "src.skills.config.ConfigSkill"},
+            {"__class__": "src.skills.sandbox.SandboxSkill"},
+            {"__class__": "src.skills.skill_writer.SkillWriterSkill"}
         ]
     }
 }
