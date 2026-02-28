@@ -11,13 +11,14 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 log = logging.getLogger(__name__)
 
-CHUNK_SIZE = 120_000  # символов (≈30k токенов, как у Hindsight)
-SECONDS_PER_FACT = 0.01  # офсет между фактами для сохранения порядка
+CHUNK_SIZE             = 3_000   # символов на чанк (DEFAULT_RETAIN_CHUNK_SIZE)
+RETAIN_MAX_OUTPUT_TOKENS = 64_000  # лимит вывода LLM на чанк (DEFAULT_RETAIN_MAX_COMPLETION_TOKENS)
+SECONDS_PER_FACT       = 0.01    # офсет между фактами для сохранения порядка
 
 
 # ── Prompts (verbatim from Hindsight) ─────────────────────────────────────────
@@ -145,11 +146,23 @@ Example: "Lost job → couldn't pay rent → moved apartment"
 - Fact 1: Couldn't pay rent, causal_relations: [{"target_index": 0, "relation_type": "caused_by", "strength": 1.0}]
 - Fact 2: Moved apartment, causal_relations: [{"target_index": 1, "relation_type": "caused_by", "strength": 1.0}]"""
 
+_OUTPUT_FORMAT_SECTION = """
+
+══════════════════════════════════════════════════════════════════════════
+OUTPUT FORMAT
+══════════════════════════════════════════════════════════════════════════
+
+ALWAYS return valid JSON in this exact structure:
+{"facts": [...]}
+
+If no significant facts found, return: {"facts": []}
+NEVER return plain text. NEVER omit the JSON wrapper."""
+
 CONCISE_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
     retain_mission_section="",
     extraction_guidelines=_CONCISE_GUIDELINES,
     examples=_CONCISE_EXAMPLES,
-) + _CAUSAL_RELATIONSHIPS_SECTION
+) + _CAUSAL_RELATIONSHIPS_SECTION + _OUTPUT_FORMAT_SECTION
 
 
 # ── Data models ────────────────────────────────────────────────────────────────
@@ -358,6 +371,10 @@ def _parse_facts_from_json(raw_json: dict, event_date: datetime, mentioned_at: s
     return facts
 
 
+class _OutputTooLongError(Exception):
+    """LLM обрезал вывод — чанк нужно разделить."""
+
+
 async def _extract_from_chunk(
     chunk: str,
     chunk_index: int,
@@ -367,11 +384,14 @@ async def _extract_from_chunk(
     client,
     model_name: str,
 ) -> list[Fact]:
+    """Один LLM-запрос. Бросает _OutputTooLongError если ответ был обрезан."""
+    effective_date = event_date or datetime.now(timezone.utc)
     user_message = _build_user_message(chunk, chunk_index, total_chunks, event_date, context)
-    mentioned_at = event_date.isoformat()
+    mentioned_at = effective_date.isoformat()
 
     for attempt in range(3):
         try:
+            from google.genai import types as genai_types
             response = await asyncio.to_thread(
                 client.models.generate_content,
                 model=model_name,
@@ -380,21 +400,82 @@ async def _extract_from_chunk(
                     {"role": "model", "parts": [{"text": "Understood. I will extract significant facts from the text you provide."}]},
                     {"role": "user", "parts": [{"text": user_message}]},
                 ],
+                config=genai_types.GenerateContentConfig(
+                    max_output_tokens=RETAIN_MAX_OUTPUT_TOKENS,
+                    response_mime_type="application/json",
+                ),
             )
-            raw = response.text or ""
 
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            # Проверяем, был ли вывод обрезан по лимиту токенов
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate is not None:
+                reason = str(getattr(candidate, "finish_reason", "")).upper()
+                if "MAX_TOKEN" in reason or reason == "2":
+                    raise _OutputTooLongError(f"finish_reason={reason}")
+
+            raw = response.text or ""
+            m = re.search(r"\{", raw)
             if not m:
-                log.warning("[retain] no JSON object in response (attempt %d)", attempt + 1)
+                log.warning("[retain] no JSON object in response (attempt %d): %r", attempt + 1, raw[:300])
                 continue
 
-            data = json.loads(m.group(0))
-            return _parse_facts_from_json(data, event_date, mentioned_at)
+            data, _ = json.JSONDecoder().raw_decode(raw, m.start())
+            return _parse_facts_from_json(data, effective_date, mentioned_at)
 
+        except _OutputTooLongError:
+            raise  # пробрасываем наверх для auto-split
         except Exception as e:
             log.warning("[retain] chunk %d extraction attempt %d failed: %s", chunk_index, attempt + 1, e)
 
     return []
+
+
+def _split_chunk(chunk: str) -> tuple[str, str]:
+    """Делит чанк пополам по ближайшей границе предложения."""
+    mid = len(chunk) // 2
+    search_range = int(len(chunk) * 0.2)
+    search_start = max(0, mid - search_range)
+    search_end   = min(len(chunk), mid + search_range)
+
+    best_split = mid
+    for ending in ("\n\n", ". ", "! ", "? "):
+        pos = chunk.rfind(ending, search_start, search_end)
+        if pos != -1:
+            best_split = pos + len(ending)
+            break
+
+    return chunk[:best_split].strip(), chunk[best_split:].strip()
+
+
+async def _extract_from_chunk_auto_split(
+    chunk: str,
+    chunk_index: int,
+    total_chunks: int,
+    event_date: datetime,
+    context: str,
+    client,
+    model_name: str,
+) -> list[Fact]:
+    """Обёртка с рекурсивным авто-сплитом при OutputTooLong."""
+    try:
+        return await _extract_from_chunk(
+            chunk, chunk_index, total_chunks, event_date, context, client, model_name
+        )
+    except _OutputTooLongError:
+        first, second = _split_chunk(chunk)
+        if not first or not second:
+            log.warning("[retain] chunk %d: cannot split further, skipping", chunk_index)
+            return []
+
+        log.info(
+            "[retain] chunk %d too long (%d chars) → split into %d + %d chars",
+            chunk_index, len(chunk), len(first), len(second),
+        )
+        sub_results = await asyncio.gather(
+            _extract_from_chunk_auto_split(first,  chunk_index, total_chunks, event_date, context, client, model_name),
+            _extract_from_chunk_auto_split(second, chunk_index, total_chunks, event_date, context, client, model_name),
+        )
+        return sub_results[0] + sub_results[1]
 
 
 async def extract_facts(
@@ -416,7 +497,7 @@ async def extract_facts(
     for item_idx, item in enumerate(items):
         chunks = chunk_text(item.content)
         for chunk_idx, chunk in enumerate(chunks):
-            tasks.append(_extract_from_chunk(
+            tasks.append(_extract_from_chunk_auto_split(
                 chunk, chunk_idx, len(chunks), item.event_date, item.context, client, model_name
             ))
             task_meta.append((item_idx, chunk_idx, chunk))
