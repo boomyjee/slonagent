@@ -1,0 +1,721 @@
+"""retain.py — извлечение фактов из текста и сохранение в LanceDB.
+
+Промпты и chunk_text — 1 в 1 с Hindsight.
+
+Pipeline:
+  текст → chunk_text → [LLM параллельно] → Fact list → embeddings → LanceDB
+"""
+import asyncio
+import json
+import logging
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Literal, Optional
+
+log = logging.getLogger(__name__)
+
+CHUNK_SIZE = 120_000  # символов (≈30k токенов, как у Hindsight)
+SECONDS_PER_FACT = 0.01  # офсет между фактами для сохранения порядка
+
+
+# ── Prompts (verbatim from Hindsight) ─────────────────────────────────────────
+
+_BASE_FACT_EXTRACTION_PROMPT = """Extract SIGNIFICANT facts from text. Be SELECTIVE - only extract facts worth remembering long-term.
+
+LANGUAGE: MANDATORY — Detect the language of the input text and produce ALL output in that EXACT same language. You are STRICTLY FORBIDDEN from translating or switching to any other language. Every single word of your output must be in the same language as the input. Do NOT output in a different language under any circumstance.
+
+{retain_mission_section}{extraction_guidelines}
+
+══════════════════════════════════════════════════════════════════════════
+FACT FORMAT - BE CONCISE
+══════════════════════════════════════════════════════════════════════════
+
+1. **what**: Core fact - concise but complete (1-2 sentences max)
+2. **when**: Temporal info if mentioned. "N/A" if none. Use day name when known.
+3. **where**: Location if relevant. "N/A" if none.
+4. **who**: People involved with relationships. "N/A" if just general info.
+5. **why**: Context/significance ONLY if important. "N/A" if obvious.
+
+CONCISENESS: Capture the essence, not every word. One good sentence beats three mediocre ones.
+
+══════════════════════════════════════════════════════════════════════════
+COREFERENCE RESOLUTION
+══════════════════════════════════════════════════════════════════════════
+
+Link generic references to names when both appear:
+- "my roommate" + "Emily" → use "Emily (user's roommate)"
+- "the manager" + "Sarah" → use "Sarah (the manager)"
+
+══════════════════════════════════════════════════════════════════════════
+CLASSIFICATION
+══════════════════════════════════════════════════════════════════════════
+
+fact_kind:
+- "event": Specific datable occurrence (set occurred_start/end)
+- "conversation": Ongoing state, preference, trait (no dates)
+
+fact_type:
+- "world": About user's life, other people, external events
+- "assistant": Interactions with assistant (requests, recommendations)
+
+══════════════════════════════════════════════════════════════════════════
+TEMPORAL HANDLING
+══════════════════════════════════════════════════════════════════════════
+
+Use "Event Date" from input as reference for relative dates.
+- CRITICAL: Convert ALL relative temporal expressions to absolute dates in the fact text itself.
+  "yesterday" → write the resolved date (e.g. "on November 12, 2024"), NOT the word "yesterday"
+  "last night", "this morning", "today", "tonight" → convert to the resolved absolute date
+- For events: set occurred_start AND occurred_end (same for point events)
+- For conversation facts: NO occurred dates
+
+══════════════════════════════════════════════════════════════════════════
+ENTITIES
+══════════════════════════════════════════════════════════════════════════
+
+Include: people names, organizations, places, key objects, abstract concepts (career, friendship, etc.)
+Always include "user" when fact is about the user.{examples}"""
+
+_CONCISE_GUIDELINES = """══════════════════════════════════════════════════════════════════════════
+SELECTIVITY - CRITICAL (Reduces 90% of unnecessary output)
+══════════════════════════════════════════════════════════════════════════
+
+ONLY extract facts that are:
+✅ Personal info: names, relationships, roles, background
+✅ Preferences: likes, dislikes, habits, interests (e.g., "Alice likes coffee")
+✅ Significant events: milestones, decisions, achievements, changes
+✅ Plans/goals: future intentions, deadlines, commitments
+✅ Expertise: skills, knowledge, certifications, experience
+✅ Important context: projects, problems, constraints
+✅ Sensory/emotional details: feelings, sensations, perceptions that provide context
+✅ Observations: descriptions of people, places, things with specific details
+
+DO NOT extract:
+❌ Generic greetings: "how are you", "hello", pleasantries without substance
+❌ Pure filler: "thanks", "sounds good", "ok", "got it", "sure"
+❌ Process chatter: "let me check", "one moment", "I'll look into it"
+❌ Repeated info: if already stated, don't extract again
+
+CONSOLIDATE related statements into ONE fact when possible."""
+
+_CONCISE_EXAMPLES = """
+
+══════════════════════════════════════════════════════════════════════════
+EXAMPLES (shown in English for illustration; for non-English input, ALL output values MUST be in the input language)
+══════════════════════════════════════════════════════════════════════════
+
+Example 1 - Selective extraction (Event Date: June 10, 2024):
+Input: "Hey! How's it going? Good morning! So I'm planning my wedding - want a small outdoor ceremony. Just got back from Emily's wedding, she married Sarah at a rooftop garden. It was nice weather. I grabbed a coffee on the way."
+
+Output: ONLY 2 facts (skip greetings, weather, coffee):
+1. what="User planning wedding, wants small outdoor ceremony", who="user", why="N/A", entities=["user", "wedding"]
+2. what="Emily married Sarah at rooftop garden", who="Emily (user's friend), Sarah", occurred_start="2024-06-09", entities=["Emily", "Sarah", "wedding"]
+
+Example 2 - Professional context:
+Input: "Alice has 5 years of Kubernetes experience and holds CKA certification. She's been leading the infrastructure team since March. By the way, she prefers dark roast coffee."
+
+Output: ONLY 2 facts (skip coffee preference - too trivial):
+1. what="Alice has 5 years Kubernetes experience, CKA certified", who="Alice", entities=["Alice", "Kubernetes", "CKA"]
+2. what="Alice leads infrastructure team since March", who="Alice", entities=["Alice", "infrastructure"]
+
+══════════════════════════════════════════════════════════════════════════
+QUALITY OVER QUANTITY
+══════════════════════════════════════════════════════════════════════════
+
+Ask: "Would this be useful to recall in 6 months?" If no, skip it.
+
+IMPORTANT: Sensory/emotional details and observations that provide meaningful context
+about experiences ARE important to remember, even if they seem small (e.g., how food
+tasted, how someone looked, how loud music was). Extract these if they characterize
+an experience or person."""
+
+_CAUSAL_RELATIONSHIPS_SECTION = """
+
+══════════════════════════════════════════════════════════════════════════
+CAUSAL RELATIONSHIPS
+══════════════════════════════════════════════════════════════════════════
+
+Link facts with causal_relations (max 2 per fact). target_index must be < this fact's index.
+Type: "caused_by" (this fact was caused by the target fact)
+
+Example: "Lost job → couldn't pay rent → moved apartment"
+- Fact 0: Lost job, causal_relations: null
+- Fact 1: Couldn't pay rent, causal_relations: [{"target_index": 0, "relation_type": "caused_by", "strength": 1.0}]
+- Fact 2: Moved apartment, causal_relations: [{"target_index": 1, "relation_type": "caused_by", "strength": 1.0}]"""
+
+CONCISE_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
+    retain_mission_section="",
+    extraction_guidelines=_CONCISE_GUIDELINES,
+    examples=_CONCISE_EXAMPLES,
+) + _CAUSAL_RELATIONSHIPS_SECTION
+
+
+# ── Data models ────────────────────────────────────────────────────────────────
+
+@dataclass
+class RetainItem:
+    content: str
+    context: str = ""
+    event_date: datetime = field(default_factory=datetime.utcnow)
+    document_id: Optional[str] = None
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Fact:
+    fact_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    fact: str = ""
+    fact_type: str = "world"
+    occurred_start: Optional[str] = None
+    occurred_end: Optional[str] = None
+    mentioned_at: Optional[str] = None
+    entities: list[str] = field(default_factory=list)
+    document_id: Optional[str] = None
+    chunk_id: Optional[str] = None
+    tags: list[str] = field(default_factory=list)
+    # causal_relations: [(target_fact_id, strength), ...] — заполняется после gather
+    causal_relations: list[tuple[str, float]] = field(default_factory=list)
+
+
+# ── Text chunking (verbatim from Hindsight) ────────────────────────────────────
+
+def chunk_text(text: str, max_chars: int = CHUNK_SIZE) -> list[str]:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    if len(text) <= max_chars:
+        return [text]
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=max_chars,
+        chunk_overlap=0,
+        length_function=len,
+        is_separator_regex=False,
+        separators=[
+            "\n\n",
+            "\n",
+            ". ",
+            "! ",
+            "? ",
+            "; ",
+            ", ",
+            " ",
+            "",
+        ],
+    )
+    return splitter.split_text(text)
+
+
+# ── Temporal helpers (verbatim from Hindsight) ────────────────────────────────
+
+def _infer_temporal_date(fact_text: str, event_date: datetime) -> Optional[str]:
+    fact_lower = fact_text.lower()
+    temporal_patterns = {
+        r"\blast night\b": -1,
+        r"\byesterday\b": -1,
+        r"\btoday\b": 0,
+        r"\bthis morning\b": 0,
+        r"\bthis afternoon\b": 0,
+        r"\bthis evening\b": 0,
+        r"\btonigh?t\b": 0,
+        r"\btomorrow\b": 1,
+        r"\blast week\b": -7,
+        r"\bthis week\b": 0,
+        r"\bnext week\b": 7,
+        r"\blast month\b": -30,
+        r"\bthis month\b": 0,
+        r"\bnext month\b": 30,
+    }
+    for pattern, offset_days in temporal_patterns.items():
+        if re.search(pattern, fact_lower):
+            target = event_date + timedelta(days=offset_days)
+            return target.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    return None
+
+
+def _sanitize_text(text: Optional[str]) -> Optional[str]:
+    if text is None:
+        return None
+    text = text.replace("\x00", "")
+    return re.sub(r"[\ud800-\udfff]", "", text)
+
+
+# ── User message (matches Hindsight format) ────────────────────────────────────
+
+def _build_user_message(
+    chunk: str,
+    chunk_index: int,
+    total_chunks: int,
+    event_date: datetime,
+    context: str = "",
+) -> str:
+    sanitized_chunk = _sanitize_text(chunk)
+    sanitized_context = _sanitize_text(context) if context else "none"
+    event_date_formatted = event_date.strftime("%A, %B %d, %Y")
+
+    return f"""Extract facts from the following text chunk.
+
+Chunk: {chunk_index + 1}/{total_chunks}
+Event Date: {event_date_formatted} ({event_date.isoformat()})
+Context: {sanitized_context}
+
+Text:
+{sanitized_chunk}"""
+
+
+# ── LLM extraction ─────────────────────────────────────────────────────────────
+
+def _parse_facts_from_json(raw_json: dict, event_date: datetime, mentioned_at: str) -> list[Fact]:
+    facts = []
+    raw_facts = raw_json.get("facts", [])
+
+    for i, item in enumerate(raw_facts):
+        if not isinstance(item, dict):
+            continue
+
+        def get_value(field_name):
+            value = item.get(field_name)
+            if value and value != "" and value != [] and str(value).upper() != "N/A":
+                return value
+            return None
+
+        what = get_value("what")
+        if not what:
+            continue
+
+        when = get_value("when")
+        who  = get_value("who")
+        why  = get_value("why")
+
+        combined_parts = [what]
+        if when:
+            combined_parts.append(f"When: {when}")
+        if who:
+            combined_parts.append(f"Involving: {who}")
+        if why:
+            combined_parts.append(why)
+        combined_text = " | ".join(combined_parts)
+
+        fact_type_raw = item.get("fact_type", "world")
+        fact_type: Literal["world", "experience"] = (
+            "experience" if fact_type_raw == "assistant" else "world"
+        )
+        if fact_type not in ("world", "experience"):
+            fact_type = "world"
+
+        fact_kind = item.get("fact_kind", "conversation")
+        if fact_kind not in ("conversation", "event"):
+            fact_kind = "conversation"
+
+        occurred_start = None
+        occurred_end = None
+        if fact_kind == "event":
+            occurred_start = get_value("occurred_start")
+            if not occurred_start:
+                occurred_start = _infer_temporal_date(combined_text, event_date)
+            occurred_end = get_value("occurred_end") or occurred_start
+
+        raw_entities = get_value("entities") or []
+        entities = []
+        for ent in raw_entities:
+            if isinstance(ent, str):
+                entities.append(ent)
+            elif isinstance(ent, dict) and "text" in ent:
+                entities.append(ent["text"])
+
+        raw_causal = item.get("causal_relations") or []
+        # Сохраняем как локальные индексы внутри чанка — резолвим в fact_id после gather
+        local_causal = []
+        for rel in raw_causal:
+            if not isinstance(rel, dict):
+                continue
+            target_idx = rel.get("target_index")
+            relation_type = rel.get("relation_type")
+            strength = float(rel.get("strength", 1.0))
+            if target_idx is None or relation_type != "caused_by":
+                continue
+            if not isinstance(target_idx, int) or target_idx < 0 or target_idx >= i:
+                continue
+            local_causal.append((target_idx, strength))
+
+        f = Fact(
+            fact=combined_text,
+            fact_type=fact_type,
+            occurred_start=occurred_start,
+            occurred_end=occurred_end,
+            mentioned_at=mentioned_at,
+            entities=entities,
+        )
+        f._local_causal = local_causal  # временный атрибут, удалим после резолва
+        facts.append(f)
+
+    return facts
+
+
+async def _extract_from_chunk(
+    chunk: str,
+    chunk_index: int,
+    total_chunks: int,
+    event_date: datetime,
+    context: str,
+    client,
+    model_name: str,
+) -> list[Fact]:
+    user_message = _build_user_message(chunk, chunk_index, total_chunks, event_date, context)
+    mentioned_at = event_date.isoformat()
+
+    for attempt in range(3):
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=model_name,
+                contents=[
+                    {"role": "user", "parts": [{"text": CONCISE_FACT_EXTRACTION_PROMPT}]},
+                    {"role": "model", "parts": [{"text": "Understood. I will extract significant facts from the text you provide."}]},
+                    {"role": "user", "parts": [{"text": user_message}]},
+                ],
+            )
+            raw = response.text or ""
+
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not m:
+                log.warning("[retain] no JSON object in response (attempt %d)", attempt + 1)
+                continue
+
+            data = json.loads(m.group(0))
+            return _parse_facts_from_json(data, event_date, mentioned_at)
+
+        except Exception as e:
+            log.warning("[retain] chunk %d extraction attempt %d failed: %s", chunk_index, attempt + 1, e)
+
+    return []
+
+
+async def extract_facts(
+    items: list[RetainItem],
+    client,
+    model_name: str,
+) -> tuple[list[Fact], list[tuple[str, int, str]]]:
+    """
+    Извлекает факты из списка items, все чанки всех items обрабатываются параллельно.
+    Возвращает (facts, chunk_meta) где chunk_meta: [(document_id, chunk_index, chunk_text), ...]
+    только для items с document_id.
+    """
+    if not items:
+        return [], []
+
+    tasks = []
+    task_meta = []  # (item_idx, chunk_idx, chunk_text)
+
+    for item_idx, item in enumerate(items):
+        chunks = chunk_text(item.content)
+        for chunk_idx, chunk in enumerate(chunks):
+            tasks.append(_extract_from_chunk(
+                chunk, chunk_idx, len(chunks), item.event_date, item.context, client, model_name
+            ))
+            task_meta.append((item_idx, chunk_idx, chunk))
+
+    results = await asyncio.gather(*tasks)
+
+    # Собираем факты и резолвим causal local indices → fact_ids
+    all_facts = []
+    chunk_meta_out = []  # [(document_id, chunk_index, chunk_text)]
+
+    for (item_idx, chunk_idx, chunk_text_str), chunk_facts in zip(task_meta, results):
+        item = items[item_idx]
+        doc_id = item.document_id
+
+        # Трекинг чанков для документов
+        if doc_id:
+            chunk_meta_out.append((doc_id, chunk_idx, chunk_text_str))
+
+        # Chunk_id для фактов из документов
+        chunk_id = f"{doc_id}_{chunk_idx}" if doc_id else None
+
+        # Резолвим causal: local index → fact_id внутри этого чанка
+        for local_pos, fact in enumerate(chunk_facts):
+            fact.document_id = doc_id
+            fact.chunk_id = chunk_id
+            fact.tags = list(item.tags)
+            local_causal = getattr(fact, "_local_causal", [])
+            fact.causal_relations = [
+                (chunk_facts[target_idx].fact_id, strength)
+                for target_idx, strength in local_causal
+                if target_idx < len(chunk_facts)
+            ]
+            if hasattr(fact, "_local_causal"):
+                del fact._local_causal
+
+        all_facts.extend(chunk_facts)
+
+    # Временные офсеты для сохранения порядка (как у Hindsight)
+    for i, fact in enumerate(all_facts):
+        offset = timedelta(seconds=i * SECONDS_PER_FACT)
+        if fact.occurred_start:
+            try:
+                fact.occurred_start = (datetime.fromisoformat(fact.occurred_start) + offset).isoformat()
+            except ValueError:
+                pass
+        if fact.occurred_end:
+            try:
+                fact.occurred_end = (datetime.fromisoformat(fact.occurred_end) + offset).isoformat()
+            except ValueError:
+                pass
+        if fact.mentioned_at:
+            try:
+                fact.mentioned_at = (datetime.fromisoformat(fact.mentioned_at) + offset).isoformat()
+            except ValueError:
+                pass
+
+    log.info("[retain] extracted %d facts from %d items", len(all_facts), len(items))
+    return all_facts, chunk_meta_out
+
+
+# ── Embedding augmentation (matches Hindsight) ────────────────────────────────
+
+def _format_date(iso_str: Optional[str]) -> str:
+    """Форматирует ISO дату в читаемый вид для augmentation."""
+    if not iso_str:
+        return "unknown date"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%B %Y")
+    except ValueError:
+        return iso_str
+
+
+def augment_text_for_embedding(fact: Fact) -> str:
+    """
+    Добавляет дату к тексту факта перед embedding.
+    Hindsight: f"{fact_text} (happened in {readable_date})"
+    """
+    date_str = _format_date(fact.occurred_start or fact.mentioned_at)
+    return f"{fact.fact} (happened in {date_str})"
+
+
+# ── Deduplication (simplified Hindsight logic for LanceDB) ────────────────────
+
+DEDUP_SIMILARITY_THRESHOLD = 0.95
+DEDUP_TIME_WINDOW_HOURS = 24
+
+
+def _is_within_time_window(iso_a: Optional[str], iso_b: Optional[str], hours: int) -> bool:
+    if not iso_a or not iso_b:
+        return True  # нет временной инфы — считаем потенциальным дублем
+    try:
+        a = datetime.fromisoformat(iso_a)
+        b = datetime.fromisoformat(iso_b)
+        return abs((a - b).total_seconds()) <= hours * 3600
+    except ValueError:
+        return True
+
+
+def deduplicate(
+    facts: list[Fact],
+    table,
+    embed_fn,
+) -> tuple[list[Fact], list]:
+    """
+    Фильтрует дубли по cosine similarity + time window.
+    Возвращает (new_facts, vectors) — векторы уже посчитаны, переиспользуем в store_facts.
+    """
+    if not facts:
+        return [], []
+
+    augmented = [augment_text_for_embedding(f) for f in facts]
+    vectors = embed_fn(augmented)
+
+    try:
+        if table.count_rows() == 0:
+            return facts, vectors
+    except Exception:
+        return facts, vectors
+
+    new_facts = []
+    new_vectors = []
+    for fact, vec in zip(facts, vectors):
+        results = table.search(vec).limit(1).to_list()
+        if not results:
+            new_facts.append(fact)
+            new_vectors.append(vec)
+            continue
+
+        top = results[0]
+        similarity = 1.0 - top.get("_distance", 1.0)
+        if similarity >= DEDUP_SIMILARITY_THRESHOLD and _is_within_time_window(
+            fact.mentioned_at, top.get("mentioned_at"), DEDUP_TIME_WINDOW_HOURS
+        ):
+            log.debug("[retain] dedup skip: similarity=%.3f fact=%s", similarity, fact.fact[:60])
+        else:
+            new_facts.append(fact)
+            new_vectors.append(vec)
+
+    skipped = len(facts) - len(new_facts)
+    if skipped:
+        log.info("[retain] deduplication: skipped %d duplicates, keeping %d", skipped, len(new_facts))
+    return new_facts, new_vectors
+
+
+# ── Graph link building ────────────────────────────────────────────────────────
+
+SEMANTIC_LINK_THRESHOLD = 0.85
+TEMPORAL_LINK_WINDOW_HOURS = 24
+
+
+def build_semantic_links(facts: list[Fact], vectors: list, table, conn) -> int:
+    """Ищет похожие факты в LanceDB и вставляет semantic links в SQLite.
+    Принимает уже посчитанные vectors — не пересчитывает заново.
+    """
+    from src.memory.providers.fact.storage import insert_links
+
+    if not facts:
+        return 0
+    try:
+        if table.count_rows() == 0:
+            return 0
+    except Exception:
+        return 0
+
+    links = []
+    for fact, vec in zip(facts, vectors):
+        results = table.search(vec).limit(5).to_list()
+        for r in results:
+            if r["fact_id"] == fact.fact_id:
+                continue
+            similarity = 1.0 - r.get("_distance", 1.0)
+            if similarity >= SEMANTIC_LINK_THRESHOLD:
+                links.append((fact.fact_id, r["fact_id"], "semantic", float(similarity)))
+
+    insert_links(conn, links)
+    return len(links)
+
+
+def build_causal_links(facts: list[Fact], conn) -> int:
+    """Вставляет causal links из fact.causal_relations в SQLite."""
+    from src.memory.providers.fact.storage import insert_links
+
+    links = [
+        (fact.fact_id, target_id, "caused_by", strength)
+        for fact in facts
+        for target_id, strength in fact.causal_relations
+        if target_id != fact.fact_id
+    ]
+    insert_links(conn, links)
+    return len(links)
+
+
+def build_temporal_links(facts: list[Fact], conn) -> int:
+    """Ищет факты в том же временном окне в SQLite и вставляет temporal links."""
+    from src.memory.providers.fact.storage import get_facts_in_time_window, insert_links
+
+    links = []
+
+    for fact in facts:
+        if not fact.mentioned_at:
+            continue
+        try:
+            ts = datetime.fromisoformat(fact.mentioned_at)
+        except ValueError:
+            continue
+
+        window_start = (ts - timedelta(hours=TEMPORAL_LINK_WINDOW_HOURS)).isoformat()
+        window_end   = (ts + timedelta(hours=TEMPORAL_LINK_WINDOW_HOURS)).isoformat()
+
+        neighbors = get_facts_in_time_window(conn, fact.mentioned_at, window_start, window_end, fact.fact_id)
+        for n in neighbors:
+            links.append((fact.fact_id, n["fact_id"], "temporal", 1.0))
+
+    insert_links(conn, links)
+    return len(links)
+
+
+# ── Storage ────────────────────────────────────────────────────────────────────
+
+def store_facts(
+    facts: list[Fact],
+    sqlite_conn,
+    lancedb_table,
+    embed_fn,
+    chunk_meta: list[tuple[str, int, str]] | None = None,
+) -> tuple[list[Fact], list]:
+    """
+    Дедуплицирует и сохраняет факты в SQLite + LanceDB.
+    Embeddings считаются один раз и переиспользуются для dedup, хранения и semantic links.
+    chunk_meta: [(document_id, chunk_index, chunk_text), ...] — чанки для сохранения.
+    Возвращает (new_facts, vectors) для дальнейшего построения графа.
+    """
+    from src.memory.providers.fact.storage import (
+        build_entity_links,
+        insert_chunks,
+        insert_facts,
+        upsert_entities,
+    )
+
+    if not facts:
+        return [], []
+
+    facts, vectors = deduplicate(facts, lancedb_table, embed_fn)
+    if not facts:
+        return [], []
+
+    # SQLite: чанки документов
+    if chunk_meta:
+        chunks_by_doc: dict[str, list[tuple[int, str]]] = {}
+        for doc_id, chunk_idx, chunk_text in chunk_meta:
+            chunks_by_doc.setdefault(doc_id, []).append((chunk_idx, chunk_text))
+        for doc_id, doc_chunks in chunks_by_doc.items():
+            insert_chunks(sqlite_conn, doc_id, doc_chunks)
+
+    # SQLite: метаданные фактов + entities + entity links
+    insert_facts(sqlite_conn, facts)
+    upsert_entities(sqlite_conn, facts)
+    build_entity_links(sqlite_conn, facts)
+
+    # LanceDB: только fact_id + mentioned_at + vector
+    lancedb_table.add([
+        {
+            "fact_id":      f.fact_id,
+            "mentioned_at": f.mentioned_at or "",
+            "vector":       v,
+        }
+        for f, v in zip(facts, vectors)
+    ])
+
+    log.info("[retain] stored %d facts", len(facts))
+    return facts, vectors
+
+
+# ── Public entry point ─────────────────────────────────────────────────────────
+
+async def retain(
+    items: list[RetainItem],
+    client,
+    model_name: str,
+    sqlite_conn,
+    lancedb_table,
+    embed_fn,
+) -> list[Fact]:
+    """
+    Полный retain pipeline: LLM → dedup → store → graph links.
+
+    Этап 1 (LLM): extract_facts — параллельная обработка чанков.
+    Этап 2 (обогащение): store_facts → causal/temporal/semantic links.
+    """
+    facts, chunk_meta = await extract_facts(items, client, model_name)
+    if not facts:
+        return []
+
+    new_facts, vectors = store_facts(facts, sqlite_conn, lancedb_table, embed_fn, chunk_meta)
+    if not new_facts:
+        return []
+
+    n_causal   = build_causal_links(new_facts, sqlite_conn)
+    n_temporal = build_temporal_links(new_facts, sqlite_conn)
+    n_semantic = build_semantic_links(new_facts, vectors, lancedb_table, sqlite_conn)
+
+    log.info(
+        "[retain] done: %d facts, %d causal / %d temporal / %d semantic links",
+        len(new_facts), n_causal, n_temporal, n_semantic,
+    )
+    return new_facts
