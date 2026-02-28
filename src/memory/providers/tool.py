@@ -1,3 +1,10 @@
+"""ToolProvider — память об использовании инструментов.
+
+Собирает статистику по каждому инструменту (total_calls, success rate, avg_tokens, avg_time)
+и генерирует обогащённое описание через LLM на основе реальных примеров использования из диалога.
+Описание подмешивается в объявление инструмента перед каждым вызовом LLM через get_tool_prompt.
+Данные хранятся в memory/tool/tool_memory.json.
+"""
 import asyncio, json, logging, os
 from datetime import datetime
 

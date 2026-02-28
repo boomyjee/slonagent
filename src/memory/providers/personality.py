@@ -1,3 +1,9 @@
+"""PersonalityProvider — система субличностей.
+
+Каждая субличность — Markdown-файл с описанием и содержимым, разделёнными `---`.
+Активные субличности попадают в системный промпт целиком.
+Агент сам управляет набором активных субличностей через инструменты load/update/create.
+"""
 import json, logging, os
 from typing import Annotated
 from agent import tool

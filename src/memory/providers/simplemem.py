@@ -1,3 +1,8 @@
+"""SimpleMemProvider — обёртка над библиотекой simplemem.
+
+DEPRECATED: используй SemanticProvider — реализует ту же логику без внешней зависимости
+и с прямой передачей contents в Gemini вместо сериализации диалога в текст.
+"""
 import asyncio, logging, os
 from typing import Annotated
 from agent import tool

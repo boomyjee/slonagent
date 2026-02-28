@@ -1,3 +1,12 @@
+"""FileProvider — текстовая долгосрочная память.
+
+Хранит два файла:
+- MEMORY.md — живой документ с актуальными фактами о пользователе, обновляется LLM при каждой консолидации.
+- HISTORY.md — хронологический архив выжимок диалогов (append-only).
+
+Контекст инжектируется автоматически через get_context_prompt.
+Поиск по архиву — через инструмент read_history.
+"""
 import asyncio, logging, os, httpx
 from typing import Annotated
 from agent import tool, Agent

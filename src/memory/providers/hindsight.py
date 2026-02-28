@@ -1,3 +1,10 @@
+"""HindsightProvider — интеграция с Hindsight API.
+
+Отправляет диалоги в Hindsight-сервер (retain), который извлекает факты, строит граф сущностей
+и сохраняет документы с возможностью восстановить оригинал. Поиск (recall) возвращает
+релевантные факты с учётом временного контекста и связей между сущностями.
+Требует запущенного Hindsight-сервера (base_url).
+"""
 import logging
 from datetime import datetime
 from typing import Annotated

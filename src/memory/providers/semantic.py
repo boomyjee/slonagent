@@ -1,10 +1,14 @@
-"""SemanticProvider — reimplementation of SimpleMem core in a single file.
+"""SemanticProvider — семантическая долгосрочная память на основе векторного поиска.
+
+Реимплементация ядра SimpleMem в одном файле без внешней зависимости.
 
 Pipeline (write):
-  pending turns → dialogue text → Gemini extracts MemoryEntry list → embed → LanceDB
+  pending turns → _prepare_contents (embed timestamps) → Gemini extracts MemoryEntry list → Qwen3-Embedding → LanceDB
 
 Pipeline (read):
-  user_text → embed → LanceDB vector search → context string
+  query → Qwen3-Embedding → LanceDB vector search → список фактов
+
+Хранит данные в memory/semantic/lancedb, отладочный дамп последней консолидации — в last_entries.json.
 """
 import asyncio, json, logging, os, re, uuid
 from dataclasses import dataclass, field, asdict
