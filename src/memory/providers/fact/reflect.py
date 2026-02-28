@@ -21,7 +21,6 @@ Trend вычисляется по временным меткам evidence (ка
 import asyncio
 import json
 import logging
-import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -133,10 +132,7 @@ def _compute_trend(evidence_timestamps: list[datetime]) -> str:
 
 # ── Entity clustering ──────────────────────────────────────────────────────────
 
-def _cluster_facts_by_entity(
-    fact_rows: list[sqlite3.Row],
-    conn: sqlite3.Connection,
-) -> list[list[sqlite3.Row]]:
+def _cluster_facts_by_entity(fact_rows, storage) -> list[list]:
     """
     Группирует факты по общим сущностям.
     Факты без сущностей попадают в отдельный кластер "mixed".
@@ -148,7 +144,7 @@ def _cluster_facts_by_entity(
     placeholders = ",".join("?" * len(fact_ids))
 
     # entity_id → [fact_id, ...]
-    rows = conn.execute(
+    rows = storage.conn.execute(
         f"""
         SELECT fe.fact_id, fe.entity_id
         FROM fact_entities fe
@@ -196,7 +192,7 @@ def _cluster_facts_by_entity(
 # ── LLM call ───────────────────────────────────────────────────────────────────
 
 async def _extract_observations(
-    cluster: list[sqlite3.Row],
+    cluster: list,
     client,
     model_name: str,
 ) -> list[Observation]:
@@ -287,40 +283,29 @@ async def _extract_observations(
 
 # ── Storage helpers ────────────────────────────────────────────────────────────
 
-def _store_observation(
-    obs: Observation,
-    conn: sqlite3.Connection,
-    lancedb_table,
-    embed_fn,
-) -> None:
-    """Сохраняет одно наблюдение в SQLite и LanceDB."""
-    import json as _json
-    from src.memory.providers.fact.storage import insert_observation_evidence, mark_consolidated
-
+def _store_observation(obs: Observation, storage) -> None:
+    """Сохраняет одно наблюдение в SQLite и LanceDB через Storage."""
     now = datetime.now(timezone.utc).isoformat()
 
-    conn.execute(
+    storage.conn.execute(
         """
         INSERT OR IGNORE INTO facts
             (fact_id, fact, fact_type, mentioned_at, source_fact_ids)
         VALUES (?, ?, 'observation', ?, ?)
         """,
-        (obs.observation_id, obs.text, now, _json.dumps(obs.source_fact_ids)),
+        (obs.observation_id, obs.text, now, json.dumps(obs.source_fact_ids)),
     )
-    conn.commit()
+    storage.conn.commit()
 
-    insert_observation_evidence(
-        conn,
+    storage.insert_observation_evidence(
         obs.observation_id,
         [{"fact_id": e.fact_id, "quote": e.quote, "relevance": e.relevance} for e in obs.evidence],
     )
+    storage.mark_consolidated(obs.source_fact_ids)
 
-    mark_consolidated(conn, obs.source_fact_ids)
-
-    # LanceDB
     try:
-        vec = embed_fn(obs.text)
-        lancedb_table.add([{"fact_id": obs.observation_id, "mentioned_at": now, "vector": vec}])
+        vec = storage.embed_fn(obs.text)
+        storage.insert_vectors([{"fact_id": obs.observation_id, "mentioned_at": now, "vector": vec}])
     except Exception as e:
         log.warning("[reflect] LanceDB write failed for %s: %s", obs.observation_id, e)
 
@@ -328,9 +313,7 @@ def _store_observation(
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 async def consolidate(
-    conn: sqlite3.Connection,
-    lancedb_table,
-    embed_fn,
+    storage,
     client,
     model_name: str,
     min_new_facts: int = MIN_NEW_FACTS,
@@ -341,9 +324,7 @@ async def consolidate(
     Возвращает список созданных observations (может быть пустым,
     если фактов ещё недостаточно).
     """
-    from src.memory.providers.fact.storage import get_unconsolidated_facts
-
-    fact_rows = await asyncio.to_thread(get_unconsolidated_facts, conn, 200)
+    fact_rows = await asyncio.to_thread(storage.get_unconsolidated_facts, 200)
 
     if len(fact_rows) < min_new_facts:
         log.debug(
@@ -352,7 +333,7 @@ async def consolidate(
         )
         return []
 
-    clusters = await asyncio.to_thread(_cluster_facts_by_entity, fact_rows, conn)
+    clusters = await asyncio.to_thread(_cluster_facts_by_entity, fact_rows, storage)
     clusters = clusters[:MAX_CLUSTERS_PER_RUN]
 
     log.info("[reflect] consolidating %d facts in %d clusters", len(fact_rows), len(clusters))
@@ -362,7 +343,7 @@ async def consolidate(
     for cluster in clusters:
         obs_list = await _extract_observations(cluster, client, model_name)
         for obs in obs_list:
-            await asyncio.to_thread(_store_observation, obs, conn, lancedb_table, embed_fn)
+            await asyncio.to_thread(_store_observation, obs, storage)
             all_observations.append(obs)
             log.info(
                 "[reflect] observation created: %r (trend=%s, evidence=%d)",

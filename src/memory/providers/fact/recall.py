@@ -100,15 +100,9 @@ def _row_to_result(row: sqlite3.Row, score: float = 0.0, source: str = "") -> Re
 
 # ── 1. Semantic search ─────────────────────────────────────────────────────────
 
-def _semantic_search(query_vec, table, limit: int) -> list[tuple[str, float]]:
-    """LanceDB vector search. Возвращает [(fact_id, similarity)]."""
-    try:
-        if table.count_rows() == 0:
-            return []
-    except Exception:
-        return []
-
-    results = table.search(query_vec).limit(limit).to_list()
+def _semantic_search(query_vec, storage, limit: int) -> list[tuple[str, float]]:
+    """LanceDB vector search через Storage. Возвращает [(fact_id, similarity)]."""
+    results = storage.search_vectors(query_vec, limit)
     return [
         (r["fact_id"], 1.0 - r.get("_distance", 1.0))
         for r in results
@@ -140,7 +134,7 @@ def _fact_types_where(fact_types: Optional[list[str]]) -> tuple[str, list]:
 
 def _bm25_search(
     query: str,
-    conn: sqlite3.Connection,
+    storage,
     limit: int,
     tags: Optional[list[str]] = None,
     fact_types: Optional[list[str]] = None,
@@ -151,10 +145,9 @@ def _bm25_search(
         return []
     fts_query = " OR ".join(tokens)
     try:
-        # FTS5 → join с facts для фильтрации
         tags_clause, tags_params = _tags_where(tags, 3)
         ft_clause,   ft_params   = _fact_types_where(fact_types)
-        rows = conn.execute(
+        rows = storage.conn.execute(
             f"""
             SELECT fts.fact_id FROM facts_fts fts
             JOIN facts f ON f.fact_id = fts.fact_id
@@ -173,9 +166,9 @@ def _bm25_search(
 
 # ── 3. Graph search (LinkExpansion) ────────────────────────────────────────────
 
-def _entity_frequency(conn: sqlite3.Connection, entity_id: str) -> int:
+def _entity_frequency(storage, entity_id: str) -> int:
     """Количество фактов с данной сущностью."""
-    row = conn.execute(
+    row = storage.conn.execute(
         "SELECT COUNT(*) AS cnt FROM fact_entities WHERE entity_id = ?", (entity_id,)
     ).fetchone()
     return row["cnt"] if row else 0
@@ -183,7 +176,7 @@ def _entity_frequency(conn: sqlite3.Connection, entity_id: str) -> int:
 
 def _graph_link_expansion(
     seed_ids: list[str],
-    conn: sqlite3.Connection,
+    storage,
     budget: int,
 ) -> list[tuple[str, float]]:
     """
@@ -201,7 +194,7 @@ def _graph_link_expansion(
     # --- Query 1: entity co-occurrence (как unit_entities JOIN в Hindsight) ---
     # Находим сущности seeds → находим все факты с теми же сущностями
     # пропуская высокочастотные сущности (MAX_ENTITY_FREQUENCY)
-    entity_rows = conn.execute(
+    entity_rows = storage.conn.execute(
         f"""
         SELECT fe2.fact_id, COUNT(*) AS score
         FROM fact_entities fe1
@@ -222,7 +215,7 @@ def _graph_link_expansion(
         score_map[fid] = max(score_map.get(fid, 0), float(row["score"]))
 
     # --- Query 2: causal links (caused_by) ---
-    causal_rows = conn.execute(
+    causal_rows = storage.conn.execute(
         f"""
         SELECT fl.target_id AS fact_id, (fl.strength + 1.0) AS score
         FROM fact_links fl
@@ -241,7 +234,7 @@ def _graph_link_expansion(
         score_map[fid] = max(score_map.get(fid, 0), float(row["score"]))
 
     # --- Query 3: fallback — semantic/temporal/entity links, оба направления ---
-    fallback_rows = conn.execute(
+    fallback_rows = storage.conn.execute(
         f"""
         SELECT fact_id, MAX(weight) * 0.5 AS score FROM (
             SELECT fl.target_id AS fact_id, fl.strength AS weight
@@ -328,7 +321,7 @@ def _extract_temporal_constraint(
 def _temporal_search(
     start: datetime,
     end: datetime,
-    conn: sqlite3.Connection,
+    storage,
     limit: int,
     tags: Optional[list[str]] = None,
     fact_types: Optional[list[str]] = None,
@@ -336,7 +329,7 @@ def _temporal_search(
     """Факты в временном диапазоне + опциональные фильтры."""
     tags_clause, tags_params = _tags_where(tags, 8)
     ft_clause,   ft_params   = _fact_types_where(fact_types)
-    rows = conn.execute(
+    rows = storage.conn.execute(
         f"""
         SELECT fact_id FROM facts f
         WHERE (
@@ -445,8 +438,7 @@ def _rerank(query: str, results: list["RecallResult"]) -> list["RecallResult"]:
 def recall(
     query: str,
     query_vec,
-    conn: sqlite3.Connection,
-    lancedb_table,
+    storage,
     limit: int = TOP_K,
     reference_date: Optional[datetime] = None,
     tags: Optional[list[str]] = None,
@@ -468,23 +460,21 @@ def recall(
       .is_stale             — True если pending_consolidation > 0
       .freshness            — "up_to_date" | "slightly_stale" | "stale"
     """
-    from src.memory.providers.fact.storage import get_pending_consolidation_count
-
     # 1. Semantic
-    semantic_hits = _semantic_search(query_vec, lancedb_table, limit * 2)
+    semantic_hits = _semantic_search(query_vec, storage, limit * 2)
     semantic_ids = [fid for fid, _ in semantic_hits]
 
     # 2. BM25
-    bm25_ids = _bm25_search(query, conn, limit * 2, tags=tags, fact_types=fact_types)
+    bm25_ids = _bm25_search(query, storage, limit * 2, tags=tags, fact_types=fact_types)
 
     # 3. Graph — LinkExpansion от semantic seeds (граф не фильтруем по тегам — это постфильтр)
-    graph_hits = _graph_link_expansion(semantic_ids[:limit], conn, budget=limit * 2)
+    graph_hits = _graph_link_expansion(semantic_ids[:limit], storage, budget=limit * 2)
     graph_ids = [fid for fid, _ in graph_hits]
 
     # 4. Temporal
     temporal_range = _extract_temporal_constraint(query, reference_date)
     temporal_ids = (
-        _temporal_search(temporal_range[0], temporal_range[1], conn, limit,
+        _temporal_search(temporal_range[0], temporal_range[1], storage, limit,
                          tags=tags, fact_types=fact_types)
         if temporal_range else []
     )
@@ -498,18 +488,17 @@ def recall(
     # RRF — берём RERANK_CANDIDATES кандидатов для reranker, потом обрезаем до limit
     merged = _rrf_merge(lists, sources)[:RERANK_CANDIDATES]
     if not merged:
-        pending = get_pending_consolidation_count(conn)
-        return RecallResponse(results=[], pending_consolidation=pending)
+        return RecallResponse(results=[], pending_consolidation=storage.get_pending_consolidation_count())
 
     merged_ids = [fid for fid, _, _ in merged]
     rrf_scores = {fid: score for fid, score, _ in merged}
     rrf_sources = {fid: srcs for fid, _, srcs in merged}
 
-    # Строим WHERE с post-фильтром по tags и fact_types для semantic/graph результатов
-    tags_clause, tags_params   = _tags_where(tags, 1)
-    ft_clause,   ft_params     = _fact_types_where(fact_types)
+    # Post-фильтр по tags и fact_types для semantic/graph результатов
+    tags_clause, tags_params = _tags_where(tags, 1)
+    ft_clause,   ft_params   = _fact_types_where(fact_types)
     placeholders = ",".join("?" * len(merged_ids))
-    rows = conn.execute(
+    rows = storage.conn.execute(
         f"SELECT * FROM facts f WHERE fact_id IN ({placeholders}) {tags_clause} {ft_clause}",
         [*merged_ids, *tags_params, *ft_params],
     ).fetchall()
@@ -526,9 +515,7 @@ def recall(
     # 5. Cross-encoder reranking → обрезаем до limit
     results = _rerank(query, results)[:limit]
 
-    # Staleness
-    pending = get_pending_consolidation_count(conn)
-
+    pending = storage.get_pending_consolidation_count()
     log.info(
         "[recall] %r → %d results (sem=%d bm25=%d graph=%d temporal=%d pending=%d)",
         query[:60], len(results),
@@ -540,13 +527,12 @@ def recall(
 async def recall_async(
     query: str,
     query_vec,
-    conn: sqlite3.Connection,
-    lancedb_table,
+    storage,
     limit: int = TOP_K,
     reference_date: Optional[datetime] = None,
     tags: Optional[list[str]] = None,
     fact_types: Optional[list[str]] = None,
 ) -> RecallResponse:
     return await asyncio.to_thread(
-        recall, query, query_vec, conn, lancedb_table, limit, reference_date, tags, fact_types
+        recall, query, query_vec, storage, limit, reference_date, tags, fact_types
     )

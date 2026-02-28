@@ -243,6 +243,9 @@ def _sanitize_text(text: Optional[str]) -> Optional[str]:
 
 # ── User message (matches Hindsight format) ────────────────────────────────────
 
+NONE_DATE_YEAR = 1970  # sentinel: не вставлять Event Date в промпт
+
+
 def _build_user_message(
     chunk: str,
     chunk_index: int,
@@ -252,13 +255,18 @@ def _build_user_message(
 ) -> str:
     sanitized_chunk = _sanitize_text(chunk)
     sanitized_context = _sanitize_text(context) if context else "none"
-    event_date_formatted = event_date.strftime("%A, %B %d, %Y")
+
+    # Для документов без явной даты (NONE_DATE_YEAR) не вставляем Event Date,
+    # чтобы LLM не привязывал факты к дате загрузки.
+    if event_date.year != NONE_DATE_YEAR:
+        event_date_line = f"Event Date: {event_date.strftime('%A, %B %d, %Y')} ({event_date.isoformat()})\n"
+    else:
+        event_date_line = ""
 
     return f"""Extract facts from the following text chunk.
 
 Chunk: {chunk_index + 1}/{total_chunks}
-Event Date: {event_date_formatted} ({event_date.isoformat()})
-Context: {sanitized_context}
+{event_date_line}Context: {sanitized_context}
 
 Text:
 {sanitized_chunk}"""
@@ -563,54 +571,38 @@ SEMANTIC_LINK_THRESHOLD = 0.85
 TEMPORAL_LINK_WINDOW_HOURS = 24
 
 
-def build_semantic_links(facts: list[Fact], vectors: list, table, conn) -> int:
-    """Ищет похожие факты в LanceDB и вставляет semantic links в SQLite.
-    Принимает уже посчитанные vectors — не пересчитывает заново.
-    """
-    from src.memory.providers.fact.storage import insert_links
-
+def build_semantic_links(facts: list[Fact], vectors: list, storage) -> int:
+    """Ищет похожие факты в LanceDB и вставляет semantic links в SQLite."""
     if not facts:
         return 0
-    try:
-        if table.count_rows() == 0:
-            return 0
-    except Exception:
-        return 0
-
     links = []
     for fact, vec in zip(facts, vectors):
-        results = table.search(vec).limit(5).to_list()
+        results = storage.search_vectors(vec, limit=5)
         for r in results:
             if r["fact_id"] == fact.fact_id:
                 continue
             similarity = 1.0 - r.get("_distance", 1.0)
             if similarity >= SEMANTIC_LINK_THRESHOLD:
                 links.append((fact.fact_id, r["fact_id"], "semantic", float(similarity)))
-
-    insert_links(conn, links)
+    storage.insert_links(links)
     return len(links)
 
 
-def build_causal_links(facts: list[Fact], conn) -> int:
-    """Вставляет causal links из fact.causal_relations в SQLite."""
-    from src.memory.providers.fact.storage import insert_links
-
+def build_causal_links(facts: list[Fact], storage) -> int:
+    """Вставляет causal links из fact.causal_relations."""
     links = [
         (fact.fact_id, target_id, "caused_by", strength)
         for fact in facts
         for target_id, strength in fact.causal_relations
         if target_id != fact.fact_id
     ]
-    insert_links(conn, links)
+    storage.insert_links(links)
     return len(links)
 
 
-def build_temporal_links(facts: list[Fact], conn) -> int:
-    """Ищет факты в том же временном окне в SQLite и вставляет temporal links."""
-    from src.memory.providers.fact.storage import get_facts_in_time_window, insert_links
-
+def build_temporal_links(facts: list[Fact], storage) -> int:
+    """Ищет факты в том же временном окне и вставляет temporal links."""
     links = []
-
     for fact in facts:
         if not fact.mentioned_at:
             continue
@@ -618,15 +610,11 @@ def build_temporal_links(facts: list[Fact], conn) -> int:
             ts = datetime.fromisoformat(fact.mentioned_at)
         except ValueError:
             continue
-
         window_start = (ts - timedelta(hours=TEMPORAL_LINK_WINDOW_HOURS)).isoformat()
         window_end   = (ts + timedelta(hours=TEMPORAL_LINK_WINDOW_HOURS)).isoformat()
-
-        neighbors = get_facts_in_time_window(conn, fact.mentioned_at, window_start, window_end, fact.fact_id)
-        for n in neighbors:
+        for n in storage.get_facts_in_time_window(window_start, window_end, fact.fact_id):
             links.append((fact.fact_id, n["fact_id"], "temporal", 1.0))
-
-    insert_links(conn, links)
+    storage.insert_links(links)
     return len(links)
 
 
@@ -634,51 +622,33 @@ def build_temporal_links(facts: list[Fact], conn) -> int:
 
 def store_facts(
     facts: list[Fact],
-    sqlite_conn,
-    lancedb_table,
-    embed_fn,
+    storage,
     chunk_meta: list[tuple[str, int, str]] | None = None,
 ) -> tuple[list[Fact], list]:
     """
-    Дедуплицирует и сохраняет факты в SQLite + LanceDB.
-    Embeddings считаются один раз и переиспользуются для dedup, хранения и semantic links.
-    chunk_meta: [(document_id, chunk_index, chunk_text), ...] — чанки для сохранения.
-    Возвращает (new_facts, vectors) для дальнейшего построения графа.
+    Дедуплицирует и сохраняет факты через Storage.
+    Возвращает (new_facts, vectors) для построения графа.
     """
-    from src.memory.providers.fact.storage import (
-        build_entity_links,
-        insert_chunks,
-        insert_facts,
-        upsert_entities,
-    )
-
     if not facts:
         return [], []
 
-    facts, vectors = deduplicate(facts, lancedb_table, embed_fn)
+    facts, vectors = deduplicate(facts, storage.table, storage.embed_fn)
     if not facts:
         return [], []
 
-    # SQLite: чанки документов
     if chunk_meta:
         chunks_by_doc: dict[str, list[tuple[int, str]]] = {}
         for doc_id, chunk_idx, chunk_text in chunk_meta:
             chunks_by_doc.setdefault(doc_id, []).append((chunk_idx, chunk_text))
         for doc_id, doc_chunks in chunks_by_doc.items():
-            insert_chunks(sqlite_conn, doc_id, doc_chunks)
+            storage.insert_chunks(doc_id, doc_chunks)
 
-    # SQLite: метаданные фактов + entities + entity links
-    insert_facts(sqlite_conn, facts)
-    upsert_entities(sqlite_conn, facts)
-    build_entity_links(sqlite_conn, facts)
+    storage.insert_facts(facts)
+    storage.upsert_entities(facts)
+    storage.build_entity_links(facts)
 
-    # LanceDB: только fact_id + mentioned_at + vector
-    lancedb_table.add([
-        {
-            "fact_id":      f.fact_id,
-            "mentioned_at": f.mentioned_at or "",
-            "vector":       v,
-        }
+    storage.insert_vectors([
+        {"fact_id": f.fact_id, "mentioned_at": f.mentioned_at or "", "vector": v}
         for f, v in zip(facts, vectors)
     ])
 
@@ -692,27 +662,22 @@ async def retain(
     items: list[RetainItem],
     client,
     model_name: str,
-    sqlite_conn,
-    lancedb_table,
-    embed_fn,
+    storage,
 ) -> list[Fact]:
     """
     Полный retain pipeline: LLM → dedup → store → graph links.
-
-    Этап 1 (LLM): extract_facts — параллельная обработка чанков.
-    Этап 2 (обогащение): store_facts → causal/temporal/semantic links.
     """
     facts, chunk_meta = await extract_facts(items, client, model_name)
     if not facts:
         return []
 
-    new_facts, vectors = store_facts(facts, sqlite_conn, lancedb_table, embed_fn, chunk_meta)
+    new_facts, vectors = store_facts(facts, storage, chunk_meta)
     if not new_facts:
         return []
 
-    n_causal   = build_causal_links(new_facts, sqlite_conn)
-    n_temporal = build_temporal_links(new_facts, sqlite_conn)
-    n_semantic = build_semantic_links(new_facts, vectors, lancedb_table, sqlite_conn)
+    n_causal   = build_causal_links(new_facts, storage)
+    n_temporal = build_temporal_links(new_facts, storage)
+    n_semantic = build_semantic_links(new_facts, vectors, storage)
 
     log.info(
         "[retain] done: %d facts, %d causal / %d temporal / %d semantic links",

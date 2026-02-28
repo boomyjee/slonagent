@@ -50,6 +50,26 @@ class EntityResolver:
         # { lowercase_name -> entity_id }
         self._cache: dict[str, str] = self._load_aliases()
 
+    def _load_cooccurrences(self, entity_ids: list[str]) -> dict[str, set[str]]:
+        if not entity_ids:
+            return {}
+        ph = ",".join("?" * len(entity_ids))
+        rows = self.conn.execute(
+            f"""
+            SELECT entity_id_1, entity_id_2 FROM entity_cooccurrences
+            WHERE entity_id_1 IN ({ph}) OR entity_id_2 IN ({ph})
+            """,
+            [*entity_ids, *entity_ids],
+        ).fetchall()
+        result: dict[str, set[str]] = {eid: set() for eid in entity_ids}
+        for r in rows:
+            e1, e2 = r["entity_id_1"], r["entity_id_2"]
+            if e1 in result:
+                result[e1].add(e2)
+            if e2 in result:
+                result[e2].add(e1)
+        return result
+
     def _load_aliases(self) -> dict[str, str]:
         """Загружает все известные алиасы из БД в кеш."""
         rows = self.conn.execute("SELECT alias, entity_id FROM entity_aliases").fetchall()
@@ -119,9 +139,8 @@ class EntityResolver:
                     nearby_ids.add(nb_id)
 
             if nearby_ids:
-                from src.memory.providers.fact.storage import get_cooccurrence_map
                 all_ids = [e["entity_id"] for e in all_entities]
-                cooc_map = get_cooccurrence_map(self.conn, all_ids)
+                cooc_map = self._load_cooccurrences(all_ids)
 
         best_id: Optional[str] = None
         best_score = 0.0

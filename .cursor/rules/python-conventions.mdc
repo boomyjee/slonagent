@@ -6,7 +6,19 @@ alwaysApply: true
 
 ## Структура пакетов
 
-`__init__.py` файлы **не создаём**. Используем namespace packages (Python 3.3+).
+По умолчанию `__init__.py` **не создаём** — используем namespace packages (Python 3.3+).
+
+**Исключение:** если папка представляет пакет с одним главным публичным классом, создаём `__init__.py` и помещаем главный класс **прямо в него** — чтобы сохранить единообразный синтаксис импорта:
+
+```python
+# ✅ GOOD — папка fact/ с __init__.py, класс определён внутри него
+from src.memory.providers.fact import FactProvider
+
+# ❌ BAD — класс в отдельном файле, реэкспорт через __init__
+from src.memory.providers.fact.provider import FactProvider
+```
+
+Вспомогательные модули пакета (`retain.py`, `recall.py`, `storage.py` и т.д.) по-прежнему живут рядом в папке.
 
 ## Именование файлов и классов
 
