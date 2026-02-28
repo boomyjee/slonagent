@@ -1,16 +1,17 @@
 """HindsightProvider — интеграция с Hindsight.
 
 Поддерживает два режима:
-- Встроенный сервер (base_url не передан): запускает HindsightServer в фоновом потоке,
-  использует embedded PostgreSQL. Веб-панель доступна по адресу, выводимому в лог.
-- Внешний сервер (base_url передан): подключается к уже запущенному Hindsight-серверу
-  (Docker, Podman и т.п.).
+- Встроенный сервер (base_url не передан): поднимает PostgreSQL в Podman-контейнере
+  и запускает HindsightServer в фоновом потоке. Веб-панель доступна по адресу в логе.
+- Внешний сервер (base_url передан): подключается к уже запущенному Hindsight-серверу.
 
 Отправляет диалоги в Hindsight (retain), который извлекает факты, строит граф сущностей
 и сохраняет документы с возможностью восстановить оригинал. Поиск (recall) возвращает
 релевантные факты с учётом временного контекста и связей между сущностями.
 """
 import logging
+import subprocess
+import time
 from datetime import datetime
 from typing import Annotated
 
@@ -19,14 +20,85 @@ from src.memory.providers.base import BaseProvider
 
 log = logging.getLogger(__name__)
 
+_PG_CONTAINER  = "hindsight-db"
+_PG_USER       = "hindsight"
+_PG_PASS       = "hindsight"
+_PG_DB         = "hindsight"
+
+
+def _start_podman_postgres() -> str:
+    """Запускает контейнер PostgreSQL через Podman, возвращает connection URL.
+
+    Если контейнер уже запущен — переиспользует его.
+    Если контейнер существует, но остановлен — запускает заново.
+    """
+    result = subprocess.run(
+        ["podman", "inspect", "--format", "{{.State.Status}}", _PG_CONTAINER],
+        capture_output=True, text=True,
+    )
+    status = result.stdout.strip()
+
+    if status == "running":
+        log.info("[HindsightProvider] postgres container already running")
+    elif status in ("exited", "stopped", "created"):
+        log.info("[HindsightProvider] starting existing postgres container")
+        subprocess.run(["podman", "start", _PG_CONTAINER], check=True, capture_output=True)
+    else:
+        log.info("[HindsightProvider] creating postgres container")
+        subprocess.run(
+            [
+                "podman", "run", "-d",
+                "--name", _PG_CONTAINER,
+                "-p", "5432:5432",
+                "-e", f"POSTGRES_USER={_PG_USER}",
+                "-e", f"POSTGRES_PASSWORD={_PG_PASS}",
+                "-e", f"POSTGRES_DB={_PG_DB}",
+                "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
+                "-v", "hindsight-db-data:/var/lib/postgresql",
+                "pgvector/pgvector:pg18",
+            ],
+            check=True, capture_output=True,
+        )
+
+    # ждём готовности: сначала контейнер running, потом pg_isready
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        status_result = subprocess.run(
+            ["podman", "inspect", "--format", "{{.State.Status}}", _PG_CONTAINER],
+            capture_output=True, text=True,
+        )
+        status = status_result.stdout.strip()
+        if status in ("exited", "dead", "removing"):
+            logs = subprocess.run(
+                ["podman", "logs", "--tail", "20", _PG_CONTAINER],
+                capture_output=True, text=True, errors="replace",
+            )
+            raise RuntimeError(
+                f"PostgreSQL container failed (status={status}):\n{logs.stderr or logs.stdout}"
+            )
+        if status != "running":
+            time.sleep(0.5)
+            continue
+        pg_result = subprocess.run(
+            ["podman", "exec", _PG_CONTAINER, "pg_isready", "-U", _PG_USER],
+            capture_output=True,
+        )
+        if pg_result.returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError("PostgreSQL container did not become ready in 60s")
+
+    return f"postgresql://{_PG_USER}:{_PG_PASS}@127.0.0.1:5432/{_PG_DB}"
+
 
 class HindsightProvider(BaseProvider):
     """
     Провайдер памяти на базе Hindsight.
 
-    Если base_url не передан — запускает встроенный сервер (embedded PostgreSQL,
-    веб-панель доступна локально). Если base_url передан — подключается к внешнему
-    серверу (Docker/Podman).
+    Если base_url не передан — поднимает PostgreSQL в Podman-контейнере и запускает
+    встроенный HindsightServer (веб-панель доступна локально).
+    Если base_url передан — подключается к внешнему серверу.
 
     Логика:
     - _consolidate(): накопленные ходы → retain() (по лимиту токенов)
@@ -47,7 +119,8 @@ class HindsightProvider(BaseProvider):
     ):
         """
         Args:
-            base_url: URL сервера. Если None — запускается встроенный сервер.
+            base_url: URL сервера. Если None — поднимается Podman-контейнер с PostgreSQL
+                      и запускается встроенный HindsightServer.
             bank_id: Идентификатор банка памяти.
             api_key: API-ключ для авторизации на Hindsight-сервере (если есть).
             llm_provider: LLM-провайдер для встроенного сервера (gemini, openai, groq, ...).
@@ -72,14 +145,16 @@ class HindsightProvider(BaseProvider):
 
     def _start_server(self):
         import warnings
-        warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
-        warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=ResourceWarning)
         from hindsight import HindsightServer
+        pg_url = _start_podman_postgres()
         server = HindsightServer(
-            db_url="pg0://slonagent",
+            db_url=pg_url,
             llm_provider=self._llm_provider,
             llm_api_key=self._llm_api_key or "",
             llm_model=self._llm_model or "",
+            port=8888
         )
         server.start(timeout=86400)
         self._server = server
