@@ -72,7 +72,7 @@ class FactProvider(BaseProvider):
         sqlite_path  = os.path.join(Memory.memory_dir, "fact", "facts.db")
         lancedb_path = os.path.join(Memory.memory_dir, "fact", "lancedb")
         self.storage = Storage(sqlite_path, lancedb_path)
-        log.info("[FactProvider] Storage initialized (dim=%d)", Storage.embed_dim())
+        log.info("[FactProvider] Storage initialized")
 
     # ── Consolidate (retain pipeline) ────────────────────────────────────────────
 

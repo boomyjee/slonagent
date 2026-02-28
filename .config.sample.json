@@ -21,6 +21,11 @@
         },
         "memory_providers": [
             {
+                "__class__": "src.memory.providers.fact.FactProvider",
+                "model_name": "gemini-2.5-flash",
+                "api_key": "$GEMINI_API_KEY"
+            },
+            {
                 "__class__": "src.memory.providers.hindsight.HindsightProvider",
                 "bank_id": "slonagent",
                 "llm_provider": "gemini",

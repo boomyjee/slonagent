@@ -146,6 +146,7 @@ def ensure_fts(conn: sqlite3.Connection) -> None:
 # ── Storage class ──────────────────────────────────────────────────────────────
 
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+EMBEDDING_DIM   = 1024   # размерность Qwen3-Embedding-0.6B
 
 
 class Storage:
@@ -158,34 +159,24 @@ class Storage:
       mm_table — LanceDB таблица векторов mental models
 
     Статические методы для эмбеддинга (lazy singleton):
-      configure_embed(model_name) — настроить модель до первого использования
-      encode_query(text)          — вектор поискового запроса (с query prompt)
-      encode_texts(texts)         — батч векторов для фактов/документов
-      embed_dim()                 — размерность вектора
+      encode_query(text)  — вектор поискового запроса (с query prompt)
+      encode_texts(texts) — батч векторов для фактов/документов
+
+    Модель фиксирована константой EMBEDDING_MODEL / EMBEDDING_DIM.
     """
 
     _embed_model = None
-    _embed_model_name: str = EMBEDDING_MODEL
 
     # ── Embedding (lazy singleton) ───────────────────────────────────────────────
-
-    @staticmethod
-    def configure_embed(model_name: str) -> None:
-        """Настроить название модели до первого использования."""
-        if Storage._embed_model is not None:
-            raise RuntimeError(
-                "Embedding model already loaded; call configure_embed() before first use"
-            )
-        Storage._embed_model_name = model_name
 
     @staticmethod
     def _get_embed_model():
         if Storage._embed_model is None:
             from sentence_transformers import SentenceTransformer
-            Storage._embed_model = SentenceTransformer(Storage._embed_model_name)
+            Storage._embed_model = SentenceTransformer(EMBEDDING_MODEL)
             log.info(
                 "[storage] embedding model loaded: %s, dim=%d",
-                Storage._embed_model_name,
+                EMBEDDING_MODEL,
                 Storage._embed_model.get_sentence_embedding_dimension(),
             )
         return Storage._embed_model
@@ -203,17 +194,11 @@ class Storage:
         """Батч-кодирование фактов/наблюдений/описаний (str или list[str])."""
         return Storage._get_embed_model().encode(texts, normalize_embeddings=True).tolist()
 
-    @staticmethod
-    def embed_dim() -> int:
-        """Размерность векторного пространства."""
-        return Storage._get_embed_model().get_sentence_embedding_dimension()
-
     # ── Init ─────────────────────────────────────────────────────────────────────
 
     def __init__(self, sqlite_path: str, lancedb_path: str):
-        dim = Storage.embed_dim()
         self.conn = self._open_sqlite(sqlite_path)
-        self.table, self.mm_table = self._open_lancedb(lancedb_path, dim)
+        self.table, self.mm_table = self._open_lancedb(lancedb_path)
 
     # ── Init helpers ────────────────────────────────────────────────────────────
 
@@ -229,31 +214,29 @@ class Storage:
         return conn
 
     @staticmethod
-    def _open_lancedb(db_path: str, dim: int):
+    def _open_lancedb(db_path: str):
         os.makedirs(db_path, exist_ok=True)
         db = lancedb.connect(db_path)
+        existing = db.table_names()
 
-        fact_schema = pa.schema([
-            pa.field("fact_id",      pa.string()),
-            pa.field("mentioned_at", pa.string()),
-            pa.field("vector",       pa.list_(pa.float32(), dim)),
-        ])
-        mm_schema = pa.schema([
-            pa.field("model_id", pa.string()),
-            pa.field("vector",   pa.list_(pa.float32(), dim)),
-        ])
+        if _LANCEDB_TABLE in existing:
+            table = db.open_table(_LANCEDB_TABLE)
+        else:
+            table = db.create_table(_LANCEDB_TABLE, schema=pa.schema([
+                pa.field("fact_id",      pa.string()),
+                pa.field("mentioned_at", pa.string()),
+                pa.field("vector",       pa.list_(pa.float32(), EMBEDDING_DIM)),
+            ]))
 
-        table = (
-            db.open_table(_LANCEDB_TABLE)
-            if _LANCEDB_TABLE in db.table_names()
-            else db.create_table(_LANCEDB_TABLE, schema=fact_schema)
-        )
-        mm_table = (
-            db.open_table(_LANCEDB_MM_TABLE)
-            if _LANCEDB_MM_TABLE in db.table_names()
-            else db.create_table(_LANCEDB_MM_TABLE, schema=mm_schema)
-        )
-        log.info("[storage] LanceDB ready: %s (dim=%d)", db_path, dim)
+        if _LANCEDB_MM_TABLE in existing:
+            mm_table = db.open_table(_LANCEDB_MM_TABLE)
+        else:
+            mm_table = db.create_table(_LANCEDB_MM_TABLE, schema=pa.schema([
+                pa.field("model_id", pa.string()),
+                pa.field("vector",   pa.list_(pa.float32(), EMBEDDING_DIM)),
+            ]))
+
+        log.info("[storage] LanceDB ready: %s", db_path)
         return table, mm_table
 
     # ── Chunks ──────────────────────────────────────────────────────────────────
