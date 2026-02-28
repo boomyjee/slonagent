@@ -18,6 +18,39 @@ from typing import Annotated
 from agent import tool
 from src.memory.providers.base import BaseProvider
 
+
+# Monkey-patch: если event_date — sentinel (год 1970), не передаём Event Date в промпт LLM,
+# чтобы факты из документов без явных дат не привязывались к дате загрузки.
+
+NONE_DATE_YEAR = 1970
+NONE_DATE = datetime(NONE_DATE_YEAR, 1, 1)
+
+import hindsight_api.engine.retain.fact_extraction as _fe
+
+def _build_user_message_patched(chunk, chunk_index, total_chunks, event_date, context, metadata=None):
+    from hindsight_api.engine.retain.fact_extraction import _sanitize_text
+    sanitized_chunk = _sanitize_text(chunk)
+    sanitized_context = _sanitize_text(context) if context else "none"
+    metadata_section = ""
+    if metadata:
+        metadata_lines = "\n".join(f"  {k}: {v}" for k, v in metadata.items())
+        metadata_section = f"\nMetadata:\n{metadata_lines}"
+    if event_date and event_date.year != NONE_DATE_YEAR:
+        from hindsight_api.engine.retain.orchestrator import parse_datetime_flexible
+        event_date = parse_datetime_flexible(event_date)
+        event_date_line = f"Event Date: {event_date.strftime('%A, %B %d, %Y')} ({event_date.isoformat()})\n"
+    else:
+        event_date_line = ""
+    return (
+        f"Extract facts from the following text chunk.\n\n"
+        f"Chunk: {chunk_index + 1}/{total_chunks}\n"
+        f"{event_date_line}"
+        f"Context: {sanitized_context}{metadata_section}\n\n"
+        f"Text:\n{sanitized_chunk}"
+    )
+
+_fe._build_user_message = _build_user_message_patched
+
 log = logging.getLogger(__name__)
 
 _PG_CONTAINER  = "hindsight-db"
@@ -190,6 +223,7 @@ class HindsightProvider(BaseProvider):
                         "content": part["text"],
                         "context": "attached document",
                         "document_id": doc_id,
+                        "event_date": NONE_DATE,
                     })
                     event: dict = {
                         "content": f"{label} загрузил документ {doc_id}",
