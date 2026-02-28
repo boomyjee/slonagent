@@ -162,7 +162,7 @@ def _cluster_facts_by_entity(fact_rows, storage) -> list[list]:
     row_map = {r["fact_id"]: r for r in fact_rows}
 
     visited: set[str] = set()
-    clusters: list[list[sqlite3.Row]] = []
+    clusters: list[list] = []
 
     # BFS-like expansion: факты, связанные общей сущностью, идут в один кластер
     for fid in fact_ids:
@@ -284,7 +284,8 @@ async def _extract_observations(
 # ── Storage helpers ────────────────────────────────────────────────────────────
 
 def _store_observation(obs: Observation, storage) -> None:
-    """Сохраняет одно наблюдение в SQLite и LanceDB через Storage."""
+    """Сохраняет одно наблюдение в SQLite и LanceDB."""
+    from src.memory.providers.fact.storage import Storage
     now = datetime.now(timezone.utc).isoformat()
 
     storage.conn.execute(
@@ -304,7 +305,7 @@ def _store_observation(obs: Observation, storage) -> None:
     storage.mark_consolidated(obs.source_fact_ids)
 
     try:
-        vec = storage.embed_fn(obs.text)
+        vec = Storage.encode_texts([obs.text])[0]
         storage.insert_vectors([{"fact_id": obs.observation_id, "mentioned_at": now, "vector": vec}])
     except Exception as e:
         log.warning("[reflect] LanceDB write failed for %s: %s", obs.observation_id, e)

@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import sqlite3
-from typing import Callable, Optional
 
 import lancedb
 import pyarrow as pa
@@ -146,26 +145,74 @@ def ensure_fts(conn: sqlite3.Connection) -> None:
 
 # ── Storage class ──────────────────────────────────────────────────────────────
 
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+
+
 class Storage:
     """
     Фасад над SQLite + LanceDB.
 
     Хранит:
-      conn      — SQLite соединение
-      table     — LanceDB таблица векторов фактов
-      mm_table  — LanceDB таблица векторов mental models
-      embed_fn  — функция получения эмбеддинга: str → list[float]
+      conn     — SQLite соединение
+      table    — LanceDB таблица векторов фактов
+      mm_table — LanceDB таблица векторов mental models
+
+    Статические методы для эмбеддинга (lazy singleton):
+      configure_embed(model_name) — настроить модель до первого использования
+      encode_query(text)          — вектор поискового запроса (с query prompt)
+      encode_texts(texts)         — батч векторов для фактов/документов
+      embed_dim()                 — размерность вектора
     """
 
-    def __init__(
-        self,
-        sqlite_path: str,
-        lancedb_path: str,
-        embed_fn: Callable[[str], list],
-        dim: int,
-    ):
-        self.embed_fn = embed_fn
-        self.conn     = self._open_sqlite(sqlite_path)
+    _embed_model = None
+    _embed_model_name: str = EMBEDDING_MODEL
+
+    # ── Embedding (lazy singleton) ───────────────────────────────────────────────
+
+    @staticmethod
+    def configure_embed(model_name: str) -> None:
+        """Настроить название модели до первого использования."""
+        if Storage._embed_model is not None:
+            raise RuntimeError(
+                "Embedding model already loaded; call configure_embed() before first use"
+            )
+        Storage._embed_model_name = model_name
+
+    @staticmethod
+    def _get_embed_model():
+        if Storage._embed_model is None:
+            from sentence_transformers import SentenceTransformer
+            Storage._embed_model = SentenceTransformer(Storage._embed_model_name)
+            log.info(
+                "[storage] embedding model loaded: %s, dim=%d",
+                Storage._embed_model_name,
+                Storage._embed_model.get_sentence_embedding_dimension(),
+            )
+        return Storage._embed_model
+
+    @staticmethod
+    def encode_query(text: str) -> list:
+        """Вектор поискового запроса (с query prompt если поддерживается)."""
+        model = Storage._get_embed_model()
+        if hasattr(model, "prompts") and "query" in (model.prompts or {}):
+            return model.encode(text, prompt_name="query", normalize_embeddings=True).tolist()
+        return model.encode(text, normalize_embeddings=True).tolist()
+
+    @staticmethod
+    def encode_texts(texts) -> list:
+        """Батч-кодирование фактов/наблюдений/описаний (str или list[str])."""
+        return Storage._get_embed_model().encode(texts, normalize_embeddings=True).tolist()
+
+    @staticmethod
+    def embed_dim() -> int:
+        """Размерность векторного пространства."""
+        return Storage._get_embed_model().get_sentence_embedding_dimension()
+
+    # ── Init ─────────────────────────────────────────────────────────────────────
+
+    def __init__(self, sqlite_path: str, lancedb_path: str):
+        dim = Storage.embed_dim()
+        self.conn = self._open_sqlite(sqlite_path)
         self.table, self.mm_table = self._open_lancedb(lancedb_path, dim)
 
     # ── Init helpers ────────────────────────────────────────────────────────────

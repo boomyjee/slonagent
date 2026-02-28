@@ -47,6 +47,7 @@ def create_mental_model(
     tags: Optional[list[str]] = None,
 ) -> MentalModel:
     """Создаёт новый mental model. description индексируется как вектор."""
+    from src.memory.providers.fact.storage import Storage
     mm = MentalModel(
         name=name,
         description=description,
@@ -65,7 +66,7 @@ def create_mental_model(
         "updated_at": mm.updated_at,
     })
     try:
-        vec = storage.embed_fn(description)
+        vec = Storage.encode_texts([description])[0]
         storage.insert_mm_vector(mm.model_id, vec)
     except Exception as e:
         log.warning("[mental_models] LanceDB write failed: %s", e)
@@ -83,6 +84,7 @@ def update_mental_model(
     tags: Optional[list[str]] = None,
 ) -> bool:
     """Обновляет существующий mental model. Возвращает True если найден."""
+    from src.memory.providers.fact.storage import Storage
     rows = storage.get_mental_model_rows([model_id])
     if not rows:
         return False
@@ -104,7 +106,7 @@ def update_mental_model(
 
     if description is not None:
         try:
-            vec = storage.embed_fn(new_description)
+            vec = Storage.encode_texts([new_description])[0]
             storage.delete_mm_vector(model_id)
             storage.insert_mm_vector(model_id, vec)
         except Exception as e:

@@ -1,10 +1,11 @@
 """fact/ — FactProvider: локальный аналог HindsightProvider.
 
 Вместо API-вызовов к серверу — напрямую вызывает локальные модули:
-  retain   → src.memory.providers.fact.retain
-  recall   → src.memory.providers.fact.recall
-  reflect  → src.memory.providers.fact.reflect  (consolidation pipeline)
-  storage  → src.memory.providers.fact.storage   (SQLite + LanceDB)
+  retain         → src.memory.providers.fact.retain
+  recall         → src.memory.providers.fact.recall
+  reflect        → src.memory.providers.fact.reflect        (consolidation pipeline)
+  reflect_agent  → src.memory.providers.fact.reflect_agent  (agentic loop для fact_reflect)
+  storage        → src.memory.providers.fact.storage         (SQLite + LanceDB)
 
 Логика — 1 в 1 с HindsightProvider:
   _consolidate()       накопленные ходы → retain() (по лимиту токенов)
@@ -12,13 +13,13 @@
   get_context_prompt() recall() по тексту пользователя → в системный промпт
   fact_recall          явный семантический поиск (≡ hindsight_recall)
   fact_get_document    получить полный текст документа (≡ hindsight_get_document)
-  fact_reflect         глубокий анализ: recall + LLM синтез (≡ hindsight_reflect)
+  fact_reflect         агентный цикл: search_observations → recall → LLM (≡ hindsight_reflect)
 """
 import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import Annotated, Optional
+from typing import Annotated
 
 import httpx
 from google import genai
@@ -26,29 +27,11 @@ from google import genai
 from agent import tool
 from src.memory.memory import Memory
 from src.memory.providers.base import BaseProvider
-from src.memory.providers.fact.retain import NONE_DATE_YEAR, RetainItem, retain
+from src.memory.providers.fact.retain import RetainItem, retain
 from src.memory.providers.fact.recall import recall_async, RecallResponse
 from src.memory.providers.fact.storage import Storage
 
 log = logging.getLogger(__name__)
-
-NONE_DATE = datetime(NONE_DATE_YEAR, 1, 1)
-
-_REFLECT_PROMPT = """\
-You are a memory analyst. Based on the facts retrieved from long-term memory, \
-answer the question thoroughly and precisely.
-
-Retrieved facts:
-{facts}
-
-Question: {query}
-
-Instructions:
-- Base your answer ONLY on the facts above.
-- If multiple facts are relevant, synthesize them into a coherent answer.
-- If facts are insufficient or contradictory, say so explicitly.
-- Be concise but complete.
-"""
 
 
 class FactProvider(BaseProvider):
@@ -60,34 +43,23 @@ class FactProvider(BaseProvider):
     LLM — тот же genai.Client, что и основной агент.
     """
 
-    EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-
     def __init__(
         self,
         model_name: str,
         api_key: str,
-        embed_model: str = EMBEDDING_MODEL,
         consolidate_tokens: int = 3_000,
-        recall_limit: int = 10,
         recall_max_tokens: int = 2_000,
     ):
         """
         Args:
             model_name:         Имя LLM-модели (Gemini) для извлечения фактов и reflect.
             api_key:            API-ключ Gemini.
-            embed_model:        Название SentenceTransformer модели для эмбеддингов.
             consolidate_tokens: Порог токенов накопленных ходов для запуска retain.
-            recall_limit:       Количество фактов в auto-recall (get_context_prompt).
-            recall_max_tokens:  Мягкое ограничение вывода recall для токенов в контексте.
+            recall_max_tokens:  Мягкий лимит токенов в auto-recall (get_context_prompt).
         """
         super().__init__(consolidate_tokens=consolidate_tokens)
         self._model_name        = model_name
-        self._embed_model_name  = embed_model
-        self._recall_limit      = recall_limit
         self._recall_max_tokens = recall_max_tokens
-
-        self._embed:   Optional[object]  = None
-        self._storage: Optional[Storage] = None
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -97,43 +69,10 @@ class FactProvider(BaseProvider):
         )
         self._llm = genai.Client(api_key=api_key, http_options=http_options)
 
-    # ── Embedding ────────────────────────────────────────────────────────────────
-
-    def _get_embed(self):
-        if self._embed is None:
-            from sentence_transformers import SentenceTransformer
-            self._embed = SentenceTransformer(self._embed_model_name)
-            log.info(
-                "[FactProvider] embedding model loaded: %s, dim=%d",
-                self._embed_model_name,
-                self._embed.get_sentence_embedding_dimension(),
-            )
-        return self._embed
-
-    def _embed_fn(self, text_or_texts):
-        """
-        Универсальная embed функция для Storage.
-        Принимает str (одиночный) или list[str] (батч для retain/dedup).
-        """
-        return self._get_embed().encode(text_or_texts, normalize_embeddings=True).tolist()
-
-    def _encode_query(self, text: str) -> list:
-        """Encode для запросов (prompt_name="query" если поддерживается моделью)."""
-        embed = self._get_embed()
-        if hasattr(embed, "prompts") and "query" in (embed.prompts or {}):
-            return embed.encode(text, prompt_name="query", normalize_embeddings=True).tolist()
-        return embed.encode(text, normalize_embeddings=True).tolist()
-
-    # ── Storage (lazy) ───────────────────────────────────────────────────────────
-
-    def _get_storage(self) -> Storage:
-        if self._storage is None:
-            dim          = self._get_embed().get_sentence_embedding_dimension()
-            sqlite_path  = os.path.join(Memory.memory_dir, "fact", "facts.db")
-            lancedb_path = os.path.join(Memory.memory_dir, "fact", "lancedb")
-            self._storage = Storage(sqlite_path, lancedb_path, self._embed_fn, dim)
-            log.info("[FactProvider] Storage initialized (dim=%d)", dim)
-        return self._storage
+        sqlite_path  = os.path.join(Memory.memory_dir, "fact", "facts.db")
+        lancedb_path = os.path.join(Memory.memory_dir, "fact", "lancedb")
+        self.storage = Storage(sqlite_path, lancedb_path)
+        log.info("[FactProvider] Storage initialized (dim=%d)", Storage.embed_dim())
 
     # ── Consolidate (retain pipeline) ────────────────────────────────────────────
 
@@ -161,7 +100,7 @@ class FactProvider(BaseProvider):
                     items.append(RetainItem(
                         content=part["text"],
                         context="attached document",
-                        event_date=NONE_DATE,
+                        event_date=None,
                         document_id=doc_id,
                     ))
                     items.append(RetainItem(
@@ -179,9 +118,8 @@ class FactProvider(BaseProvider):
         if not items:
             return
 
-        storage = await asyncio.to_thread(self._get_storage)
         try:
-            await retain(items, self._llm, self._model_name, storage)
+            await retain(items, self._llm, self._model_name, self.storage)
             n_doc = sum(1 for i in items if i.document_id)
             log.info(
                 "[FactProvider] retain %d items (%d doc, %d conv)",
@@ -193,17 +131,18 @@ class FactProvider(BaseProvider):
 
         try:
             from src.memory.providers.fact.reflect import consolidate
-            await consolidate(storage, self._llm, self._model_name)
+            await consolidate(self.storage, self._llm, self._model_name)
         except Exception as e:
             log.warning("[FactProvider] background consolidation failed: %s", e)
 
     # ── Internal recall ──────────────────────────────────────────────────────────
 
-    async def _recall(self, query: str, limit: int | None = None) -> RecallResponse:
-        limit   = limit or self._recall_limit
-        storage = await asyncio.to_thread(self._get_storage)
-        q_vec   = await asyncio.to_thread(self._encode_query, query)
-        return await recall_async(query, q_vec, storage, limit=limit)
+    async def _recall(self, query: str, max_tokens: int | None = None) -> RecallResponse:
+        q_vec = await asyncio.to_thread(Storage.encode_query, query)
+        return await recall_async(
+            query, q_vec, self.storage,
+            max_tokens=max_tokens or self._recall_max_tokens,
+        )
 
     # ── Context prompt ───────────────────────────────────────────────────────────
 
@@ -258,10 +197,15 @@ class FactProvider(BaseProvider):
     async def fact_recall(
         self,
         query: Annotated[str, "Поисковый запрос"],
-        max_facts: Annotated[int, "Максимум фактов в ответе (по умолчанию 10)"] = 10,
+        max_tokens: Annotated[int, "Мягкий лимит токенов в ответе (по умолчанию 2000)"] = 2_000,
+        budget: Annotated[str, "Глубина поиска: low / mid / high (по умолчанию mid)"] = "mid",
     ) -> dict:
         try:
-            response = await self._recall(query[:1500], limit=max_facts)
+            q_vec = await asyncio.to_thread(Storage.encode_query, query[:1500])
+            response = await recall_async(
+                query[:1500], q_vec, self.storage,
+                max_tokens=max_tokens, budget=budget,
+            )
             results = [
                 {
                     "fact": r.fact,
@@ -289,9 +233,8 @@ class FactProvider(BaseProvider):
         document_id: Annotated[str, "ID документа (из результатов fact_recall)"],
     ) -> dict:
         try:
-            storage = await asyncio.to_thread(self._get_storage)
             rows = await asyncio.to_thread(
-                storage.conn.execute,
+                self.storage.conn.execute,
                 "SELECT chunk_index, chunk_text FROM chunks WHERE document_id = ? ORDER BY chunk_index",
                 (document_id,),
             )
@@ -313,27 +256,13 @@ class FactProvider(BaseProvider):
         query: Annotated[str, "Вопрос для глубокого анализа"],
     ) -> dict:
         try:
-            response = await self._recall(query[:1500], limit=30)
-            if not response.results:
-                return {"answer": "В памяти не найдено релевантных фактов по данному вопросу."}
-
-            facts_text = "\n".join(
-                f"- [{r.fact_type}] {r.fact}"
-                + (f" (occurred: {r.occurred_start})" if r.occurred_start else "")
-                for r in response.results
+            from src.memory.providers.fact.reflect_agent import run_reflect_agent
+            return await run_reflect_agent(
+                query=query[:1500],
+                storage=self.storage,
+                llm_client=self._llm,
+                model_name=self._model_name,
             )
-            llm_response = await asyncio.to_thread(
-                self._llm.models.generate_content,
-                model=self._model_name,
-                contents=[{"role": "user", "parts": [{"text": _REFLECT_PROMPT.format(
-                    facts=facts_text, query=query,
-                )}]}],
-            )
-            return {
-                "answer": (llm_response.text or "").strip(),
-                "facts_used": len(response.results),
-                "freshness": response.freshness,
-            }
         except Exception as e:
             log.warning("[FactProvider] fact_reflect failed: %s", e)
             return {"error": str(e)}

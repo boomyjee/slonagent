@@ -11,8 +11,11 @@ cross-encoder reranking via FlashRank).
   5. Reranking — FlashRank cross-encoder (ms-marco-MiniLM-L-12-v2)
 
 Параметры фильтрации:
-  - tags       — OR-match по тегам (как у Hindsight по умолчанию)
-  - fact_types — фильтр по fact_type ('world', 'experience', 'observation')
+  - types      — фильтр по fact_type ('world', 'experience', 'observation')
+  - tags       — фильтр по тегам
+  - tags_match — "any"|"all"|"any_strict"|"all_strict" (как у Hindsight)
+  - budget     — "low"|"mid"|"high" (глубина поиска)
+  - max_tokens — мягкий лимит выходных токенов
 
 Staleness API:
   - RecallResponse.pending_consolidation — кол-во неконсолидированных фактов
@@ -25,7 +28,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +38,9 @@ RRF_K = 60
 MAX_ENTITY_FREQUENCY = 500   # пропускаем слишком частые сущности (как у Hindsight)
 CAUSAL_WEIGHT_THRESHOLD = 0.3
 RERANK_CANDIDATES = 30       # pre-filter перед reranking (как у Hindsight)
+
+# budget → множитель кандидатов (как у Hindsight: low < mid < high)
+_BUDGET_FACTOR = {"low": 1, "mid": 2, "high": 4}
 
 # Lazy singleton — загружается один раз при первом вызове
 _ranker = None
@@ -112,22 +118,69 @@ def _semantic_search(query_vec, storage, limit: int) -> list[tuple[str, float]]:
 
 # ── Tag / fact_type WHERE helpers ─────────────────────────────────────────────
 
-def _tags_where(tags: Optional[list[str]], param_offset: int) -> tuple[str, list]:
-    """OR-match по тегам (как Hindsight tags_match='any')."""
+def _tags_where(
+    tags: Optional[list[str]],
+    tags_match: str = "any",
+) -> tuple[str, list]:
+    """
+    Строит WHERE-клаузу для фильтрации по тегам.
+    Поведение 1:1 с Hindsight:
+      any        — OR-match, включает записи без тегов
+      all        — AND-match, включает записи без тегов
+      any_strict — OR-match, исключает записи без тегов
+      all_strict — AND-match, исключает записи без тегов
+    """
     if not tags:
         return "", []
-    # SQLite JSON: json_each(tags) — проверяем вхождение любого тега
-    conditions = " OR ".join(
-        f"EXISTS (SELECT 1 FROM json_each(f.tags) WHERE value = ?)" for _ in tags
+
+    has_tags  = "json_array_length(f.tags) > 0"
+    or_match  = " OR ".join(
+        "EXISTS (SELECT 1 FROM json_each(f.tags) WHERE value = ?)" for _ in tags
     )
-    return f"AND ({conditions})", list(tags)
+    and_match = " AND ".join(
+        "EXISTS (SELECT 1 FROM json_each(f.tags) WHERE value = ?)" for _ in tags
+    )
+    params = list(tags)
+
+    if tags_match == "any":
+        return f"AND ({or_match} OR NOT ({has_tags}))", params
+    if tags_match == "all":
+        return f"AND ({and_match} OR NOT ({has_tags}))", params
+    if tags_match == "any_strict":
+        return f"AND ({or_match})", params
+    if tags_match == "all_strict":
+        return f"AND ({and_match})", params
+    return f"AND ({or_match} OR NOT ({has_tags}))", params  # fallback → any
 
 
-def _fact_types_where(fact_types: Optional[list[str]]) -> tuple[str, list]:
-    if not fact_types:
+def _fact_types_where(types: Optional[list[str]]) -> tuple[str, list]:
+    if not types:
         return "", []
-    placeholders = ",".join("?" * len(fact_types))
-    return f"AND fact_type IN ({placeholders})", list(fact_types)
+    placeholders = ",".join("?" * len(types))
+    return f"AND fact_type IN ({placeholders})", list(types)
+
+
+def _count_tokens(text: str) -> int:
+    """Оценка числа токенов (tiktoken cl100k_base если доступен, иначе len//4)."""
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return max(1, len(text) // 4)
+
+
+def _apply_token_budget(results: list, max_tokens: int) -> list:
+    """Обрезает список результатов по суммарному бюджету токенов."""
+    total = 0
+    out = []
+    for r in results:
+        t = _count_tokens(r.fact)
+        if out and total + t > max_tokens:
+            break
+        total += t
+        out.append(r)
+    return out
 
 
 # ── 2. BM25 search ─────────────────────────────────────────────────────────────
@@ -137,7 +190,8 @@ def _bm25_search(
     storage,
     limit: int,
     tags: Optional[list[str]] = None,
-    fact_types: Optional[list[str]] = None,
+    tags_match: str = "any",
+    types: Optional[list[str]] = None,
 ) -> list[str]:
     """SQLite FTS5 + опциональный post-filter по тегам и fact_type."""
     tokens = [t for t in re.sub(r"[^\w\s]", " ", query.lower()).split() if t]
@@ -145,8 +199,8 @@ def _bm25_search(
         return []
     fts_query = " OR ".join(tokens)
     try:
-        tags_clause, tags_params = _tags_where(tags, 3)
-        ft_clause,   ft_params   = _fact_types_where(fact_types)
+        tags_clause, tags_params = _tags_where(tags, tags_match)
+        ft_clause,   ft_params   = _fact_types_where(types)
         rows = storage.conn.execute(
             f"""
             SELECT fts.fact_id FROM facts_fts fts
@@ -324,11 +378,12 @@ def _temporal_search(
     storage,
     limit: int,
     tags: Optional[list[str]] = None,
-    fact_types: Optional[list[str]] = None,
+    tags_match: str = "any",
+    types: Optional[list[str]] = None,
 ) -> list[str]:
     """Факты в временном диапазоне + опциональные фильтры."""
-    tags_clause, tags_params = _tags_where(tags, 8)
-    ft_clause,   ft_params   = _fact_types_where(fact_types)
+    tags_clause, tags_params = _tags_where(tags, tags_match)
+    ft_clause,   ft_params   = _fact_types_where(types)
     rows = storage.conn.execute(
         f"""
         SELECT fact_id FROM facts f
@@ -439,43 +494,63 @@ def recall(
     query: str,
     query_vec,
     storage,
-    limit: int = TOP_K,
-    reference_date: Optional[datetime] = None,
+    types: Optional[list[str]] = None,
+    max_tokens: int = 4096,
+    budget: str = "mid",
+    query_timestamp: Optional[str] = None,
     tags: Optional[list[str]] = None,
-    fact_types: Optional[list[str]] = None,
+    tags_match: Literal["any", "all", "any_strict", "all_strict"] = "any",
 ) -> RecallResponse:
     """
     4-way поиск + RRF + cross-encoder reranking.
     Синхронный — вызывать через asyncio.to_thread.
 
+    Сигнатура 1:1 с Hindsight arecall (без bank_id/trace/include_*).
+
     1. Semantic  — LanceDB cosine ≥ 0.3
-    2. BM25      — SQLite FTS5 (+ tags/fact_types filter)
+    2. BM25      — SQLite FTS5 (+ tags/types filter)
     3. Graph     — LinkExpansion от semantic seeds (entity > causal > fallback*0.5)
-    4. Temporal  — dateparser + SQL date range (+ tags/fact_types filter)
+    4. Temporal  — dateparser + SQL date range (+ tags/types filter)
     5. Reranking — FlashRank cross-encoder поверх топ-RERANK_CANDIDATES
+    6. Token budget — обрезаем по max_tokens
 
     Возвращает RecallResponse с полями:
-      .results              — список RecallResult
+      .results               — список RecallResult
       .pending_consolidation — кол-во неконсолидированных фактов (Staleness API)
-      .is_stale             — True если pending_consolidation > 0
-      .freshness            — "up_to_date" | "slightly_stale" | "stale"
+      .is_stale              — True если pending_consolidation > 0
+      .freshness             — "up_to_date" | "slightly_stale" | "stale"
     """
+    factor = _BUDGET_FACTOR.get(budget, 2)
+    limit  = TOP_K * factor
+
+    # Temporal reference date
+    ref_date: Optional[datetime] = None
+    if query_timestamp:
+        try:
+            ref_date = datetime.fromisoformat(query_timestamp)
+        except ValueError:
+            pass
+
     # 1. Semantic
     semantic_hits = _semantic_search(query_vec, storage, limit * 2)
     semantic_ids = [fid for fid, _ in semantic_hits]
 
     # 2. BM25
-    bm25_ids = _bm25_search(query, storage, limit * 2, tags=tags, fact_types=fact_types)
+    bm25_ids = _bm25_search(
+        query, storage, limit * 2, tags=tags, tags_match=tags_match, types=types
+    )
 
     # 3. Graph — LinkExpansion от semantic seeds (граф не фильтруем по тегам — это постфильтр)
     graph_hits = _graph_link_expansion(semantic_ids[:limit], storage, budget=limit * 2)
     graph_ids = [fid for fid, _ in graph_hits]
 
     # 4. Temporal
-    temporal_range = _extract_temporal_constraint(query, reference_date)
+    temporal_range = _extract_temporal_constraint(query, ref_date)
     temporal_ids = (
-        _temporal_search(temporal_range[0], temporal_range[1], storage, limit,
-                         tags=tags, fact_types=fact_types)
+        _temporal_search(
+            temporal_range[0], temporal_range[1], storage, limit,
+            tags=tags, tags_match=tags_match, types=types,
+        )
         if temporal_range else []
     )
 
@@ -485,7 +560,7 @@ def recall(
         lists.append(temporal_ids)
         sources.append("temporal")
 
-    # RRF — берём RERANK_CANDIDATES кандидатов для reranker, потом обрезаем до limit
+    # RRF — берём RERANK_CANDIDATES кандидатов для reranker
     merged = _rrf_merge(lists, sources)[:RERANK_CANDIDATES]
     if not merged:
         return RecallResponse(results=[], pending_consolidation=storage.get_pending_consolidation_count())
@@ -494,9 +569,9 @@ def recall(
     rrf_scores = {fid: score for fid, score, _ in merged}
     rrf_sources = {fid: srcs for fid, _, srcs in merged}
 
-    # Post-фильтр по tags и fact_types для semantic/graph результатов
-    tags_clause, tags_params = _tags_where(tags, 1)
-    ft_clause,   ft_params   = _fact_types_where(fact_types)
+    # Post-фильтр по tags и types для semantic/graph результатов
+    tags_clause, tags_params = _tags_where(tags, tags_match)
+    ft_clause,   ft_params   = _fact_types_where(types)
     placeholders = ",".join("?" * len(merged_ids))
     rows = storage.conn.execute(
         f"SELECT * FROM facts f WHERE fact_id IN ({placeholders}) {tags_clause} {ft_clause}",
@@ -512,14 +587,17 @@ def recall(
         r.sources = rrf_sources[fid]
         results.append(r)
 
-    # 5. Cross-encoder reranking → обрезаем до limit
-    results = _rerank(query, results)[:limit]
+    # 5. Cross-encoder reranking
+    results = _rerank(query, results)
+
+    # 6. Token budget
+    results = _apply_token_budget(results, max_tokens)
 
     pending = storage.get_pending_consolidation_count()
     log.info(
-        "[recall] %r → %d results (sem=%d bm25=%d graph=%d temporal=%d pending=%d)",
+        "[recall] %r → %d results (sem=%d bm25=%d graph=%d temporal=%d budget=%s pending=%d)",
         query[:60], len(results),
-        len(semantic_ids), len(bm25_ids), len(graph_ids), len(temporal_ids), pending,
+        len(semantic_ids), len(bm25_ids), len(graph_ids), len(temporal_ids), budget, pending,
     )
     return RecallResponse(results=results, pending_consolidation=pending)
 
@@ -528,11 +606,14 @@ async def recall_async(
     query: str,
     query_vec,
     storage,
-    limit: int = TOP_K,
-    reference_date: Optional[datetime] = None,
+    types: Optional[list[str]] = None,
+    max_tokens: int = 4096,
+    budget: str = "mid",
+    query_timestamp: Optional[str] = None,
     tags: Optional[list[str]] = None,
-    fact_types: Optional[list[str]] = None,
+    tags_match: Literal["any", "all", "any_strict", "all_strict"] = "any",
 ) -> RecallResponse:
     return await asyncio.to_thread(
-        recall, query, query_vec, storage, limit, reference_date, tags, fact_types
+        recall, query, query_vec, storage,
+        types, max_tokens, budget, query_timestamp, tags, tags_match,
     )

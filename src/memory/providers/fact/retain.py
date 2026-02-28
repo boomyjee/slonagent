@@ -158,7 +158,7 @@ CONCISE_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
 class RetainItem:
     content: str
     context: str = ""
-    event_date: datetime = field(default_factory=datetime.utcnow)
+    event_date: Optional[datetime] = field(default_factory=datetime.utcnow)
     document_id: Optional[str] = None
     tags: list[str] = field(default_factory=list)
 
@@ -243,25 +243,22 @@ def _sanitize_text(text: Optional[str]) -> Optional[str]:
 
 # ── User message (matches Hindsight format) ────────────────────────────────────
 
-NONE_DATE_YEAR = 1970  # sentinel: не вставлять Event Date в промпт
-
-
 def _build_user_message(
     chunk: str,
     chunk_index: int,
     total_chunks: int,
-    event_date: datetime,
+    event_date: Optional[datetime],
     context: str = "",
 ) -> str:
     sanitized_chunk = _sanitize_text(chunk)
     sanitized_context = _sanitize_text(context) if context else "none"
 
-    # Для документов без явной даты (NONE_DATE_YEAR) не вставляем Event Date,
+    # event_date=None означает документ без явной даты — не вставляем Event Date,
     # чтобы LLM не привязывал факты к дате загрузки.
-    if event_date.year != NONE_DATE_YEAR:
-        event_date_line = f"Event Date: {event_date.strftime('%A, %B %d, %Y')} ({event_date.isoformat()})\n"
-    else:
-        event_date_line = ""
+    event_date_line = (
+        f"Event Date: {event_date.strftime('%A, %B %d, %Y')} ({event_date.isoformat()})\n"
+        if event_date else ""
+    )
 
     return f"""Extract facts from the following text chunk.
 
@@ -522,17 +519,17 @@ def _is_within_time_window(iso_a: Optional[str], iso_b: Optional[str], hours: in
 def deduplicate(
     facts: list[Fact],
     table,
-    embed_fn,
 ) -> tuple[list[Fact], list]:
     """
     Фильтрует дубли по cosine similarity + time window.
     Возвращает (new_facts, vectors) — векторы уже посчитаны, переиспользуем в store_facts.
     """
+    from src.memory.providers.fact.storage import Storage
     if not facts:
         return [], []
 
     augmented = [augment_text_for_embedding(f) for f in facts]
-    vectors = embed_fn(augmented)
+    vectors = Storage.encode_texts(augmented)
 
     try:
         if table.count_rows() == 0:
@@ -632,7 +629,7 @@ def store_facts(
     if not facts:
         return [], []
 
-    facts, vectors = deduplicate(facts, storage.table, storage.embed_fn)
+    facts, vectors = deduplicate(facts, storage.table)
     if not facts:
         return [], []
 
