@@ -71,6 +71,9 @@ class HindsightProvider(BaseProvider):
         self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
 
     def _start_server(self):
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
         from hindsight import HindsightServer
         server = HindsightServer(
             db_url="pg0://slonagent",
@@ -78,7 +81,7 @@ class HindsightProvider(BaseProvider):
             llm_api_key=self._llm_api_key or "",
             llm_model=self._llm_model or "",
         )
-        server.start()
+        server.start(timeout=86400)
         self._server = server
         self._base_url = server.url
         log.info("[HindsightProvider] embedded server started at %s", self._base_url)

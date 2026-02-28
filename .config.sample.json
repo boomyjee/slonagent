@@ -2,7 +2,7 @@
     "env": {
         "HTTP_PROXY": "http://user:pass@host:port",
         "HTTPS_PROXY": "http://user:pass@host:port",
-        "HF_HUB_OFFLINE": "1",
+        "HF_HUB_OFFLINE": "0",
         "GEMINI_API_KEY": "YOUR_API_KEY"
     },
     "telegram_transport": {
