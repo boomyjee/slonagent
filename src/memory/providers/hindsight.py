@@ -12,12 +12,8 @@
 import logging
 import subprocess
 import time
-import warnings
 from datetime import datetime
 from typing import Annotated
-
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", category=ResourceWarning)
 
 from agent import tool
 from src.memory.providers.base import BaseProvider

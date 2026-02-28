@@ -1,7 +1,14 @@
 import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", category=ResourceWarning)
-warnings.filterwarnings("ignore", category=Warning, module="requests")
+_original_warn = warnings.warn
+def _warn(msg, category=UserWarning, stacklevel=1, source=None, **kw):
+    if issubclass(category, (DeprecationWarning, ResourceWarning, FutureWarning)):
+        return
+    if isinstance(msg, (DeprecationWarning, ResourceWarning, FutureWarning)):
+        return
+    if getattr(category, "__module__", "").startswith("requests"):
+        return
+    return _original_warn(msg, category, stacklevel, source, **kw)
+warnings.warn = _warn
 
 import asyncio, importlib, json, logging, os, shutil, sys
 
