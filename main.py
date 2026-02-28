@@ -68,7 +68,7 @@ async def run():
             os.execv(sys.executable, [sys.executable] + sys.argv)
         raise
 
-    shutil.copy(_CONFIG_PATH, _LAST_GOOD_PATH)
+    # shutil.copy(_CONFIG_PATH, _LAST_GOOD_PATH)
     try:
         await transport.start()
     finally:
