@@ -4,3 +4,14 @@ aiohttp-socks>=0.8.4
 simplemem>=0.1.0
 psutil>=5.9.0
 hindsight-client
+
+# SemanticProvider
+lancedb
+sentence-transformers
+numpy
+pyarrow
+
+# HindsightProvider (embedded engine)
+# On Windows, vendor/uvloop-stub must be installed first to satisfy uvloop dependency
+vendor/uvloop-stub
+hindsight-api

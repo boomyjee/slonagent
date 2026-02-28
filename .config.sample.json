@@ -26,6 +26,12 @@
                 "bank_id": "slonagent"
             },
             {
+                "__class__": "src.memory.providers.hindsight.HindsightProvider",
+                "model_name": "gemini-3-flash-preview",
+                "api_key": "$GEMINI_API_KEY",
+                "bank_id": "slonagent"
+            },
+            {
                 "__class__": "src.memory.providers.personality.PersonalityProvider"
             },
             {

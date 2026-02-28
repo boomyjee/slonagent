@@ -1,0 +1,8 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uvloop"
+version = "0.22.1"
+description = "Stub package: uvloop is not supported on Windows, falls back to asyncio."
