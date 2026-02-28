@@ -21,15 +21,11 @@
         },
         "memory_providers": [
             {
-                "__class__": "src.memory.providers.hindsight_api.HindsightApiProvider",
-                "base_url": "http://localhost:8888",
-                "bank_id": "slonagent"
-            },
-            {
                 "__class__": "src.memory.providers.hindsight.HindsightProvider",
-                "model_name": "gemini-3-flash-preview",
-                "api_key": "$GEMINI_API_KEY",
-                "bank_id": "slonagent"
+                "bank_id": "slonagent",
+                "llm_provider": "gemini",
+                "llm_api_key": "$GEMINI_API_KEY",
+                "llm_model": "gemini-2.5-flash"
             },
             {
                 "__class__": "src.memory.providers.personality.PersonalityProvider"

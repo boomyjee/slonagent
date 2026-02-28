@@ -1,70 +1,110 @@
-"""HindsightProvider — интеграция с Hindsight Engine (embedded, без сервера).
+"""HindsightProvider — интеграция с Hindsight.
 
-Использует MemoryEngine напрямую с embedded PostgreSQL (pg0) и локальными эмбеддингами.
-Функционально эквивалентен HindsightApiProvider, но не требует запущенного сервера.
+Поддерживает два режима:
+- Встроенный сервер (base_url не передан): запускает HindsightServer в фоновом потоке,
+  использует embedded PostgreSQL. Веб-панель доступна по адресу, выводимому в лог.
+- Внешний сервер (base_url передан): подключается к уже запущенному Hindsight-серверу
+  (Docker, Podman и т.п.).
 
-Установка зависимости:
-    pip install -e lib/hindsight/hindsight-api
+Отправляет диалоги в Hindsight (retain), который извлекает факты, строит граф сущностей
+и сохраняет документы с возможностью восстановить оригинал. Поиск (recall) возвращает
+релевантные факты с учётом временного контекста и связей между сущностями.
 """
-import logging, os
+import logging
 from datetime import datetime
 from typing import Annotated
 
 from agent import tool
 from src.memory.providers.base import BaseProvider
-from src.memory.memory import Memory
 
 log = logging.getLogger(__name__)
 
 
 class HindsightProvider(BaseProvider):
+    """
+    Провайдер памяти на базе Hindsight.
+
+    Если base_url не передан — запускает встроенный сервер (embedded PostgreSQL,
+    веб-панель доступна локально). Если base_url передан — подключается к внешнему
+    серверу (Docker/Podman).
+
+    Логика:
+    - _consolidate(): накопленные ходы → retain() (по лимиту токенов)
+    - get_context_prompt(): recall() по тексту пользователя → в системный промпт
+    - Тулы hindsight_recall / hindsight_reflect для явного поиска
+    """
+
     def __init__(
         self,
-        model_name: str,
-        api_key: str,
+        base_url: str | None = None,
         bank_id: str = "slonagent",
-        embedding_model: str = "BAAI/bge-small-en-v1.5",
+        api_key: str | None = None,
+        llm_provider: str = "gemini",
+        llm_api_key: str | None = None,
+        llm_model: str | None = None,
         consolidate_tokens: int = 3_000,
         recall_max_tokens: int = 2_000,
     ):
+        """
+        Args:
+            base_url: URL сервера. Если None — запускается встроенный сервер.
+            bank_id: Идентификатор банка памяти.
+            api_key: API-ключ для авторизации на Hindsight-сервере (если есть).
+            llm_provider: LLM-провайдер для встроенного сервера (gemini, openai, groq, ...).
+            llm_api_key: API-ключ LLM для встроенного сервера.
+            llm_model: Имя модели для встроенного сервера.
+            consolidate_tokens: Порог токенов для консолидации.
+            recall_max_tokens: Максимум токенов в ответе recall.
+        """
         super().__init__(consolidate_tokens=consolidate_tokens)
-        self.model_name = model_name
-        self.api_key = api_key
-        self.bank_id = bank_id
-        self.embedding_model = embedding_model
-        self.recall_max_tokens = recall_max_tokens
-        self._engine = None
-        self._ctx = None
+        self._base_url = base_url
+        self._bank_id = bank_id
+        self._api_key = api_key
+        self._llm_provider = llm_provider
+        self._llm_api_key = llm_api_key
+        self._llm_model = llm_model
+        self._recall_max_tokens = recall_max_tokens
+        self._client = None
+        self._server = None
 
-    async def start(self):
-        from hindsight_api.engine.memory_engine import MemoryEngine
-        from hindsight_api.engine.task_backend import SyncTaskBackend
-        from hindsight_api.engine.embeddings import LocalSTEmbeddings
-        from hindsight_api.models import RequestContext
-
-        db_path = os.path.join(Memory.memory_dir, "hindsight", "pg0")
-        os.makedirs(db_path, exist_ok=True)
-
-        self._engine = MemoryEngine(
-            db_url=f"pg0:{db_path}",
-            memory_llm_provider="gemini",
-            memory_llm_api_key=self.api_key,
-            memory_llm_model=self.model_name,
-            embeddings=LocalSTEmbeddings(model_name=self.embedding_model),
-            task_backend=SyncTaskBackend(),
+    def _start_server(self):
+        from hindsight import HindsightServer
+        server = HindsightServer(
+            db_url="pg0://slonagent",
+            llm_provider=self._llm_provider,
+            llm_api_key=self._llm_api_key or "",
+            llm_model=self._llm_model or "",
         )
-        await self._engine.initialize()
-        self._ctx = RequestContext(internal=True)
-        log.info("[HindsightProvider] engine initialized, bank=%s", self.bank_id)
+        server.start()
+        self._server = server
+        self._base_url = server.url
+        log.info("[HindsightProvider] embedded server started at %s", self._base_url)
+
+    def _get_client(self):
+        if self._client is None:
+            if self._base_url is None:
+                self._start_server()
+            from hindsight_client import Hindsight
+            self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
+        return self._client
+
+    async def _recall(self, query: str, max_tokens: int, budget: str = "mid") -> list:
+        response = await self._get_client().arecall(
+            bank_id=self._bank_id,
+            query=query,
+            max_tokens=max_tokens,
+            budget=budget,
+        )
+        return [
+            (r.text, getattr(r, "document_id", None))
+            for r in (response.results or []) if getattr(r, "text", None)
+        ]
 
     # ── consolidate ───────────────────────────────────────────────────────────
 
     async def _consolidate(self, pending: list):
-        if not self._engine:
-            log.warning("[HindsightProvider] engine not initialized, skipping consolidation")
-            return
-
         items = []
+
         for turn in pending:
             if not isinstance(turn, dict):
                 continue
@@ -86,7 +126,7 @@ class HindsightProvider(BaseProvider):
                         "context": "document upload event",
                     }
                     if ts:
-                        event["event_date"] = ts
+                        event["timestamp"] = ts
                     items.append(event)
                 else:
                     item: dict = {
@@ -94,16 +134,15 @@ class HindsightProvider(BaseProvider):
                         "context": "conversation",
                     }
                     if ts:
-                        item["event_date"] = ts
+                        item["timestamp"] = ts
                     items.append(item)
 
         if not items:
             return
         try:
-            await self._engine.retain_batch_async(
-                bank_id=self.bank_id,
-                contents=items,
-                request_context=self._ctx,
+            await self._get_client().aretain_batch(
+                bank_id=self._bank_id,
+                items=items,
             )
             n_doc = sum(1 for i in items if "document_id" in i)
             log.info("[HindsightProvider] retain_batch %d items (%d doc, %d conv)", len(items), n_doc, len(items) - n_doc)
@@ -112,25 +151,11 @@ class HindsightProvider(BaseProvider):
 
     # ── context ───────────────────────────────────────────────────────────────
 
-    async def _recall(self, query: str, max_tokens: int, budget: str = "mid") -> list:
-        from hindsight_api.engine.memory_engine import Budget
-        result = await self._engine.recall_async(
-            bank_id=self.bank_id,
-            query=query,
-            budget=Budget(budget),
-            max_tokens=max_tokens,
-            request_context=self._ctx,
-        )
-        return [
-            (f.text, getattr(f, "document_id", None))
-            for f in (result.results or []) if getattr(f, "text", None)
-        ]
-
     async def get_context_prompt(self, user_text: str = "") -> str:
-        if not self._engine or not user_text:
+        if not user_text:
             return ""
         try:
-            results = await self._recall(user_text[:1500], self.recall_max_tokens)
+            results = await self._recall(user_text[:1500], self._recall_max_tokens)
         except Exception as e:
             log.warning("[HindsightProvider] recall failed: %s", e)
             return ""
@@ -176,19 +201,21 @@ class HindsightProvider(BaseProvider):
         document_id: Annotated[str, "ID документа (из результатов recall)"],
     ) -> dict:
         try:
-            doc = await self._engine.get_document(
-                document_id=document_id,
-                bank_id=self.bank_id,
-                request_context=self._ctx,
-            )
-            if not doc:
-                return {"error": f"Документ {document_id} не найден."}
-            return {
-                "document_id": doc.get("id", document_id),
-                "original_text": doc.get("original_text"),
-                "memory_unit_count": doc.get("memory_unit_count"),
-                "created_at": str(doc.get("created_at", "")),
-            }
+            from hindsight_client_api import ApiClient, Configuration
+            from hindsight_client_api.api import DocumentsApi
+
+            config = Configuration(host=self._base_url)
+            async with ApiClient(config) as api_client:
+                if self._api_key:
+                    api_client.set_default_header("Authorization", f"Bearer {self._api_key}")
+                api = DocumentsApi(api_client)
+                doc = await api.get_document(bank_id=self._bank_id, document_id=document_id)
+                return {
+                    "document_id": doc.id,
+                    "original_text": doc.original_text,
+                    "memory_unit_count": doc.memory_unit_count,
+                    "created_at": str(doc.created_at),
+                }
         except Exception as e:
             log.warning("[HindsightProvider] get_document failed: %s", e)
             return {"error": str(e)}
@@ -199,12 +226,12 @@ class HindsightProvider(BaseProvider):
         query: Annotated[str, "Вопрос для анализа"],
     ) -> dict:
         try:
-            result = await self._engine.reflect_async(
-                bank_id=self.bank_id,
+            response = await self._get_client().areflect(
+                bank_id=self._bank_id,
                 query=query,
-                request_context=self._ctx,
+                budget="low",
             )
-            return {"answer": result.text}
+            return {"answer": getattr(response, "answer", str(response))}
         except Exception as e:
             log.warning("[HindsightProvider] reflect failed: %s", e)
             return {"error": str(e)}
