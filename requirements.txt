@@ -13,6 +13,8 @@ numpy
 pyarrow
 
 # HindsightProvider (embedded server mode)
-# On Windows, vendor/uvloop-stub must be installed first to satisfy uvloop dependency
+# On Windows, stubs for Unix-only modules must be installed first
 vendor/uvloop-stub
+vendor/fcntl-stub
+vendor/resource-stub
 hindsight-all

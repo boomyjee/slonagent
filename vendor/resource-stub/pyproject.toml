@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resource-stub"
+version = "1.0.0"
+description = "Windows stub for resource (no-op)"
+
+[tool.setuptools]
+py-modules = ["resource"]

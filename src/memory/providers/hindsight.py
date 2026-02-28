@@ -64,8 +64,11 @@ class HindsightProvider(BaseProvider):
         self._llm_api_key = llm_api_key
         self._llm_model = llm_model
         self._recall_max_tokens = recall_max_tokens
-        self._client = None
         self._server = None
+        if base_url is None:
+            self._start_server()
+        from hindsight_client import Hindsight
+        self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
 
     def _start_server(self):
         from hindsight import HindsightServer
@@ -80,16 +83,8 @@ class HindsightProvider(BaseProvider):
         self._base_url = server.url
         log.info("[HindsightProvider] embedded server started at %s", self._base_url)
 
-    def _get_client(self):
-        if self._client is None:
-            if self._base_url is None:
-                self._start_server()
-            from hindsight_client import Hindsight
-            self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
-        return self._client
-
     async def _recall(self, query: str, max_tokens: int, budget: str = "mid") -> list:
-        response = await self._get_client().arecall(
+        response = await self._client.arecall(
             bank_id=self._bank_id,
             query=query,
             max_tokens=max_tokens,
@@ -140,7 +135,7 @@ class HindsightProvider(BaseProvider):
         if not items:
             return
         try:
-            await self._get_client().aretain_batch(
+            await self._client.aretain_batch(
                 bank_id=self._bank_id,
                 items=items,
             )
@@ -226,7 +221,7 @@ class HindsightProvider(BaseProvider):
         query: Annotated[str, "Вопрос для анализа"],
     ) -> dict:
         try:
-            response = await self._get_client().areflect(
+            response = await self._client.areflect(
                 bank_id=self._bank_id,
                 query=query,
                 budget="low",
