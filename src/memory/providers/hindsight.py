@@ -12,8 +12,12 @@
 import logging
 import subprocess
 import time
+import warnings
 from datetime import datetime
 from typing import Annotated
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=ResourceWarning)
 
 from agent import tool
 from src.memory.providers.base import BaseProvider
@@ -144,9 +148,6 @@ class HindsightProvider(BaseProvider):
         self._client = Hindsight(base_url=self._base_url, api_key=self._api_key)
 
     def _start_server(self):
-        import warnings
-        warnings.filterwarnings("ignore", category=DeprecationWarning)
-        warnings.filterwarnings("ignore", category=ResourceWarning)
         from hindsight import HindsightServer
         pg_url = _start_podman_postgres()
         server = HindsightServer(

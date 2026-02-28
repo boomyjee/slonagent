@@ -1,4 +1,6 @@
 import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=ResourceWarning)
 warnings.filterwarnings("ignore", category=Warning, module="requests")
 
 import asyncio, importlib, json, logging, os, shutil, sys
