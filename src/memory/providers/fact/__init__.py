@@ -83,8 +83,11 @@ class FactProvider(BaseProvider):
     async def _consolidate(self, pending: list) -> None:
         """
         Конвертирует накопленные ходы в RetainItem и запускает retain pipeline.
-        Логика идентична HindsightProvider._consolidate.
+        Диалоговые реплики конкатенируются в один item чтобы чанкер мог
+        разбить их с учётом контекста соседних сообщений.
         """
+        conv_lines: list[str] = []
+        conv_ts: datetime | None = None
         items: list[RetainItem] = []
 
         for turn in pending:
@@ -113,11 +116,17 @@ class FactProvider(BaseProvider):
                         event_date=ts,
                     ))
                 else:
-                    items.append(RetainItem(
-                        content=f"{label}: {part['text']}",
-                        context="conversation",
-                        event_date=ts,
-                    ))
+                    if conv_ts is None:
+                        conv_ts = ts
+                    ts_prefix = ts.strftime("%Y-%m-%d %H:%M")
+                    conv_lines.append(f"[{ts_prefix}] {label}: {part['text']}")
+
+        if conv_lines:
+            items.insert(0, RetainItem(
+                content="\n".join(conv_lines),
+                context="conversation",
+                event_date=conv_ts,
+            ))
 
         if not items:
             return
