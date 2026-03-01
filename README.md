@@ -98,7 +98,7 @@ start.bat --cli
 | Провайдер | Что делает |
 |---|---|
 | `FactProvider` | Граф фактов с семантическим поиском (SQLite + LanceDB). Реализация Hindsight 1:1 |
-| `FileProvider` | Живой документ `MEMORY.md` + хронологический архив `HISTORY.md` |
+| `SummaryProvider` | Живой документ `MEMORY.md` + хронологический архив `HISTORY.md` |
 | `PersonalityProvider` | Субличности — именованные Markdown-блоки знаний, управляемые агентом |
 | `SemanticProvider` | RAG на базе векторного поиска (LanceDB + Qwen3-Embedding) |
 | `ToolProvider` | Статистика и обогащённые описания инструментов на основе истории их использования |
@@ -116,9 +116,9 @@ start.bat --cli
 
 Инструменты агента: `fact_recall`, `fact_get_document`, `fact_reflect`.
 
-### FileProvider
+### SummaryProvider
 
-Идея из [nanobot](https://github.com/HKUDS/nanobot). Два файла в `memory/file/`:
+Идея из [nanobot](https://github.com/HKUDS/nanobot). Два файла в `memory/summary/`:
 - `MEMORY.md` — актуальный документ с ключевыми фактами, LLM обновляет при каждой консолидации
 - `HISTORY.md` — хронологический архив выжимок диалогов (append-only)
 
