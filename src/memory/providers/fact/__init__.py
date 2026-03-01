@@ -1,15 +1,13 @@
 """fact/ — FactProvider: локальный аналог HindsightProvider.
 
 Вместо API-вызовов к серверу — напрямую вызывает локальные модули:
-  retain         → src.memory.providers.fact.retain
-  recall         → src.memory.providers.fact.recall
-  reflect        → src.memory.providers.fact.reflect        (consolidation pipeline)
-  reflect_agent  → src.memory.providers.fact.reflect_agent  (agentic loop для fact_reflect)
-  storage        → src.memory.providers.fact.storage         (SQLite + LanceDB)
+  retain   → src.memory.providers.fact.retain   (факты + консолидация в конце)
+  recall   → src.memory.providers.fact.recall   (семантический поиск)
+  reflect  → src.memory.providers.fact.reflect  (агентный цикл для fact_reflect)
+  storage  → src.memory.providers.fact.storage  (SQLite + LanceDB)
 
 Логика — 1 в 1 с HindsightProvider:
-  _consolidate()       накопленные ходы → retain() (по лимиту токенов)
-                       + фоновая консолидация через reflect.consolidate()
+  _consolidate()       накопленные ходы → retain() (факты + консолидация)
   get_context_prompt() recall() по тексту пользователя → в системный промпт
   fact_recall          явный семантический поиск (≡ hindsight_recall)
   fact_get_document    получить полный текст документа (≡ hindsight_get_document)
@@ -127,13 +125,6 @@ class FactProvider(BaseProvider):
             )
         except Exception as e:
             log.warning("[FactProvider] retain failed: %s", e)
-            return
-
-        try:
-            from src.memory.providers.fact.reflect import consolidate
-            await consolidate(self.storage, self._llm, self._model_name)
-        except Exception as e:
-            log.warning("[FactProvider] background consolidation failed: %s", e)
 
     # ── Internal recall ──────────────────────────────────────────────────────────
 
@@ -256,7 +247,7 @@ class FactProvider(BaseProvider):
         query: Annotated[str, "Вопрос для глубокого анализа"],
     ) -> dict:
         try:
-            from src.memory.providers.fact.reflect_agent import run_reflect_agent
+            from src.memory.providers.fact.reflect import run_reflect_agent
             return await run_reflect_agent(
                 query=query[:1500],
                 storage=self.storage,

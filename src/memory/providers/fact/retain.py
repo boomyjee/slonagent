@@ -734,6 +734,215 @@ def store_facts(
     return facts, vectors
 
 
+# ── Consolidation (observation pipeline) ──────────────────────────────────────
+
+MIN_FACTS_PER_CLUSTER = 2
+MIN_NEW_FACTS         = 5
+MAX_FACTS_PER_CLUSTER = 30
+MAX_CLUSTERS_PER_RUN  = 10
+
+CONSOLIDATION_PROMPT = """\
+You are analyzing a set of facts to derive higher-level observations and patterns.
+
+Facts (JSON):
+{facts_json}
+
+Identify meaningful PATTERNS or BELIEFS that emerge from MULTIPLE facts above.
+Return ONLY valid JSON matching this schema exactly:
+
+{{
+  "observations": [
+    {{
+      "text": "Concise, precise pattern statement (1-2 sentences)",
+      "trend": "stable|strengthening|weakening|new|stale",
+      "evidence": [
+        {{
+          "fact_id": "<fact_id from the list above>",
+          "quote": "Exact or near-exact text from the fact",
+          "relevance": "One sentence: why this fact supports the observation"
+        }}
+      ]
+    }}
+  ]
+}}
+
+Rules:
+- Each observation MUST cite ≥ 2 different facts as evidence
+- Observations describe PATTERNS, not individual facts
+- Do NOT repeat a single fact as a standalone observation
+- Trend definitions:
+    "new"          — ALL evidence is < 7 days old
+    "strengthening" — > 60% of evidence occurred in the last 30 days (but some is older)
+    "weakening"    — < 20% of evidence is recent (< 30 days), rest is older
+    "stale"        — NO evidence in the last 30 days
+    "stable"       — evidence distributed evenly across time
+- Return {{"observations": []}} if no meaningful patterns exist
+"""
+
+
+@dataclass
+class ObservationEvidence:
+    fact_id: str
+    quote: str
+    relevance: str = ""
+
+
+@dataclass
+class Observation:
+    observation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    text: str = ""
+    trend: str = "stable"
+    evidence: list[ObservationEvidence] = field(default_factory=list)
+    source_fact_ids: list[str] = field(default_factory=list)
+    mentioned_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+def _compute_trend(evidence_timestamps: list[datetime]) -> str:
+    if not evidence_timestamps:
+        return "stable"
+    now = datetime.now(timezone.utc)
+    recent_cutoff = now - timedelta(days=30)
+    new_cutoff    = now - timedelta(days=7)
+    stamps = [ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts for ts in evidence_timestamps]
+    if all(ts >= new_cutoff for ts in stamps):
+        return "new"
+    if all(ts < recent_cutoff for ts in stamps):
+        return "stale"
+    ratio = sum(1 for ts in stamps if ts >= recent_cutoff) / len(stamps)
+    if ratio > 0.6:
+        return "strengthening"
+    if ratio < 0.2:
+        return "weakening"
+    return "stable"
+
+
+def _cluster_facts_by_entity(fact_rows, storage) -> list[list]:
+    fact_ids = [r["fact_id"] for r in fact_rows]
+    if not fact_ids:
+        return []
+    placeholders = ",".join("?" * len(fact_ids))
+    rows = storage.conn.execute(
+        f"SELECT fe.fact_id, fe.entity_id FROM fact_entities fe WHERE fe.fact_id IN ({placeholders})",
+        fact_ids,
+    ).fetchall()
+    entity_to_facts: dict[str, list[str]] = {}
+    fact_to_entities: dict[str, list[str]] = {}
+    for r in rows:
+        entity_to_facts.setdefault(r["entity_id"], []).append(r["fact_id"])
+        fact_to_entities.setdefault(r["fact_id"], []).append(r["entity_id"])
+    row_map = {r["fact_id"]: r for r in fact_rows}
+    visited: set[str] = set()
+    clusters: list[list] = []
+    for fid in fact_ids:
+        if fid in visited:
+            continue
+        cluster_ids: set[str] = {fid}
+        queue = [fid]
+        while queue:
+            current = queue.pop()
+            for eid in fact_to_entities.get(current, []):
+                for neighbor in entity_to_facts.get(eid, []):
+                    if neighbor not in cluster_ids:
+                        cluster_ids.add(neighbor)
+                        queue.append(neighbor)
+        visited.update(cluster_ids)
+        cluster = [row_map[cid] for cid in cluster_ids if cid in row_map]
+        clusters.append(cluster[:MAX_FACTS_PER_CLUSTER])
+    no_entity = [row_map[fid] for fid in fact_ids if fid not in fact_to_entities]
+    if no_entity:
+        clusters.append(no_entity[:MAX_FACTS_PER_CLUSTER])
+    return [c for c in clusters if len(c) >= MIN_FACTS_PER_CLUSTER]
+
+
+async def _extract_observations(cluster: list, client, model_name: str) -> list[Observation]:
+    facts_data = [
+        {"fact_id": r["fact_id"], "fact": r["fact"], "fact_type": r["fact_type"],
+         "occurred_start": r["occurred_start"], "mentioned_at": r["mentioned_at"]}
+        for r in cluster
+    ]
+    prompt = CONSOLIDATION_PROMPT.format(facts_json=json.dumps(facts_data, ensure_ascii=False, indent=2))
+    try:
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=[{"role": "user", "parts": [{"text": prompt}]}],
+            config={"response_mime_type": "application/json"},
+        )
+        data = json.loads(response.text.strip())
+    except Exception as e:
+        log.error("[retain] consolidation LLM call failed: %s", e)
+        return []
+
+    valid_fact_ids = {r["fact_id"] for r in cluster}
+    fact_timestamps: dict[str, Optional[datetime]] = {}
+    for r in cluster:
+        ts_str = r["mentioned_at"] or r["occurred_start"]
+        if ts_str:
+            try:
+                fact_timestamps[r["fact_id"]] = datetime.fromisoformat(ts_str)
+            except ValueError:
+                pass
+
+    observations: list[Observation] = []
+    for item in data.get("observations", []):
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text", "").strip()
+        if not text:
+            continue
+        evidence = [
+            ObservationEvidence(fact_id=ev["fact_id"], quote=ev.get("quote", ""), relevance=ev.get("relevance", ""))
+            for ev in item.get("evidence", [])
+            if isinstance(ev, dict) and ev.get("fact_id") in valid_fact_ids
+        ]
+        if len(evidence) < MIN_FACTS_PER_CLUSTER:
+            continue
+        ev_ts = [fact_timestamps[e.fact_id] for e in evidence if e.fact_id in fact_timestamps and fact_timestamps[e.fact_id]]
+        obs = Observation(text=text, trend=item.get("trend") or _compute_trend(ev_ts),
+                          evidence=evidence, source_fact_ids=[e.fact_id for e in evidence])
+        observations.append(obs)
+    return observations
+
+
+def _store_observation(obs: Observation, storage) -> None:
+    from src.memory.providers.fact.storage import Storage
+    now = datetime.now(timezone.utc).isoformat()
+    storage.conn.execute(
+        "INSERT OR IGNORE INTO facts (fact_id, fact, fact_type, mentioned_at, source_fact_ids) VALUES (?, ?, 'observation', ?, ?)",
+        (obs.observation_id, obs.text, now, json.dumps(obs.source_fact_ids)),
+    )
+    storage.conn.commit()
+    storage.insert_observation_evidence(
+        obs.observation_id,
+        [{"fact_id": e.fact_id, "quote": e.quote, "relevance": e.relevance} for e in obs.evidence],
+    )
+    storage.mark_consolidated(obs.source_fact_ids)
+    try:
+        vec = Storage.encode_texts([obs.text])[0]
+        storage.insert_vectors([{"fact_id": obs.observation_id, "mentioned_at": now, "vector": vec}])
+    except Exception as e:
+        log.warning("[retain] LanceDB write for observation %s failed: %s", obs.observation_id, e)
+
+
+async def consolidate(storage, client, model_name: str, min_new_facts: int = MIN_NEW_FACTS) -> list[Observation]:
+    """Консолидирует unconsolidated факты в observations."""
+    fact_rows = await asyncio.to_thread(storage.get_unconsolidated_facts, 200)
+    if len(fact_rows) < min_new_facts:
+        log.debug("[retain] skip consolidation: %d facts < %d", len(fact_rows), min_new_facts)
+        return []
+    clusters = (await asyncio.to_thread(_cluster_facts_by_entity, fact_rows, storage))[:MAX_CLUSTERS_PER_RUN]
+    log.info("[retain] consolidating %d facts in %d clusters", len(fact_rows), len(clusters))
+    all_obs: list[Observation] = []
+    for cluster in clusters:
+        for obs in await _extract_observations(cluster, client, model_name):
+            await asyncio.to_thread(_store_observation, obs, storage)
+            all_obs.append(obs)
+            log.info("[retain] observation created: %r (trend=%s, evidence=%d)", obs.text[:80], obs.trend, len(obs.evidence))
+    log.info("[retain] consolidation done: %d observations created", len(all_obs))
+    return all_obs
+
+
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 async def retain(
@@ -743,7 +952,7 @@ async def retain(
     storage,
 ) -> list[Fact]:
     """
-    Полный retain pipeline: LLM → dedup → store → graph links.
+    Полный retain pipeline: LLM → dedup → store → graph links → consolidate.
     """
     facts, chunk_meta = await extract_facts(items, client, model_name)
     if not facts:
@@ -761,4 +970,7 @@ async def retain(
         "[retain] done: %d facts, %d causal / %d temporal / %d semantic links",
         len(new_facts), n_causal, n_temporal, n_semantic,
     )
+
+    await consolidate(storage, client, model_name)
+
     return new_facts
