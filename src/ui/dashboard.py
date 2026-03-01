@@ -30,7 +30,7 @@ class Dashboard(App):
         ("2", "switch_tab('agent')", "Agent"),
         ("3", "switch_tab('memory')", "Memory"),
         ("4", "switch_tab('transport')", "Transport"),
-        ("q", "quit", "Quit"),
+        ("q,й", "quit", "Quit"),
     ]
 
     def compose(self) -> ComposeResult:
