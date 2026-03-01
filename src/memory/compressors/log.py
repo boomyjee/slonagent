@@ -98,7 +98,26 @@ GOOD:
   * -> viewed src/auth.ts — found token validation logic
   * -> viewed src/users.ts — found user lookup by email
 
-Short and medium-length user messages should be captured nearly verbatim."""
+Short and medium-length user messages should be captured nearly verbatim.
+
+SHARED CONTENT — DOCUMENTS, SCRIPTS, CODE, STORIES:
+When the user shares a document, script, story, code file, or any artifact, extract its key content as structured facts — not just "user shared X":
+- For narratives (scripts, stories): characters + roles, key events in order, setting, tone, open threads
+- For code/technical docs: purpose, key components, notable decisions or problems
+- For data/lists: the actual items, not just "user shared a list"
+
+Use sub-bullets to preserve structure without verbatim copying:
+
+BAD:  🔴 (07:07) User shared a script about a girl and her ex.
+GOOD: 🔴 (07:07) User shared script «Женский день» (dark comedy/horror, March 8th setting):
+  * -> Characters: Ira (protagonist), Vova (her ex, delivery courier)
+  * -> Inciting event: Vova impaled on deer antlers hanging on Ira's door
+  * -> Rising action: Ira dismembers body in bathroom to Pushny's cover of «18 мне уже»
+  * -> Resolution: dumps bags at trash, takes selfie with bloody bouquet, posts to Instagram
+  * -> Cliffhanger: comment from VOVA_CREATIVE appears under the post (scheduled? survived? twin?)
+  * -> Subtext: antlers = rogonosets (symbolic), pink aesthetic vs blood contrast
+
+The goal: someone reading only the observations should be able to reconstruct the artifact's substance."""
 
 _OBSERVER_OUTPUT_FORMAT = """\
 Use priority levels:
