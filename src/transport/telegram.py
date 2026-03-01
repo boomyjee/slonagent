@@ -87,7 +87,7 @@ class TelegramSkill(Skill):
 
 
 class TelegramTransport:
-    def __init__(self, bot_token: str, allowed_user_ids: set[int]):
+    def __init__(self, bot_token: str, allowed_user_ids: set[int], verbose: bool = True):
         proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self.bot = Bot(token=bot_token, session=AiohttpSession(proxy=proxy) if proxy else None)
         self.agent = None
@@ -98,6 +98,7 @@ class TelegramTransport:
 
         self._skill = TelegramSkill(self.bot)
 
+        self.verbose = verbose
         self._media_groups: dict[str, list[Message]] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
 
@@ -110,6 +111,7 @@ class TelegramTransport:
         pass
 
     async def on_tool_call(self, name: str, args: dict):
+        if not self.verbose: return
         lines = "\n".join(f"  {html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
         call_text = f"<b>[{html.escape(name)}]</b>\n{lines}" if lines else f"<b>[{html.escape(name)}]</b>"
         self._tool_call_text = call_text[:2000]
@@ -120,6 +122,7 @@ class TelegramTransport:
         )
 
     async def on_tool_result(self, name: str, result):
+        if not self.verbose: return
         if isinstance(result, dict):
             parts = [f"<b>[{html.escape(k)}]</b>\n{html.escape(str(v))}" for k, v in result.items() if v not in (None, "", [], {})]
             result_text = "\n".join(parts) if parts else "(пусто)"
@@ -159,6 +162,7 @@ class TelegramTransport:
         await self._answer(text)
 
     async def send_system_prompt(self, text: str):
+        if not self.verbose: return
         await self._answer(text, expandable=True, prefix="🔧 ")
 
     async def send_thinking(self, text: str):
