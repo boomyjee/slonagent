@@ -78,10 +78,19 @@ class ToolProvider(BaseProvider):
         for turn in pending:
             if not isinstance(turn, dict): continue
             for part in turn.get("parts", []):
-                if part.get("functionCall"):
-                    call = part["functionCall"]
+                if isinstance(part, dict):
+                    fc = part.get("functionCall")
+                    fr = part.get("functionResponse")
+                else:
+                    raw_fc = getattr(part, "function_call", None)
+                    raw_fr = getattr(part, "function_response", None)
+                    fc = {"name": raw_fc.name, "args": dict(raw_fc.args or {})} if raw_fc else None
+                    fr = {"name": raw_fr.name, "response": dict(raw_fr.response or {})} if raw_fr else None
+
+                if fc:
+                    call = fc
                     call_time = turn.get("_timestamp")
-                elif res := part.get("functionResponse"):
+                elif res := fr:
                     if call and call["name"] == res["name"]:
                         success = "error" not in res.get("response", {})
                         entry = self._tool_stats.setdefault(call["name"], {"content": "", "total_calls": 0, "total_success": 0, "avg_tokens": 0.0, "avg_time": 0.0})
