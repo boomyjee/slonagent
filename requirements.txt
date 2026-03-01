@@ -4,6 +4,7 @@ aiohttp-socks>=0.8.4
 psutil>=5.9.0
 fastapi
 uvicorn
+wsproto
 websockets
 
 # SemanticProvider / FactProvider
