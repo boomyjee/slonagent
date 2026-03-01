@@ -101,6 +101,7 @@ class TelegramTransport:
         self._skill = TelegramSkill(self.bot)
 
         self.verbose = verbose
+        self._current_message: Message | None = None
         self._media_groups: dict[str, list[Message]] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
 
@@ -162,6 +163,20 @@ class TelegramTransport:
 
     async def send_message(self, text: str):
         await self._answer(text)
+
+    async def inject_message(self, text: str):
+        """Inject a message from a non-Telegram source (e.g. web chat)."""
+        for chat_id in self.allowed_user_ids:
+            sent = await self.bot.send_message(chat_id, text, link_preview_options=self._no_link_preview)
+            self._current_message = sent
+            self._tool_msg = None
+            self._tool_call_text = ""
+            self._skill.set_message(sent)
+            await self.agent.process_message(
+                message_parts=[{"text": text}],
+                user_message_id=sent.message_id,
+                user_query=text,
+            )
 
     async def send_system_prompt(self, text: str):
         if not self.verbose: return

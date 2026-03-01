@@ -17,8 +17,12 @@ class Dashboard:
     def __init__(self, port: int = 8765):
         self._port = port
         self._queue: asyncio.Queue = None
+        self._incoming: asyncio.Queue = asyncio.Queue()
         self._clients: set = set()
         self._buffer: deque = deque(maxlen=_BUFFER_SIZE)
+
+    async def get_incoming(self) -> str:
+        return await self._incoming.get()
 
     def call_later(self, fn, *args):
         fn(*args)
@@ -75,7 +79,13 @@ class Dashboard:
             self._clients.add(websocket)
             try:
                 while True:
-                    await websocket.receive_text()
+                    data = await websocket.receive_text()
+                    try:
+                        msg = json.loads(data)
+                        if msg.get("type") == "user_message" and msg.get("text", "").strip():
+                            await self._incoming.put(msg["text"].strip())
+                    except Exception:
+                        pass
             except WebSocketDisconnect:
                 pass
             finally:

@@ -65,15 +65,23 @@ def UITransportWrapper(transport_class):
             self.dashboard.call_later(self.dashboard.add_collapsible, f"[<] {name}", text)
             return await super().on_tool_result(name, result)
 
+        async def _web_chat_task(self):
+            while True:
+                text = await self.dashboard.get_incoming()
+                self.dashboard.call_later(self.dashboard.add_chat, "user", text)
+                await self.inject_message(f"[web] {text}")
+
         async def start(self):
             dashboard_task = asyncio.create_task(self.dashboard.run_async())
             transport_task = asyncio.create_task(super().start())
+            web_chat_task = asyncio.create_task(self._web_chat_task())
             try:
-                await asyncio.wait([dashboard_task, transport_task], return_when=asyncio.FIRST_COMPLETED)
+                await asyncio.wait([dashboard_task, transport_task, web_chat_task], return_when=asyncio.FIRST_COMPLETED)
             finally:
                 dashboard_task.cancel()
                 transport_task.cancel()
-                await asyncio.gather(dashboard_task, transport_task, return_exceptions=True)
+                web_chat_task.cancel()
+                await asyncio.gather(dashboard_task, transport_task, web_chat_task, return_exceptions=True)
 
     Wrapped.__name__ = f"UI{transport_class.__name__}"
     return Wrapped
