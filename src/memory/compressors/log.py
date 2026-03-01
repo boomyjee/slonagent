@@ -370,7 +370,14 @@ class LogCompressor:
         if obs_tokens >= self._reflect_after_tokens:
             updated = await self._run_reflector(updated) or updated
 
-        new_om = {"role": "user", "parts": [{"text": _optimize_for_context(updated)}], "_observation_message": True}
+        obs_text = (
+            "The following observations block contains your memory of past conversations with this user.\n\n"
+            f"<observations>\n{_optimize_for_context(updated)}\n</observations>\n\n"
+            "IMPORTANT: When responding, reference specific details from these observations. "
+            "Do not give generic advice — personalize your response based on what you know about this user. "
+            "For conflicting information, prefer the MOST RECENT observation (check dates)."
+        )
+        new_om = {"role": "user", "parts": [{"text": obs_text}], "_observation_message": True}
         log.info("[LogCompressor] %d → 1 OM + %d recent turns", len(to_observe), len(recent))
         return [new_om] + recent
 
