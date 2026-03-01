@@ -1,14 +1,14 @@
 """mental_models.py — user-created / auto-generated curated summaries.
 
-Аналог Hindsight MentalModel — наивысший приоритет при recall.
+Аналог Hindsight MentalModel — наивысший приоритет при reflect (агентный цикл).
 
 Mental model = name + description (one-liner для поиска) + summary (полный текст).
 Хранится в SQLite (metadata) + LanceDB (вектор description для семантического поиска).
 
-В recall иерархия:
-  1. mental_models   — ищем первыми (highest quality)
-  2. observations    — auto-consolidated patterns
-  3. raw facts       — ground truth
+В reflect (run_reflect_agent) иерархия поиска:
+  1. search_mental_models — первый инструмент агента (highest quality)
+  2. search_observations  — auto-consolidated patterns
+  3. recall_facts         — ground truth
 """
 import json
 import logging

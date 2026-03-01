@@ -925,21 +925,21 @@ def _store_observation(obs: Observation, storage) -> None:
         log.warning("[retain] LanceDB write for observation %s failed: %s", obs.observation_id, e)
 
 
-async def consolidate(storage, client, model_name: str, min_new_facts: int = MIN_NEW_FACTS) -> list[Observation]:
-    """Консолидирует unconsolidated факты в observations."""
+async def create_observations(storage, client, model_name: str, min_new_facts: int = MIN_NEW_FACTS) -> list[Observation]:
+    """Создаёт observations из накопленных необработанных фактов."""
     fact_rows = await asyncio.to_thread(storage.get_unconsolidated_facts, 200)
     if len(fact_rows) < min_new_facts:
-        log.debug("[retain] skip consolidation: %d facts < %d", len(fact_rows), min_new_facts)
+        log.debug("[retain] skip create_observations: %d facts < %d", len(fact_rows), min_new_facts)
         return []
     clusters = (await asyncio.to_thread(_cluster_facts_by_entity, fact_rows, storage))[:MAX_CLUSTERS_PER_RUN]
-    log.info("[retain] consolidating %d facts in %d clusters", len(fact_rows), len(clusters))
+    log.info("[retain] create_observations: %d facts in %d clusters", len(fact_rows), len(clusters))
     all_obs: list[Observation] = []
     for cluster in clusters:
         for obs in await _extract_observations(cluster, client, model_name):
             await asyncio.to_thread(_store_observation, obs, storage)
             all_obs.append(obs)
             log.info("[retain] observation created: %r (trend=%s, evidence=%d)", obs.text[:80], obs.trend, len(obs.evidence))
-    log.info("[retain] consolidation done: %d observations created", len(all_obs))
+    log.info("[retain] create_observations done: %d observations created", len(all_obs))
     return all_obs
 
 
@@ -952,7 +952,7 @@ async def retain(
     storage,
 ) -> list[Fact]:
     """
-    Полный retain pipeline: LLM → dedup → store → graph links → consolidate.
+    Полный retain pipeline: LLM → dedup → store → graph links → create_observations.
     """
     facts, chunk_meta = await extract_facts(items, client, model_name)
     if not facts:
@@ -971,6 +971,6 @@ async def retain(
         len(new_facts), n_causal, n_temporal, n_semantic,
     )
 
-    await consolidate(storage, client, model_name)
+    await create_observations(storage, client, model_name)
 
     return new_facts
