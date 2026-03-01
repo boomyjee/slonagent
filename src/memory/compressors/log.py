@@ -108,14 +108,14 @@ When the user shares a document, script, story, code file, or any artifact, extr
 
 Use sub-bullets to preserve structure without verbatim copying:
 
-BAD:  🔴 (07:07) User shared a script about a girl and her ex.
-GOOD: 🔴 (07:07) User shared script «Женский день» (dark comedy/horror, March 8th setting):
-  * -> Characters: Ira (protagonist), Vova (her ex, delivery courier)
-  * -> Inciting event: Vova impaled on deer antlers hanging on Ira's door
-  * -> Rising action: Ira dismembers body in bathroom to Pushny's cover of «18 мне уже»
-  * -> Resolution: dumps bags at trash, takes selfie with bloody bouquet, posts to Instagram
-  * -> Cliffhanger: comment from VOVA_CREATIVE appears under the post (scheduled? survived? twin?)
-  * -> Subtext: antlers = rogonosets (symbolic), pink aesthetic vs blood contrast
+BAD:  🔴 (07:07) User shared a screenplay about a woman and her ex-boyfriend.
+GOOD: 🔴 (07:07) User shared screenplay «Title» (dark comedy, holiday setting):
+  * -> Characters: Anna (protagonist), her ex Mark (arrives unexpectedly)
+  * -> Inciting event: chance encounter turns into confrontation
+  * -> Rising action: situation escalates, Anna takes drastic action
+  * -> Resolution: Anna disposes of evidence, returns to mundane routine
+  * -> Cliffhanger: ambiguous final message implies Mark may not be gone
+  * -> Subtext: holiday symbolism used ironically throughout
 
 The goal: someone reading only the observations should be able to reconstruct the artifact's substance."""
 
