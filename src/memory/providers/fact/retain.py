@@ -16,9 +16,11 @@ from typing import Literal, Optional
 
 log = logging.getLogger(__name__)
 
-CHUNK_SIZE             = 3_000   # символов на чанк (DEFAULT_RETAIN_CHUNK_SIZE)
+CHUNK_SIZE               = 3_000   # символов на чанк (DEFAULT_RETAIN_CHUNK_SIZE)
 RETAIN_MAX_OUTPUT_TOKENS = 64_000  # лимит вывода LLM на чанк (DEFAULT_RETAIN_MAX_COMPLETION_TOKENS)
-SECONDS_PER_FACT       = 0.01    # офсет между фактами для сохранения порядка
+SECONDS_PER_FACT         = 0.01    # офсет между фактами для сохранения порядка
+FACT_WORKERS             = 8       # макс. параллельных LLM-запросов при извлечении фактов
+OBSERVATION_WORKERS      = 4       # макс. параллельных LLM-запросов при создании observations
 
 
 # ── Prompts (verbatim from Hindsight) ─────────────────────────────────────────
@@ -493,13 +495,18 @@ async def extract_facts(
 
     tasks = []
     task_meta = []  # (item_idx, chunk_idx, chunk_text)
+    sem = asyncio.Semaphore(FACT_WORKERS)
+
+    async def _limited(coro):
+        async with sem:
+            return await coro
 
     for item_idx, item in enumerate(items):
         chunks = chunk_text(item.content)
         for chunk_idx, chunk in enumerate(chunks):
-            tasks.append(_extract_from_chunk_auto_split(
+            tasks.append(_limited(_extract_from_chunk_auto_split(
                 chunk, chunk_idx, len(chunks), item.event_date, item.context, client, model_name
-            ))
+            )))
             task_meta.append((item_idx, chunk_idx, chunk))
 
     results = await asyncio.gather(*tasks)
@@ -933,9 +940,20 @@ async def create_observations(storage, client, model_name: str, min_new_facts: i
         return []
     clusters = (await asyncio.to_thread(_cluster_facts_by_entity, fact_rows, storage))[:MAX_CLUSTERS_PER_RUN]
     log.info("[retain] create_observations: %d facts in %d clusters", len(fact_rows), len(clusters))
+
+    sem = asyncio.Semaphore(OBSERVATION_WORKERS)
+
+    async def _limited(coro):
+        async with sem:
+            return await coro
+
+    obs_lists = await asyncio.gather(*[
+        _limited(_extract_observations(cluster, client, model_name)) for cluster in clusters
+    ])
+
     all_obs: list[Observation] = []
-    for cluster in clusters:
-        for obs in await _extract_observations(cluster, client, model_name):
+    for obs_list in obs_lists:
+        for obs in obs_list:
             await asyncio.to_thread(_store_observation, obs, storage)
             all_obs.append(obs)
             log.info("[retain] observation created: %r (trend=%s, evidence=%d)", obs.text[:80], obs.trend, len(obs.evidence))
