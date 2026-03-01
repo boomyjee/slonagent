@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, TabbedContent, TabPane, RichLog
+from textual.containers import VerticalScroll
+from textual.widgets import Collapsible, Footer, Header, RichLog, Static, TabbedContent, TabPane
 
 _LEVEL_COLORS = {
     "DEBUG": "dim",
@@ -17,12 +19,12 @@ _LEVEL_COLORS = {
 
 class Dashboard(App):
     CSS = """
-    RichLog {
-        scrollbar-gutter: stable;
-    }
-    TabPane {
-        padding: 0;
-    }
+    RichLog { scrollbar-gutter: stable; }
+    TabPane { padding: 0; }
+    VerticalScroll { scrollbar-gutter: stable; }
+    Collapsible { margin: 0; border: none; padding: 0 1; }
+    Collapsible > CollapsibleTitle { padding: 0; }
+    Static.chat-msg { padding: 0 1 1 1; }
     """
 
     BINDINGS = [
@@ -37,7 +39,7 @@ class Dashboard(App):
         yield Header()
         with TabbedContent(initial="chat"):
             with TabPane("Chat", id="chat"):
-                yield RichLog(id="log-chat", wrap=True, highlight=False, markup=True)
+                yield VerticalScroll(id="chat-scroll")
             with TabPane("Agent", id="agent"):
                 yield RichLog(id="log-agent", wrap=True, highlight=False, markup=True)
             with TabPane("Memory", id="memory"):
@@ -53,16 +55,32 @@ class Dashboard(App):
     def action_switch_tab(self, tab: str) -> None:
         self.query_one(TabbedContent).active = tab
 
-    # --- Public API (called from agent thread via call_from_thread) ---
+    # --- Chat helpers ---
+
+    def _chat_scroll(self) -> VerticalScroll:
+        return self.query_one("#chat-scroll", VerticalScroll)
+
+    def _mount_chat(self, widget) -> None:
+        scroll = self._chat_scroll()
+        scroll.mount(widget)
+        scroll.scroll_end(animate=False)
 
     def add_chat(self, role: str, text: str) -> None:
-        log = self.query_one("#log-chat", RichLog)
         ts = datetime.now().strftime("%H:%M:%S")
         if role == "user":
-            label = f"[bold cyan]{ts} Вы[/bold cyan]"
+            header = f"[bold cyan]{ts} Вы[/bold cyan]"
         else:
-            label = f"[bold green]{ts} Агент[/bold green]"
-        log.write(f"{label}\n{text}\n")
+            header = f"[bold green]{ts} Агент[/bold green]"
+        self._mount_chat(Static(f"{header}\n{escape(text)}", markup=True, classes="chat-msg"))
+
+    def add_collapsible(self, title: str, text: str) -> None:
+        self._mount_chat(Collapsible(
+            Static(escape(text)),
+            title=title,
+            collapsed=True,
+        ))
+
+    # --- Log tab ---
 
     def add_log(self, category: str, level: str, text: str) -> None:
         widget_id = f"log-{category}"

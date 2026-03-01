@@ -8,42 +8,68 @@ from src.ui.dashboard import Dashboard, UILogHandler
 _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 
-class UITransportWrapper:
-    """
-    Wraps any transport, intercepting chat messages for the TUI dashboard.
-    All other methods are proxied transparently to the original transport.
-    """
+def UITransportWrapper(transport_class):
+    """Returns a subclass of transport_class with TUI dashboard mixed in."""
 
-    def __init__(self, transport) -> None:
-        self._t = transport
-        self.dashboard = Dashboard()
-        if hasattr(transport, "on_user_message"):
-            async def _on_user_message(text: str) -> None:
-                self.dashboard.call_later(self.dashboard.add_chat, "user", text)
-            transport.on_user_message = _on_user_message
+    class Wrapped(transport_class):
+        def __init__(self, *args, **kwargs):
+            self.dashboard = Dashboard()
+            root_logger = logging.getLogger()
+            root_logger.setLevel(logging.INFO)
+            handler = UILogHandler(self.dashboard)
+            handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+            root_logger.addHandler(handler)
+            super().__init__(*args, **kwargs)
 
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
-        handler = UILogHandler(self.dashboard)
-        handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-        root_logger.addHandler(handler)
+        async def on_user_message(self, text: str) -> None:
+            self.dashboard.call_later(self.dashboard.add_chat, "user", text)
 
-    def set_agent(self, agent):
-        self._t.set_agent(agent)
+        async def send_message(self, text: str):
+            self.dashboard.call_later(self.dashboard.add_chat, "assistant", text)
+            return await super().send_message(text)
 
-    async def start(self):
-        dashboard_task = asyncio.create_task(self.dashboard.run_async())
-        transport_task = asyncio.create_task(self._t.start())
-        try:
-            await asyncio.wait([dashboard_task, transport_task], return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            dashboard_task.cancel()
-            transport_task.cancel()
-            await asyncio.gather(dashboard_task, transport_task, return_exceptions=True)
+        async def send_thinking(self, text: str):
+            self.dashboard.call_later(self.dashboard.add_collapsible, "Мышление", text[:4000])
+            return await super().send_thinking(text)
 
-    async def send_message(self, text: str):
-        self.dashboard.call_later(self.dashboard.add_chat, "assistant", text)
-        return await self._t.send_message(text)
+        async def send_system_prompt(self, text: str):
+            label = text.split("\n")[0].strip("[] ")[:40]
+            self.dashboard.call_later(self.dashboard.add_collapsible, label, text[:4000])
+            return await super().send_system_prompt(text)
 
-    def __getattr__(self, name: str):
-        return getattr(self._t, name)
+        async def on_tool_call(self, name: str, args: dict):
+            lines = "\n".join(f"  {k}: {v}" for k, v in args.items())
+            text = f"[{name}]\n{lines}" if lines else f"[{name}]"
+            self.dashboard.call_later(self.dashboard.add_collapsible, name, text[:2000])
+            return await super().on_tool_call(name, args)
+
+        async def on_tool_result(self, name: str, result):
+            if isinstance(result, dict):
+                parts = []
+                for k, v in result.items():
+                    if v in (None, "", [], {}):
+                        continue
+                    if isinstance(v, (bytes, bytearray)):
+                        parts.append(f"[{k}]\n<binary {len(v)} bytes>")
+                    else:
+                        parts.append(f"[{k}]\n{v}")
+                text = "\n".join(parts) if parts else "(пусто)"
+            elif isinstance(result, (bytes, bytearray)):
+                text = f"<binary {len(result)} bytes>"
+            else:
+                text = str(result)
+            self.dashboard.call_later(self.dashboard.add_collapsible, f"↩ {name}", text[:2000])
+            return await super().on_tool_result(name, result)
+
+        async def start(self):
+            dashboard_task = asyncio.create_task(self.dashboard.run_async())
+            transport_task = asyncio.create_task(super().start())
+            try:
+                await asyncio.wait([dashboard_task, transport_task], return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                dashboard_task.cancel()
+                transport_task.cancel()
+                await asyncio.gather(dashboard_task, transport_task, return_exceptions=True)
+
+    Wrapped.__name__ = f"UI{transport_class.__name__}"
+    return Wrapped

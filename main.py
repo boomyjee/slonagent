@@ -69,10 +69,10 @@ async def run():
             transport = CliTransport()
         else:
             tg = config["telegram_transport"]
-            transport = UITransportWrapper(TelegramTransport(
-                bot_token=tg["bot_token"], 
-                allowed_user_ids=tg["allowed_user_ids"], 
-            ))
+            transport = UITransportWrapper(TelegramTransport)(
+                bot_token=tg["bot_token"],
+                allowed_user_ids=tg["allowed_user_ids"],
+            )
 
         agent = Agent(**resolve(config["agent"]),transport=transport)
             
