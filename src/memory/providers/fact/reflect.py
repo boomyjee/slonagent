@@ -19,11 +19,27 @@
 import asyncio
 import json
 import logging
-from typing import Any
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 10
+
+
+@dataclass
+class MentalModel:
+    model_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = ""
+    description: str = ""       # one-liner — индексируется как вектор
+    summary: Optional[str] = None
+    source_fact_ids: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    relevance: float = 0.0      # заполняется при поиске
 
 
 # ── System prompt ──────────────────────────────────────────────────────────────
@@ -305,17 +321,17 @@ async def _exec_search_observations(query: str, storage) -> dict[str, Any]:
 async def _exec_search_mental_models(
     query: str, storage, max_results: int = 5
 ) -> dict[str, Any]:
-    from src.memory.providers.fact.mental_models import search_mental_models
     from src.memory.providers.fact.storage import Storage
-    pending = await asyncio.to_thread(storage.get_pending_consolidation_count)
-    vec     = await asyncio.to_thread(Storage.encode_query, query)
-    results = await asyncio.to_thread(search_mental_models, vec, storage, max_results, None, pending)
+    pending  = await asyncio.to_thread(storage.get_pending_consolidation_count)
+    is_stale = pending > 0
+    vec      = await asyncio.to_thread(Storage.encode_query, query)
+    results  = await asyncio.to_thread(storage.search_mental_models, vec, max_results)
     mental_models = [
         {
             "id":        r.model_id,
             "name":      r.name,
             "content":   r.summary or r.description,
-            "is_stale":  r.is_stale,
+            "is_stale":  is_stale,
             "relevance": r.relevance,
         }
         for r in results

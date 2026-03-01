@@ -497,64 +497,102 @@ class Storage:
         if rows:
             self.table.add(rows)
 
-    # ── Vectors (mental_model_vectors) ───────────────────────────────────────────
+    # ── Mental models ────────────────────────────────────────────────────────────
 
-    def search_mm_vectors(self, query_vec, limit: int) -> list:
+    def upsert_mental_model(self, mm) -> None:
+        """Создаёт или обновляет mental model (SQLite + LanceDB)."""
+        row = {
+            "model_id":        mm.model_id,
+            "name":            mm.name,
+            "description":     mm.description,
+            "summary":         mm.summary,
+            "source_fact_ids": json.dumps(mm.source_fact_ids),
+            "tags":            json.dumps(mm.tags),
+            "created_at":      mm.created_at,
+            "updated_at":      mm.updated_at,
+        }
+        cols    = ", ".join(row)
+        vals    = ", ".join(f":{k}" for k in row)
+        updates = ", ".join(f"{k} = excluded.{k}" for k in row if k != "model_id")
+        self.conn.execute(
+            f"INSERT INTO mental_models ({cols}) VALUES ({vals}) "
+            f"ON CONFLICT(model_id) DO UPDATE SET {updates}",
+            row,
+        )
+        self.conn.commit()
+        vec = Storage.encode_texts([mm.description])[0]
+        try:
+            self.mm_table.delete(f"model_id = '{mm.model_id}'")
+        except Exception:
+            pass
+        self.mm_table.add([{"model_id": mm.model_id, "vector": vec}])
+
+    def delete_mental_model(self, model_id: str) -> bool:
+        """Удаляет mental model из SQLite и LanceDB. Возвращает True если был найден."""
+        row = self.conn.execute(
+            "SELECT model_id FROM mental_models WHERE model_id = ?", (model_id,)
+        ).fetchone()
+        if not row:
+            return False
+        self.conn.execute("DELETE FROM mental_models WHERE model_id = ?", (model_id,))
+        self.conn.commit()
+        try:
+            self.mm_table.delete(f"model_id = '{model_id}'")
+        except Exception:
+            pass
+        return True
+
+    def get_all_mental_models(self) -> list:
+        """Возвращает все mental models как list[MentalModel]."""
+        from src.memory.providers.fact.reflect import MentalModel
+        rows = self.conn.execute(
+            "SELECT * FROM mental_models ORDER BY updated_at DESC"
+        ).fetchall()
+        return [self._mm_from_row(r) for r in rows]
+
+    def search_mental_models(self, query_vec, limit: int = 5, tags=None,
+                             threshold: float = 0.3) -> list:
+        """Векторный поиск по description. Возвращает list[MentalModel] с relevance."""
         try:
             if self.mm_table.count_rows() == 0:
                 return []
         except Exception:
             return []
-        return self.mm_table.search(query_vec).limit(limit).to_list()
 
-    def insert_mm_vector(self, model_id: str, vec) -> None:
-        self.mm_table.add([{"model_id": model_id, "vector": vec}])
-
-    def delete_mm_vector(self, model_id: str) -> None:
-        try:
-            self.mm_table.delete(f"model_id = '{model_id}'")
-        except Exception:
-            pass
-
-    # ── Mental models ────────────────────────────────────────────────────────────
-
-    def get_mental_model_rows(self, model_ids: list[str]) -> list[sqlite3.Row]:
+        hits = self.mm_table.search(query_vec).limit(limit * 2).to_list()
+        similarity = {h["model_id"]: 1.0 - h.get("_distance", 1.0) for h in hits}
+        model_ids  = [h["model_id"] for h in hits if similarity[h["model_id"]] >= threshold]
         if not model_ids:
             return []
-        ph = ",".join("?" * len(model_ids))
-        return self.conn.execute(
+
+        ph   = ",".join("?" * len(model_ids))
+        rows = self.conn.execute(
             f"SELECT * FROM mental_models WHERE model_id IN ({ph})", model_ids
         ).fetchall()
+        row_map = {r["model_id"]: r for r in rows}
 
-    def insert_mental_model(self, row: dict) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO mental_models
-                (model_id, name, description, summary, source_fact_ids, tags, created_at, updated_at)
-            VALUES (:model_id, :name, :description, :summary,
-                    :source_fact_ids, :tags, :created_at, :updated_at)
-            """,
-            row,
+        results = []
+        for mid in model_ids:
+            if mid not in row_map:
+                continue
+            mm = self._mm_from_row(row_map[mid], relevance=round(similarity[mid], 4))
+            if tags and not any(t in mm.tags for t in tags):
+                continue
+            results.append(mm)
+
+        return sorted(results, key=lambda m: m.relevance, reverse=True)[:limit]
+
+    def _mm_from_row(self, row, relevance: float = 0.0):
+        from src.memory.providers.fact.reflect import MentalModel
+        return MentalModel(
+            model_id=row["model_id"],
+            name=row["name"],
+            description=row["description"],
+            summary=row["summary"],
+            source_fact_ids=json.loads(row["source_fact_ids"] or "[]"),
+            tags=json.loads(row["tags"] or "[]"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            relevance=relevance,
         )
-        self.conn.commit()
 
-    def update_mental_model_row(self, model_id: str, row: dict) -> None:
-        self.conn.execute(
-            """
-            UPDATE mental_models
-            SET description = :description, summary = :summary,
-                source_fact_ids = :source_fact_ids, tags = :tags, updated_at = :updated_at
-            WHERE model_id = :model_id
-            """,
-            {**row, "model_id": model_id},
-        )
-        self.conn.commit()
-
-    def delete_mental_model_row(self, model_id: str) -> None:
-        self.conn.execute("DELETE FROM mental_models WHERE model_id = ?", (model_id,))
-        self.conn.commit()
-
-    def get_all_mental_model_rows(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM mental_models ORDER BY updated_at DESC"
-        ).fetchall()
