@@ -322,11 +322,11 @@ class LogCompressor:
     """
 
     def __init__(self, model_name: str, api_key: str,
-                 recent_tokens: int      = 6_000,
-                 observation_tokens: int = 30_000,
-                 reflection_tokens: int  = 40_000):
-        self._observation_tokens = observation_tokens
-        self._reflection_tokens  = reflection_tokens
+                 recent_tokens: int   = 6_000,
+                 compress_after_tokens: int = 30_000,
+                 reflect_after_tokens: int  = 40_000):
+        self._compress_after_tokens = compress_after_tokens
+        self._reflect_after_tokens  = reflect_after_tokens
         self._recent_tokens      = recent_tokens
         self._model_name = model_name
 
@@ -338,7 +338,7 @@ class LogCompressor:
     # ── Public ────────────────────────────────────────────────────────────────
 
     async def compress(self, turns: list) -> list:
-        if Memory.count_tokens(turns) < self._observation_tokens:
+        if Memory.count_tokens(turns) < self._compress_after_tokens:
             return turns
 
         # Разделяем: OM_turn (если есть) + остальные
@@ -367,7 +367,7 @@ class LogCompressor:
         updated = (existing_observations + "\n\n" + new_obs).strip() if existing_observations else new_obs
 
         obs_tokens = Memory.count_tokens([{"role": "user", "parts": [{"text": updated}]}])
-        if obs_tokens >= self._reflection_tokens:
+        if obs_tokens >= self._reflect_after_tokens:
             updated = await self._run_reflector(updated) or updated
 
         new_om = {"role": "user", "parts": [{"text": _optimize_for_context(updated)}], "_observation_message": True}
