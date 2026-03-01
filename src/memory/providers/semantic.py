@@ -106,6 +106,7 @@ class MemoryEntry:
     persons: list = field(default_factory=list)
     entities: list = field(default_factory=list)
     topic: Optional[str] = None
+    document_id: Optional[str] = None
     entry_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
@@ -116,9 +117,11 @@ class SemanticProvider(BaseProvider):
     TABLE_NAME = "memory_entries"
     TOP_K = 10
 
-    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 3_000):
+    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 3_000,
+                 auto_recall: bool = True):
         super().__init__(consolidate_tokens=consolidate_tokens)
         self.model_name = model_name
+        self._auto_recall = auto_recall
 
         db_path = os.path.join(Memory.memory_dir, "semantic", "lancedb")
         os.makedirs(db_path, exist_ok=True)
@@ -165,6 +168,7 @@ class SemanticProvider(BaseProvider):
             pa.field("persons",              pa.list_(pa.string())),
             pa.field("entities",             pa.list_(pa.string())),
             pa.field("topic",                pa.string()),
+            pa.field("document_id",          pa.string()),
             pa.field("vector",               pa.list_(pa.float32(), dim)),
         ])
         if self.TABLE_NAME in self._db.table_names():
@@ -189,6 +193,7 @@ class SemanticProvider(BaseProvider):
                 "persons":              e.persons or [],
                 "entities":             e.entities or [],
                 "topic":                e.topic or "",
+                "document_id":          e.document_id or "",
                 "vector":               v,
             }
             for e, v in zip(entries, vectors)
@@ -215,6 +220,7 @@ class SemanticProvider(BaseProvider):
                 persons=r.get("persons") or [],
                 entities=r.get("entities") or [],
                 topic=r.get("topic") or None,
+                document_id=r.get("document_id") or None,
             )
             for r in results
         ]
@@ -253,7 +259,8 @@ class SemanticProvider(BaseProvider):
         except Exception:
             return ""
 
-    async def _extract_entries(self, contents: list) -> list[MemoryEntry]:
+    async def _extract_entries(self, contents: list,
+                               document_id: Optional[str] = None) -> list[MemoryEntry]:
         context = await asyncio.to_thread(self._build_context)
         instruction = EXTRACT_PROMPT.format(context=context)
         for attempt in range(3):
@@ -279,6 +286,7 @@ class SemanticProvider(BaseProvider):
                         persons=item.get("persons") or [],
                         entities=item.get("entities") or [],
                         topic=item.get("topic"),
+                        document_id=document_id,
                     )
                     for item in data
                     if item.get("lossless_restatement")
@@ -299,14 +307,66 @@ class SemanticProvider(BaseProvider):
             log.warning("[SemanticProvider] save last_entries failed: %s", ex)
 
     async def _consolidate(self, pending: list):
+        all_entries: list[MemoryEntry] = []
+
+        # Диалоговые turn'ы → одним запросом
         contents = self._prepare_contents(pending)
-        if not contents:
-            return
-        entries = await self._extract_entries(contents)
-        if entries:
-            await asyncio.to_thread(self._add_entries, entries)
-            self._save_last_entries(entries)
-        log.info("[SemanticProvider] consolidated %d turns → %d entries", len(pending), len(entries))
+        if contents:
+            entries = await self._extract_entries(contents)
+            all_entries.extend(entries)
+
+        # Документы → отдельный запрос для каждого
+        docs: dict[str, str] = {}
+        for turn in pending:
+            if not isinstance(turn, dict):
+                continue
+            for part in turn.get("parts", []):
+                if isinstance(part, dict) and "text" in part and part.get("_document_id"):
+                    doc_id = part["_document_id"]
+                    docs.setdefault(doc_id, part["text"])
+
+        for doc_id, doc_text in docs.items():
+            doc_contents = [{"role": "user", "parts": [{"text": doc_text}]}]
+            entries = await self._extract_entries(doc_contents, document_id=doc_id)
+            all_entries.extend(entries)
+            log.info("[SemanticProvider] document %s → %d entries", doc_id, len(entries))
+
+        if all_entries:
+            await asyncio.to_thread(self._add_entries, all_entries)
+            self._save_last_entries(all_entries)
+        log.info("[SemanticProvider] consolidated %d turns → %d entries", len(pending), len(all_entries))
+
+    async def get_context_prompt(self, user_text: str = "") -> str:
+        """Автоматический поиск по тексту пользователя → системный промпт."""
+        if not self._auto_recall or not user_text:
+            return ""
+        try:
+            entries = await asyncio.to_thread(self._search, user_text[:1500])
+        except Exception as e:
+            log.warning("[SemanticProvider] recall for context failed: %s", e)
+            return ""
+        if not entries:
+            return ""
+
+        conv_lines, doc_lines = [], []
+        for e in entries:
+            if e.document_id:
+                doc_lines.append(f"  - {e.lossless_restatement}")
+            else:
+                conv_lines.append(f"- {e.lossless_restatement}")
+
+        parts = []
+        if conv_lines:
+            parts.append("Из разговоров:\n" + "\n".join(conv_lines))
+        if doc_lines:
+            parts.append("Из документов:\n" + "\n".join(doc_lines))
+
+        return (
+            "<semantic_memories>\n"
+            + "\n\n".join(parts) + "\n"
+            "</semantic_memories>\n\n"
+            "Управляй долгосрочной памятью: search_memory"
+        )
 
     @tool("Семантический поиск по долгосрочной памяти. Используй, когда нужно вспомнить факты, события или детали из прошлых разговоров. Перефразируй запрос пользователя в виде конкретного поискового вопроса.")
     async def search_memory(self, query: str) -> str:
@@ -317,5 +377,8 @@ class SemanticProvider(BaseProvider):
             return "Ошибка поиска."
         if not entries:
             return "Ничего не найдено."
-        lines = [f"- {e.lossless_restatement}" for e in entries]
+        lines = []
+        for e in entries:
+            prefix = f"[doc:{e.document_id}] " if e.document_id else ""
+            lines.append(f"- {prefix}{e.lossless_restatement}")
         return "\n".join(lines)
