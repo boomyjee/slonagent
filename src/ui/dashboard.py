@@ -87,7 +87,13 @@ class Dashboard:
 
         asyncio.create_task(open_browser())
 
-        config = uvicorn.Config(app, host="0.0.0.0", port=self._port, log_level="info", ws="wsproto")
+        config = uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=self._port,
+            ws="wsproto",
+            log_config=None,
+        )
         server = uvicorn.Server(config)
         await server.serve()
 
@@ -100,7 +106,7 @@ class UILogHandler(logging.Handler):
     def _category(self, name: str) -> str:
         if name.startswith("src.memory") or name.startswith("memory"):
             return "memory"
-        if name.startswith("aiogram") or name.startswith("src.transport") or name.startswith("httpx"):
+        if name.startswith("aiogram") or name.startswith("src.transport") or name.startswith("httpx") or name.startswith("uvicorn"):
             return "transport"
         return "agent"
 
@@ -108,8 +114,6 @@ class UILogHandler(logging.Handler):
         try:
             category = self._category(record.name)
             text = self.format(record)
-            if " - " in text:
-                text = text.split(" - ", 3)[-1]
             self._dashboard.add_log(category, record.levelname, text)
         except Exception:
             self.handleError(record)
