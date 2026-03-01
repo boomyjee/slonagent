@@ -87,21 +87,25 @@ class TelegramSkill(Skill):
 
 
 class TelegramTransport:
-    def __init__(self, bot_token: str, allowed_user_ids: set[int], agent):
+    def __init__(self, bot_token: str, allowed_user_ids: set[int]):
         proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self.bot = Bot(token=bot_token, session=AiohttpSession(proxy=proxy) if proxy else None)
-        self.agent = agent
+        self.agent = None
         self.allowed_user_ids = allowed_user_ids
         self._no_link_preview = LinkPreviewOptions(is_disabled=True)
         self.dp = Dispatcher()
         self.dp.message()(self._handle_message)
 
         self._skill = TelegramSkill(self.bot)
-        self._skill.register(agent)
-        agent.skills.insert(0, self._skill)
 
         self._media_groups: dict[str, list[Message]] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
+
+    def set_agent(self, agent):
+        self.agent = agent
+        self._skill.register(agent)
+        agent.skills.insert(0, self._skill)
+        
     async def on_user_message(self, text: str):
         pass
 
@@ -261,7 +265,6 @@ class TelegramTransport:
         try:
             await self.agent.process_message(
                 message_parts=message_parts,
-                transport=self,
                 user_message_id=first.message_id,
                 user_query=" ".join(user_texts).strip(),
             )

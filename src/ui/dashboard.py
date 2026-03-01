@@ -95,6 +95,6 @@ class UILogHandler(logging.Handler):
             text = self.format(record)
             if " - " in text:
                 text = text.split(" - ", 3)[-1]
-            self._dashboard.call_from_thread(self._dashboard.add_log, category, record.levelname, text)
+            self._dashboard.call_later(self._dashboard.add_log, category, record.levelname, text)
         except Exception:
             self.handleError(record)

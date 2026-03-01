@@ -2,7 +2,10 @@ import asyncio
 
 
 class CliTransport:
-    def __init__(self, agent):
+    def __init__(self):
+        self.agent = None
+
+    def set_agent(self, agent):
         self.agent = agent
 
     async def send_message(self, text: str):
@@ -30,5 +33,4 @@ class CliTransport:
             if text.strip():
                 await self.agent.process_message(
                     message_parts=[{"text": text}],
-                    transport=self,
                 )

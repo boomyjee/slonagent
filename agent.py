@@ -97,7 +97,7 @@ class Skill:
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, memory_compressor, memory_providers: list = None, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20, transcription_model_name: str = "gemini-2.0-flash"):
+    def __init__(self, model_name: str, api_key: str, memory_compressor, memory_providers: list = None, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20, transcription_model_name: str = "gemini-2.0-flash", transport=None):
         self.model_name = model_name
         self.include_thoughts = include_thoughts
         self.transcription_model_name = transcription_model_name
@@ -106,6 +106,9 @@ class Agent:
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
+        self.transport = transport
+        if transport:
+            transport.set_agent(self)
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -133,6 +136,8 @@ class Agent:
     async def start(self):
         for skill in self.skills:
             await skill.start()
+        if self.transport:
+            await self.transport.start()
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
         resp = await asyncio.to_thread(
@@ -145,26 +150,19 @@ class Agent:
         )
         return resp.text
 
-    async def process_message(self, message_parts: list, transport=None, user_message_id=None, user_query: str = ""):
+    async def process_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
         if self._process_message_lock.locked():
             logging.info("[agent] message queued, waiting for lock")
         async with self._process_message_lock:
-            await self._process_message(message_parts, transport, user_message_id, user_query)
+            await self._run_message(message_parts, user_message_id, user_query)
 
-    async def _process_message(self, message_parts: list, transport=None, user_message_id=None, user_query: str = ""):
-        self.transport = transport
-        try:
-            await self._run_message(message_parts, transport, user_message_id, user_query)
-        finally:
-            self.transport = None
-
-    async def _run_message(self, message_parts: list, transport=None, user_message_id=None, user_query: str = ""):
+    async def _run_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
         text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
         logging.info("[agent] incoming: %r", text)
 
         for skill in self.skills:
             if skill.is_bypass_command(text):
-                if transport: await transport.send_message(await skill.dispatch_bypass(text))
+                await self.transport.send_message(await skill.dispatch_bypass(text))
                 return
 
         await self.memory.add_turn({"role": "user", "parts": message_parts, "_user_message_id": user_message_id})
@@ -194,23 +192,22 @@ class Agent:
                         augmented.append(decl)
                 for f in augmented: tool_to_skill[f.name] = skill
                 tools.append(types.Tool(function_declarations=augmented))
-                tools_info.extend(f"{t.name}: {truncate(t.description, 100)}" for t in augmented)
+                tools_info.extend(f"{f.name}: {truncate(f.description, 100)}" for f in augmented)
 
             skill_context = await skill.get_context_prompt(user_query)
             if skill_context:
                 system_parts.append(skill_context)
-                if transport: await transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{truncate(skill_context, 3500)}")
+                await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{truncate(skill_context, 3500)}")
 
-        if transport and tools_info:
-            await transport.send_system_prompt("[Инструменты модели]\n"+"\n".join(tools_info))
+        if tools_info:
+            await self.transport.send_system_prompt("[Инструменты модели]\n"+"\n".join(tools_info))
 
 
         async def send_thinking(response):
-            if not transport: return
             parts = response.candidates[0].content.parts or []
             thought_parts = [p.text for p in parts if getattr(p, "thought", False) and p.text]
             if thought_parts:
-                await transport.send_thinking("\n\n".join(thought_parts))
+                await self.transport.send_thinking("\n\n".join(thought_parts))
 
         try:
             config = types.GenerateContentConfig(
@@ -240,9 +237,9 @@ class Agent:
                         logging.warning("Tool %s not found in skills", tool_call.name)
                         continue
 
-                    if transport: await transport.on_tool_call(tool_call.name, dict(tool_call.args or {}))
+                    await self.transport.on_tool_call(tool_call.name, dict(tool_call.args or {}))
                     result = await skill.dispatch_tool_call(tool_call)
-                    if transport: await transport.on_tool_result(tool_call.name, result)
+                    await self.transport.on_tool_result(tool_call.name, result)
                     extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
                     fn_response_parts.append(types.Part.from_function_response(
                         name=tool_call.name,
@@ -261,9 +258,9 @@ class Agent:
                 logging.info("[agent] ← LLM iteration %d", iteration)
                 await send_thinking(response)
 
-            if transport: await transport.send_message(response.text or "")
+            await self.transport.send_message(response.text or "")
             await self.memory.add_turn({"role": "model", "parts": [{"text": response.text or ""}]})
 
         except Exception as e:
             logging.exception("Ошибка при обращении к Gemini")
-            if transport: await transport.send_message(f"Ошибка: {e}")
+            await self.transport.send_message(f"Ошибка: {e}")

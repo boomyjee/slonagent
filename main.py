@@ -59,24 +59,23 @@ async def run():
     from src.transport.telegram import TelegramTransport
     from src.ui.wrapper import UITransportWrapper
 
-    try:
-        with open(_CONFIG_PATH, encoding="utf-8") as f:
-            config = json.load(f)
-        os.environ.update(config.get("env", {}))
-        agent = Agent(**resolve(config["agent"]))
 
-        cli_mode = "--cli" in sys.argv
-        if cli_mode:
+    try:
+        with open(_CONFIG_PATH, encoding="utf-8") as f: config = json.load(f)
+        os.environ.update(config.get("env", {}))
+
+        if  "--cli" in sys.argv:
             logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
-            transport = CliTransport(agent)
+            transport = CliTransport()
         else:
             tg = config["telegram_transport"]
             transport = UITransportWrapper(TelegramTransport(
                 bot_token=tg["bot_token"], 
                 allowed_user_ids=tg["allowed_user_ids"], 
-                agent=agent
             ))
-        await agent.start()
+
+        agent = Agent(**resolve(config["agent"]),transport=transport)
+            
     except Exception as e:
         logging.error("Ошибка при запуске: %s", e)
         if os.path.exists(_LAST_GOOD_PATH):
@@ -87,7 +86,7 @@ async def run():
 
     # shutil.copy(_CONFIG_PATH, _LAST_GOOD_PATH)
     try:
-        await transport.start()
+        await agent.start()
     finally:
         release_pid_lock()
 
