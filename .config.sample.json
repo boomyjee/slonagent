@@ -23,7 +23,9 @@
             {
                 "__class__": "src.memory.providers.fact.FactProvider",
                 "model_name": "gemini-2.5-flash",
-                "api_key": "$GEMINI_API_KEY"
+                "api_key": "$GEMINI_API_KEY",
+                "auto_recall": true,
+                "auto_consolidate": true
             },
             {
                 "__class__": "src.memory.providers.hindsight.HindsightProvider",
