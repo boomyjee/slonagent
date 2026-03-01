@@ -87,8 +87,13 @@ async def run():
     # shutil.copy(_CONFIG_PATH, _LAST_GOOD_PATH)
     try:
         await agent.start()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
     finally:
         release_pid_lock()
 
 acquire_pid_lock()
-asyncio.run(run())
+try:
+    asyncio.run(run())
+except (KeyboardInterrupt, asyncio.CancelledError):
+    pass

@@ -16,9 +16,13 @@ def UITransportWrapper(transport_class):
             self.dashboard = Dashboard()
             root_logger = logging.getLogger()
             root_logger.setLevel(logging.INFO)
-            handler = UILogHandler(self.dashboard)
-            handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-            root_logger.addHandler(handler)
+            fmt = logging.Formatter(_LOG_FORMAT)
+            console = logging.StreamHandler()
+            console.setFormatter(fmt)
+            root_logger.addHandler(console)
+            web = UILogHandler(self.dashboard)
+            web.setFormatter(fmt)
+            root_logger.addHandler(web)
             super().__init__(*args, **kwargs)
 
         async def on_user_message(self, text: str) -> None:
@@ -29,18 +33,18 @@ def UITransportWrapper(transport_class):
             return await super().send_message(text)
 
         async def send_thinking(self, text: str):
-            self.dashboard.call_later(self.dashboard.add_collapsible, "Мышление", text[:4000])
+            self.dashboard.call_later(self.dashboard.add_collapsible, "[think]", text[:4000])
             return await super().send_thinking(text)
 
         async def send_system_prompt(self, text: str):
             label = text.split("\n")[0].strip("[] ")[:40]
-            self.dashboard.call_later(self.dashboard.add_collapsible, label, text[:4000])
+            self.dashboard.call_later(self.dashboard.add_collapsible, f"[sys] {label}", text[:4000])
             return await super().send_system_prompt(text)
 
         async def on_tool_call(self, name: str, args: dict):
             lines = "\n".join(f"  {k}: {v}" for k, v in args.items())
             text = f"[{name}]\n{lines}" if lines else f"[{name}]"
-            self.dashboard.call_later(self.dashboard.add_collapsible, name, text[:2000])
+            self.dashboard.call_later(self.dashboard.add_collapsible, f"[>] {name}", text[:2000])
             return await super().on_tool_call(name, args)
 
         async def on_tool_result(self, name: str, result):
@@ -58,7 +62,7 @@ def UITransportWrapper(transport_class):
                 text = f"<binary {len(result)} bytes>"
             else:
                 text = str(result)
-            self.dashboard.call_later(self.dashboard.add_collapsible, f"↩ {name}", text[:2000])
+            self.dashboard.call_later(self.dashboard.add_collapsible, f"[<] {name}", text[:2000])
             return await super().on_tool_result(name, result)
 
         async def start(self):

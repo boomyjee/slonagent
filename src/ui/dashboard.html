@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SlonAgent</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #1e1e1e; color: #d4d4d4; font-family: 'Cascadia Code','Fira Code','Consolas',monospace; font-size: 14px; height: 100vh; display: flex; flex-direction: column; }
+.header { background: #2d2d2d; padding: 8px 16px; border-bottom: 1px solid #444; display: flex; align-items: center; gap: 16px; }
+.header h1 { font-size: 15px; color: #569cd6; }
+.status { font-size: 12px; color: #888; }
+.status.ok { color: #4ec9b0; }
+.tabs { display: flex; background: #252526; border-bottom: 1px solid #444; }
+.tab { padding: 8px 20px; cursor: pointer; color: #888; border-bottom: 2px solid transparent; font-size: 13px; user-select: none; }
+.tab:hover { color: #d4d4d4; background: #2d2d2d; }
+.tab.active { color: #d4d4d4; border-bottom-color: #569cd6; }
+.content { flex: 1; overflow: hidden; }
+.pane { display: none; height: 100%; overflow-y: auto; padding: 12px; }
+.pane.active { display: flex; flex-direction: column; }
+.msg { margin-bottom: 10px; }
+.msg-hdr { font-size: 12px; margin-bottom: 3px; }
+.msg-hdr.user { color: #4ec9b0; }
+.msg-hdr.assistant { color: #569cd6; }
+.msg-body { white-space: pre-wrap; line-height: 1.5; padding-left: 8px; border-left: 2px solid #3c3c3c; word-break: break-word; }
+.coll { margin-bottom: 5px; border: 1px solid #3c3c3c; border-radius: 3px; }
+.coll-hdr { padding: 5px 10px; background: #252526; cursor: pointer; font-size: 12px; color: #888; display: flex; align-items: center; gap: 6px; user-select: none; }
+.coll-hdr:hover { background: #2d2d2d; color: #ccc; }
+.coll-hdr .arr { font-size: 9px; }
+.coll-body { display: none; padding: 8px 10px; font-size: 12px; white-space: pre-wrap; color: #9cdcfe; border-top: 1px solid #3c3c3c; max-height: 400px; overflow-y: auto; word-break: break-word; }
+.log-line { font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
+.log-line .ts { color: #555; margin-right: 6px; }
+.DEBUG { color: #666; }
+.INFO { color: #4ec9b0; }
+.WARNING { color: #dcdcaa; }
+.ERROR { color: #f44747; }
+.CRITICAL { color: #f44747; font-weight: bold; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #1e1e1e; }
+::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>SlonAgent</h1>
+  <span class="status" id="st">connecting...</span>
+</div>
+<div class="tabs">
+  <div class="tab active" data-tab="chat">Chat</div>
+  <div class="tab" data-tab="agent">Agent</div>
+  <div class="tab" data-tab="memory">Memory</div>
+  <div class="tab" data-tab="transport">Transport</div>
+</div>
+<div class="content">
+  <div class="pane active" id="pane-chat"></div>
+  <div class="pane" id="pane-agent"></div>
+  <div class="pane" id="pane-memory"></div>
+  <div class="pane" id="pane-transport"></div>
+</div>
+<script>
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const bottom = el => { el.scrollTop = el.scrollHeight; };
+const nearBottom = el => el.scrollHeight - el.scrollTop < el.clientHeight + 120;
+
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab,.pane').forEach(e => e.classList.remove('active'));
+  t.classList.add('active');
+  document.getElementById('pane-' + t.dataset.tab).classList.add('active');
+}));
+
+function addChat(role, text, ts) {
+  const p = document.getElementById('pane-chat');
+  const d = document.createElement('div'); d.className = 'msg';
+  d.innerHTML = `<div class="msg-hdr ${role}">${ts} ${role==='user'?'Вы':'Агент'}</div><div class="msg-body">${esc(text)}</div>`;
+  p.appendChild(d); bottom(p);
+}
+
+function addColl(title, text, ts) {
+  const p = document.getElementById('pane-chat');
+  const d = document.createElement('div'); d.className = 'coll';
+  d.innerHTML = `<div class="coll-hdr"><span class="arr">&#9658;</span><span>${esc(title)}</span><span style="color:#555;margin-left:auto;font-size:11px">${ts}</span></div><div class="coll-body">${esc(text)}</div>`;
+  d.querySelector('.coll-hdr').onclick = () => {
+    const b = d.querySelector('.coll-body'), a = d.querySelector('.arr');
+    const open = b.style.display === 'block';
+    b.style.display = open ? 'none' : 'block';
+    a.innerHTML = open ? '&#9658;' : '&#9660;';
+  };
+  p.appendChild(d); bottom(p);
+}
+
+function addLog(cat, level, text, ts) {
+  const p = document.getElementById('pane-' + cat); if (!p) return;
+  const was = nearBottom(p);
+  const d = document.createElement('div'); d.className = `log-line ${level}`;
+  d.innerHTML = `<span class="ts">${ts}</span>${esc(text)}`;
+  p.appendChild(d); if (was) bottom(p);
+}
+
+const st = document.getElementById('st');
+function connect() {
+  const ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onopen = () => { st.textContent = 'connected'; st.className = 'status ok'; };
+  ws.onclose = () => { st.textContent = 'disconnected — retry in 2s'; st.className = 'status'; setTimeout(connect, 2000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'chat') addChat(ev.role, ev.text, ev.ts);
+    else if (ev.type === 'collapsible') addColl(ev.title, ev.text, ev.ts);
+    else if (ev.type === 'log') addLog(ev.category, ev.level, ev.text, ev.ts);
+  };
+}
+connect();
+</script>
+</body>
+</html>

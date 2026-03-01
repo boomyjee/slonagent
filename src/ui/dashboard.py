@@ -1,101 +1,98 @@
-from __future__ import annotations
-
+import asyncio
+import json
 import logging
+import webbrowser
+from collections import deque
 from datetime import datetime
+from pathlib import Path
 
-from rich.markup import escape
-from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
-from textual.widgets import Collapsible, Footer, Header, RichLog, Static, TabbedContent, TabPane
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 
-_LEVEL_COLORS = {
-    "DEBUG": "dim",
-    "INFO": "green",
-    "WARNING": "yellow",
-    "ERROR": "bold red",
-    "CRITICAL": "bold red reverse",
-}
+_HTML = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+_BUFFER_SIZE = 500
 
 
-class Dashboard(App):
-    CSS = """
-    RichLog { scrollbar-gutter: stable; }
-    TabPane { padding: 0; }
-    VerticalScroll { scrollbar-gutter: stable; }
-    Collapsible { margin: 0; border: none; padding: 0 1; }
-    Collapsible > CollapsibleTitle { padding: 0; }
-    Static.chat-msg { padding: 0 1 1 1; }
-    """
+class Dashboard:
+    def __init__(self, port: int = 8765):
+        self._port = port
+        self._queue: asyncio.Queue = None
+        self._clients: set = set()
+        self._buffer: deque = deque(maxlen=_BUFFER_SIZE)
 
-    BINDINGS = [
-        ("1", "switch_tab('chat')", "Chat"),
-        ("2", "switch_tab('agent')", "Agent"),
-        ("3", "switch_tab('memory')", "Memory"),
-        ("4", "switch_tab('transport')", "Transport"),
-        ("q,й", "quit", "Quit"),
-    ]
+    def call_later(self, fn, *args):
+        fn(*args)
 
-    def compose(self) -> ComposeResult:
-        yield Header()
-        with TabbedContent(initial="chat"):
-            with TabPane("Chat", id="chat"):
-                yield VerticalScroll(id="chat-scroll")
-            with TabPane("Agent", id="agent"):
-                yield RichLog(id="log-agent", wrap=True, highlight=False, markup=True)
-            with TabPane("Memory", id="memory"):
-                yield RichLog(id="log-memory", wrap=True, highlight=False, markup=True)
-            with TabPane("Transport", id="transport"):
-                yield RichLog(id="log-transport", wrap=True, highlight=False, markup=True)
-        yield Footer()
-
-    def on_mount(self) -> None:
-        self.title = "SlonAgent"
-        self.sub_title = "dashboard"
-
-    def action_switch_tab(self, tab: str) -> None:
-        self.query_one(TabbedContent).active = tab
-
-    # --- Chat helpers ---
-
-    def _chat_scroll(self) -> VerticalScroll:
-        return self.query_one("#chat-scroll", VerticalScroll)
-
-    def _mount_chat(self, widget) -> None:
-        scroll = self._chat_scroll()
-        scroll.mount(widget)
-        scroll.scroll_end(animate=False)
+    def _emit(self, event: dict) -> None:
+        event["ts"] = datetime.now().strftime("%H:%M:%S")
+        self._buffer.append(event)
+        if self._queue is not None:
+            try:
+                self._queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
 
     def add_chat(self, role: str, text: str) -> None:
-        ts = datetime.now().strftime("%H:%M:%S")
-        if role == "user":
-            header = f"[bold cyan]{ts} Вы[/bold cyan]"
-        else:
-            header = f"[bold green]{ts} Агент[/bold green]"
-        self._mount_chat(Static(f"{header}\n{escape(text)}", markup=True, classes="chat-msg"))
+        self._emit({"type": "chat", "role": role, "text": text})
 
     def add_collapsible(self, title: str, text: str) -> None:
-        self._mount_chat(Collapsible(
-            Static(escape(text)),
-            title=title,
-            collapsed=True,
-        ))
-
-    # --- Log tab ---
+        self._emit({"type": "collapsible", "title": title, "text": text})
 
     def add_log(self, category: str, level: str, text: str) -> None:
-        widget_id = f"log-{category}"
-        try:
-            log = self.query_one(f"#{widget_id}", RichLog)
-        except Exception:
-            return
-        color = _LEVEL_COLORS.get(level, "white")
-        ts = datetime.now().strftime("%H:%M:%S")
-        log.write(f"[dim]{ts}[/dim] [{color}]{level}[/{color}] {text}")
+        self._emit({"type": "log", "category": category, "level": level, "text": text})
+
+    async def _broadcaster(self) -> None:
+        while True:
+            event = await self._queue.get()
+            if not self._clients:
+                continue
+            data = json.dumps(event, ensure_ascii=False)
+            dead = set()
+            for client in list(self._clients):
+                try:
+                    await client.send_text(data)
+                except Exception:
+                    dead.add(client)
+            self._clients -= dead
+
+    async def run_async(self) -> None:
+        import uvicorn
+
+        self._queue = asyncio.Queue(maxsize=2000)
+        asyncio.create_task(self._broadcaster())
+
+        app = FastAPI()
+
+        @app.get("/")
+        async def index():
+            return HTMLResponse(_HTML)
+
+        @app.websocket("/ws")
+        async def ws(websocket: WebSocket):
+            await websocket.accept()
+            for event in self._buffer:
+                await websocket.send_text(json.dumps(event, ensure_ascii=False))
+            self._clients.add(websocket)
+            try:
+                while True:
+                    await websocket.receive_text()
+            except WebSocketDisconnect:
+                pass
+            finally:
+                self._clients.discard(websocket)
+
+        async def open_browser():
+            await asyncio.sleep(1.0)
+            webbrowser.open(f"http://localhost:{self._port}")
+
+        asyncio.create_task(open_browser())
+
+        config = uvicorn.Config(app, host="0.0.0.0", port=self._port, log_level="info", ws="wsproto")
+        server = uvicorn.Server(config)
+        await server.serve()
 
 
 class UILogHandler(logging.Handler):
-    """Routes log records to the appropriate Dashboard tab."""
-
     def __init__(self, dashboard: Dashboard, level: int = logging.DEBUG) -> None:
         super().__init__(level)
         self._dashboard = dashboard
@@ -113,6 +110,6 @@ class UILogHandler(logging.Handler):
             text = self.format(record)
             if " - " in text:
                 text = text.split(" - ", 3)[-1]
-            self._dashboard.call_later(self._dashboard.add_log, category, record.levelname, text)
+            self._dashboard.add_log(category, record.levelname, text)
         except Exception:
             self.handleError(record)
