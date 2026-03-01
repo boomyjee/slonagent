@@ -133,6 +133,21 @@ class Agent:
         return result
 
 
+    async def _llm(self, contents, config, label: str = ""):
+        max_retries, delay = 5, 0.5
+        for attempt in range(max_retries):
+            try:
+                return await asyncio.to_thread(
+                    self.client.models.generate_content,
+                    model=self.model_name, contents=contents, config=config,
+                )
+            except Exception as e:
+                if attempt + 1 == max_retries or "503" not in str(e) and "UNAVAILABLE" not in str(e):
+                    raise
+                wait = delay * 2 ** attempt
+                logging.warning("[agent] LLM %s unavailable, retry %d/%d in %ds", label, attempt + 1, max_retries, wait)
+                await asyncio.sleep(wait)
+
     async def start(self):
         for skill in self.skills:
             await skill.start()
@@ -217,10 +232,7 @@ class Agent:
                 thinking_config=types.ThinkingConfig(include_thoughts=self.include_thoughts),
             )
             logging.info("[agent] → LLM %s", self.model_name)
-            response = await asyncio.to_thread(
-                self.client.models.generate_content,
-                model=self.model_name, contents=self.strip_contents_private(await self.memory.get_contents()), config=config,
-            )
+            response = await self._llm(self.strip_contents_private(await self.memory.get_contents()), config)
             logging.info("[agent] ← LLM")
             await send_thinking(response)
 
@@ -251,10 +263,7 @@ class Agent:
 
                 iteration += 1
                 logging.info("[agent] → LLM iteration %d", iteration)
-                response = await asyncio.to_thread(
-                    self.client.models.generate_content,
-                    model=self.model_name, contents=self.strip_contents_private(await self.memory.get_contents()), config=config,
-                )
+                response = await self._llm(self.strip_contents_private(await self.memory.get_contents()), config, str(iteration))
                 logging.info("[agent] ← LLM iteration %d", iteration)
                 await send_thinking(response)
 
