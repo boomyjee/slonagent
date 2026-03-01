@@ -118,7 +118,7 @@ start.bat --cli
 
 ### FileProvider
 
-Два файла в `memory/file/`:
+Идея из [nanobot](https://github.com/HKUDS/nanobot). Два файла в `memory/file/`:
 - `MEMORY.md` — актуальный документ с ключевыми фактами, LLM обновляет при каждой консолидации
 - `HISTORY.md` — хронологический архив выжимок диалогов (append-only)
 
