@@ -378,10 +378,20 @@ class LogCompressor:
             "For conflicting information, prefer the MOST RECENT observation (check dates)."
         )
         new_om = {"role": "user", "parts": [{"text": obs_text}], "_observation_message": True}
+        self._write_log(updated)
         log.info("[LogCompressor] %d → 1 OM + %d recent turns", len(to_observe), len(recent))
         return [new_om] + recent
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _write_log(self, observations: str):
+        path = os.path.join(Memory.memory_dir, "log", "LOG.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(observations)
+        except Exception as e:
+            log.warning("[LogCompressor] write LOG.md failed: %s", e)
 
     def _split_recent(self, turns: list) -> tuple[list, list]:
         """Отделяет recent_turns (последние до recent_tokens) от turns для наблюдения."""
