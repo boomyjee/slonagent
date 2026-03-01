@@ -368,9 +368,11 @@ class LogCompressor:
             else:
                 rest.append(t)
 
-        existing_observations = (
-            om_turn["parts"][0]["text"] if om_turn else ""
-        )
+        log_path = os.path.join(Memory.memory_dir, "log", "LOG.md")
+        existing_observations = ""
+        if om_turn and os.path.exists(log_path):
+            with open(log_path, encoding="utf-8") as f:
+                existing_observations = f.read()
 
         # Решаем что наблюдать: оставляем хвост recent_turns нетронутым
         to_observe, recent = self._split_recent(rest)
