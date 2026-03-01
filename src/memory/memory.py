@@ -1,4 +1,6 @@
 import json, logging, os, sys, tempfile
+
+log = logging.getLogger(__name__)
 from datetime import datetime, timezone
 
 def save_turns_json(path, turns):
@@ -12,7 +14,7 @@ def save_turns_json(path, turns):
             tmp = f.name
         os.replace(tmp, path)
     except Exception as e:
-        logging.warning("save_turns_json %s: %s", path, e)
+        log.warning("save_turns_json %s: %s", path, e)
         if tmp:
             os.unlink(tmp)
 
@@ -30,7 +32,7 @@ def load_turns_json(path):
     except FileNotFoundError:
         return []
     except Exception as e:
-        logging.warning("load_turns_json %s: %s", path, e)
+        log.warning("load_turns_json %s: %s", path, e)
         return []
 
 
@@ -62,13 +64,13 @@ class Memory:
         try:
             result = await self.compressor.compress(self._turns)
         except Exception as e:
-            logging.warning("[memory] compressor failed: %s", e)
+            log.warning("[memory] compressor failed: %s", e)
             result = self._turns
 
         if len(result) < len(self._turns):
             self._turns = result
             save_turns_json(self._state_file, self._turns)
-            logging.info("[memory] compressor: %d → %d turns", len(self._turns) + (len(self._turns) - len(result)), len(result))
+            log.info("[memory] compressor: %d → %d turns", len(self._turns) + (len(self._turns) - len(result)), len(result))
 
         return self._turns
 

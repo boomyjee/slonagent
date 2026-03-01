@@ -4,6 +4,8 @@ DEPRECATED: используй SemanticProvider — реализует ту же
 и с прямой передачей contents в Gemini вместо сериализации диалога в текст.
 """
 import asyncio, logging, os
+
+log = logging.getLogger(__name__)
 from typing import Annotated
 from agent import tool
 from src.memory.providers.base import BaseProvider
@@ -31,7 +33,7 @@ class SimpleMemProvider(BaseProvider):
                 return ""
             return "## Релевантные факты из памяти\n" + "\n".join(f"- {l}" for l in lines)
         except Exception as e:
-            logging.debug("[SimpleMemProvider] get_context_prompt: %s", e)
+            log.debug("[SimpleMemProvider] get_context_prompt: %s", e)
         return ""
 
     @tool("Семантический поиск по долгосрочной памяти прошлых диалогов.")
@@ -43,7 +45,7 @@ class SimpleMemProvider(BaseProvider):
                 return {"result": "Ничего не найдено."}
             return {"results": [{"content": l} for l in lines]}
         except Exception as e:
-            logging.error("[SimpleMemProvider] search_memory: %s", e)
+            log.error("[SimpleMemProvider] search_memory: %s", e)
             return {"error": str(e)}
 
     async def _consolidate(self, pending):
@@ -64,6 +66,6 @@ class SimpleMemProvider(BaseProvider):
                 self._simplemem.add_dialogues(dialogues)
                 self._simplemem.finalize()
             await asyncio.to_thread(_run)
-            logging.info("[SimpleMemProvider] консолидация: %d сообщений.", len(messages))
+            log.info("[SimpleMemProvider] консолидация: %d сообщений.", len(messages))
         except Exception as e:
-            logging.error("[SimpleMemProvider] ошибка консолидации: %s", e)
+            log.error("[SimpleMemProvider] ошибка консолидации: %s", e)

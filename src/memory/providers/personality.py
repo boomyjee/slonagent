@@ -5,6 +5,8 @@
 Агент сам управляет набором активных субличностей через инструменты load/update/create.
 """
 import json, logging, os
+
+log = logging.getLogger(__name__)
 from typing import Annotated
 from agent import tool
 from src.memory.providers.base import BaseProvider
@@ -89,7 +91,7 @@ class PersonalityProvider(BaseProvider):
             return {"error": f"Не найдены: {', '.join(unknown)}. Доступные: {', '.join(available)}"}
         self._active = list(names)
         open(self._active_file, "w", encoding="utf-8").write(json.dumps(self._active, ensure_ascii=False))
-        logging.info("[PersonalityProvider] активные: %s", self._active)
+        log.info("[PersonalityProvider] активные: %s", self._active)
         return {"active": self._active}
 
     @tool("Обновить содержимое активной субличности.")
@@ -104,7 +106,7 @@ class PersonalityProvider(BaseProvider):
             return {"error": f"Субличность '{name}' не найдена."}
         description, _ = self._read(name)
         self._write(name, description, content)
-        logging.info("[PersonalityProvider] обновлена: %s", name)
+        log.info("[PersonalityProvider] обновлена: %s", name)
         return {"updated": name}
 
     @tool("Создать новую субличность.")
@@ -117,5 +119,5 @@ class PersonalityProvider(BaseProvider):
         if os.path.exists(self._path(name)):
             return {"error": f"Субличность '{name}' уже существует. Для обновления используй personality_update."}
         self._write(name, description, content)
-        logging.info("[PersonalityProvider] создана: %s", name)
+        log.info("[PersonalityProvider] создана: %s", name)
         return {"created": name}

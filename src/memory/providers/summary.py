@@ -8,6 +8,8 @@
 Поиск по архиву — через инструмент read_history.
 """
 import asyncio, logging, os, httpx
+
+log = logging.getLogger(__name__)
 from typing import Annotated
 from agent import tool, Agent
 from google import genai
@@ -48,7 +50,7 @@ class SummaryProvider(BaseProvider):
         return {"result": "\n".join(matches[-10:]) if matches else f"Ничего не найдено по запросу: {query}"}
 
     async def _consolidate(self, pending):
-        logging.info("Запускаю консолидацию: %d сообщений...", len(pending))
+        log.info("Запускаю консолидацию: %d сообщений...", len(pending))
         current_memory = ""
         if os.path.exists(self.memory_file):
             with open(self.memory_file, encoding="utf-8") as f: current_memory = f.read()
@@ -92,7 +94,7 @@ class SummaryProvider(BaseProvider):
                 model=self.model_name, contents=Agent.strip_contents_private(contents), config=config,
             )
             if not response.function_calls:
-                logging.warning("Консолидация: LLM не вызвала save_memory.")
+                log.warning("Консолидация: LLM не вызвала save_memory.")
                 return
 
             args = response.function_calls[0].args
@@ -103,7 +105,7 @@ class SummaryProvider(BaseProvider):
                 with open(self.memory_file, "w", encoding="utf-8") as f:
                     f.write(update)
 
-            logging.info("Консолидация завершена.")
+            log.info("Консолидация завершена.")
         except Exception as e:
-            logging.error("Ошибка консолидации: %s", e)
+            log.error("Ошибка консолидации: %s", e)
 

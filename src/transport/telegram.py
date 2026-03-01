@@ -1,5 +1,7 @@
 import html
 import io, os, asyncio, logging, json, mimetypes
+
+log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions
