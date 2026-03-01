@@ -3,18 +3,21 @@ google-genai>=0.3.0
 aiohttp-socks>=0.8.4
 psutil>=5.9.0
 
-# SimpleMemProvider
-simplemem>=0.1.0
-
-# SemanticProvider
+# SemanticProvider / FactProvider
 lancedb
 sentence-transformers
 numpy
 pyarrow
+langchain-text-splitters
+flashrank
 
-# HindsightProvider (embedded server mode)
-# On Windows, stubs for Unix-only modules must be installed first
-vendor/uvloop-stub
-vendor/fcntl-stub
-vendor/resource-stub
-hindsight-all
+# SimpleMemProvider (устаревший, используй SemanticProvider)
+# simplemem>=0.1.0
+
+# HindsightProvider (устаревший, используй FactProvider)
+# vendor/uvloop-stub
+# vendor/fcntl-stub
+# vendor/resource-stub
+# hindsight-all
+
+
