@@ -47,6 +47,8 @@ class FactProvider(BaseProvider):
         api_key: str,
         consolidate_tokens: int = 3_000,
         recall_max_tokens: int = 2_000,
+        auto_recall: bool = True,
+        auto_consolidate: bool = True,
     ):
         """
         Args:
@@ -54,10 +56,14 @@ class FactProvider(BaseProvider):
             api_key:            API-ключ Gemini.
             consolidate_tokens: Порог токенов накопленных ходов для запуска retain.
             recall_max_tokens:  Мягкий лимит токенов в auto-recall (get_context_prompt).
+            auto_recall:        Автоматически подмешивать recall в системный промпт.
+            auto_consolidate:   Запускать create_observations после retain.
         """
         super().__init__(consolidate_tokens=consolidate_tokens)
         self._model_name        = model_name
         self._recall_max_tokens = recall_max_tokens
+        self._auto_recall       = auto_recall
+        self._auto_consolidate  = auto_consolidate
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -117,7 +123,8 @@ class FactProvider(BaseProvider):
             return
 
         try:
-            await retain(items, self._llm, self._model_name, self.storage)
+            await retain(items, self._llm, self._model_name, self.storage,
+                         with_observations=self._auto_consolidate)
             n_doc = sum(1 for i in items if i.document_id)
             log.info(
                 "[FactProvider] retain %d items (%d doc, %d conv)",
@@ -139,7 +146,7 @@ class FactProvider(BaseProvider):
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         """Автоматический recall по тексту пользователя → системный промпт."""
-        if not user_text:
+        if not self._auto_recall or not user_text:
             return ""
         try:
             response = await self._recall(user_text[:1500])

@@ -968,6 +968,7 @@ async def retain(
     client,
     model_name: str,
     storage,
+    with_observations: bool = True,
 ) -> list[Fact]:
     """
     Полный retain pipeline: LLM → dedup → store → graph links → create_observations.
@@ -989,6 +990,7 @@ async def retain(
         len(new_facts), n_causal, n_temporal, n_semantic,
     )
 
-    await create_observations(storage, client, model_name)
+    if with_observations:
+        await create_observations(storage, client, model_name)
 
     return new_facts
