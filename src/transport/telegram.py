@@ -102,6 +102,8 @@ class TelegramTransport:
 
         self._media_groups: dict[str, list[Message]] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
+    async def on_user_message(self, text: str):
+        pass
 
     async def on_tool_call(self, name: str, args: dict):
         lines = "\n".join(f"  {html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
@@ -252,6 +254,9 @@ class TelegramTransport:
                 })
             else:
                 message_parts.append({"text": f"<attached_file {attrs} />"})
+
+        if user_texts:
+            await self.on_user_message(" ".join(user_texts).strip())
 
         try:
             await self.agent.process_message(

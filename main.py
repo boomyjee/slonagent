@@ -12,7 +12,7 @@ warnings.warn = _warn
 
 import asyncio, importlib, json, logging, os, shutil, sys
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 def resolve(v):
     if isinstance(v, str) and v.startswith("$"):
@@ -57,17 +57,25 @@ async def run():
     from agent import Agent
     from src.transport.cli import CliTransport
     from src.transport.telegram import TelegramTransport
+    from src.ui.wrapper import UITransportWrapper
 
     try:
         with open(_CONFIG_PATH, encoding="utf-8") as f:
             config = json.load(f)
         os.environ.update(config.get("env", {}))
         agent = Agent(**resolve(config["agent"]))
-        if "--cli" in sys.argv:
+
+        cli_mode = "--cli" in sys.argv
+        if cli_mode:
+            logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
             transport = CliTransport(agent)
         else:
             tg = config["telegram_transport"]
-            transport = TelegramTransport(bot_token=tg["bot_token"], allowed_user_ids=tg["allowed_user_ids"], agent=agent)
+            transport = UITransportWrapper(TelegramTransport(
+                bot_token=tg["bot_token"], 
+                allowed_user_ids=tg["allowed_user_ids"], 
+                agent=agent
+            ))
         await agent.start()
     except Exception as e:
         logging.error("Ошибка при запуске: %s", e)
