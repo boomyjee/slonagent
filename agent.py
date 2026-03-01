@@ -212,7 +212,7 @@ class Agent:
             skill_context = await skill.get_context_prompt(user_query)
             if skill_context:
                 system_parts.append(skill_context)
-                await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{truncate(skill_context, 3500)}")
+                await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
 
         if tools_info:
             await self.transport.send_system_prompt("[Инструменты модели]\n"+"\n".join(tools_info))

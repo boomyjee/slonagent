@@ -165,7 +165,7 @@ class TelegramTransport:
 
     async def send_system_prompt(self, text: str):
         if not self.verbose: return
-        await self._answer(text, expandable=True, prefix="🔧 ")
+        await self._answer(text[:3500] + ("..." if len(text) > 3500 else ""), expandable=True, prefix="🔧 ")
 
     async def send_thinking(self, text: str):
         await self._answer(text, expandable=True, prefix="🧠 ")
