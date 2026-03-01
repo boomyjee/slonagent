@@ -139,7 +139,9 @@ class SemanticProvider(BaseProvider):
     def _get_embed(self):
         if self._embed is None:
             from sentence_transformers import SentenceTransformer
-            self._embed = SentenceTransformer(self.EMBEDDING_MODEL)
+            from huggingface_hub import try_to_load_from_cache
+            cached = try_to_load_from_cache(self.EMBEDDING_MODEL, "config.json") is not None
+            self._embed = SentenceTransformer(self.EMBEDDING_MODEL, local_files_only=cached)
             self._dim = self._embed.get_sentence_embedding_dimension()
             log.info("[SemanticProvider] embedding model loaded, dim=%d", self._dim)
         return self._embed

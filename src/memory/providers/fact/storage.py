@@ -173,7 +173,9 @@ class Storage:
     def _get_embed_model():
         if Storage._embed_model is None:
             from sentence_transformers import SentenceTransformer
-            Storage._embed_model = SentenceTransformer(EMBEDDING_MODEL)
+            from huggingface_hub import try_to_load_from_cache
+            cached = try_to_load_from_cache(EMBEDDING_MODEL, "config.json") is not None
+            Storage._embed_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=cached)
             log.info(
                 "[storage] embedding model loaded: %s, dim=%d",
                 EMBEDDING_MODEL,
