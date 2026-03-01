@@ -165,7 +165,6 @@ class TelegramTransport:
         await self._answer(text)
 
     async def inject_message(self, text: str):
-        """Inject a message from a non-Telegram source (e.g. web chat)."""
         for chat_id in self.allowed_user_ids:
             sent = await self.bot.send_message(chat_id, text, link_preview_options=self._no_link_preview)
             self._current_message = sent
@@ -177,6 +176,7 @@ class TelegramTransport:
                 user_message_id=sent.message_id,
                 user_query=text,
             )
+            break
 
     async def send_system_prompt(self, text: str):
         if not self.verbose: return
