@@ -1,5 +1,5 @@
 import html
-import io, os, asyncio, logging, json, mimetypes
+import io, os, re, asyncio, logging, json, mimetypes
 
 log = logging.getLogger(__name__)
 from typing import Annotated
@@ -12,19 +12,93 @@ from google.genai import types
 
 
 
+def _markdown_to_html(text: str) -> str:
+    """Convert normal markdown to Telegram-safe HTML."""
+    if not text:
+        return ""
+
+    # 1. Extract and protect code blocks
+    code_blocks: list[str] = []
+    def save_code_block(m: re.Match) -> str:
+        code_blocks.append(m.group(1))
+        return f"\x00CB{len(code_blocks) - 1}\x00"
+    text = re.sub(r'```[\w]*\n?([\s\S]*?)```', save_code_block, text)
+
+    # 2. Extract and protect inline code
+    inline_codes: list[str] = []
+    def save_inline_code(m: re.Match) -> str:
+        inline_codes.append(m.group(1))
+        return f"\x00IC{len(inline_codes) - 1}\x00"
+    text = re.sub(r'`([^`]+)`', save_inline_code, text)
+
+    # 3. Headers → plain text
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'\1', text, flags=re.MULTILINE)
+
+    # 4. Blockquotes > text → plain text
+    text = re.sub(r'^>\s*(.*)$', r'\1', text, flags=re.MULTILINE)
+
+    # 5. Escape HTML special characters
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # 6. Links [text](url)
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+
+    # 7. Bold **text** or __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
+
+    # 8. Italic *text* or _text_ (avoid **bold** and snake_case)
+    text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', text)
+    text = re.sub(r'(?<![a-zA-Z0-9])_([^_]+)_(?![a-zA-Z0-9])', r'<i>\1</i>', text)
+
+    # 9. Strikethrough ~~text~~
+    text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
+
+    # 10. Bullet lists - item / * item → • item
+    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
+
+    # 11. Restore inline code
+    for i, code in enumerate(inline_codes):
+        escaped = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00IC{i}\x00", f"<code>{escaped}</code>")
+
+    # 12. Restore code blocks
+    for i, code in enumerate(code_blocks):
+        escaped = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00CB{i}\x00", f"<pre><code>{escaped}</code></pre>")
+
+    return text
+
+
+def _split_message(content: str, max_len: int = 3500) -> list[str]:
+    """Split content into chunks ≤ max_len, preferring line breaks over word breaks.
+
+    Default limit is 3500 (not 4096) to leave headroom for HTML tag expansion
+    when markdown is converted after splitting.
+    """
+    if len(content) <= max_len:
+        return [content]
+    chunks: list[str] = []
+    while content:
+        if len(content) <= max_len:
+            chunks.append(content)
+            break
+        cut = content[:max_len]
+        pos = cut.rfind('\n')
+        if pos == -1:
+            pos = cut.rfind(' ')
+        if pos == -1:
+            pos = max_len
+        chunks.append(content[:pos])
+        content = content[pos:].lstrip()
+    return chunks
+
+
 class TelegramSkill(Skill):
     def __init__(self, bot: Bot):
         self.bot = bot
         self._message = None
         super().__init__()
-
-    async def get_context_prompt(self, user_text: str = "") -> str:
-        return (
-            "Форматируй ответы в Telegram Markdown: "
-            "*жирный*, _курсив_, `inline-код`, ```блок кода```. "
-            "Команды, которые нужно скопировать, всегда оборачивай в `inline-код`. "
-            "Не используй ** для жирного."
-        )
 
     def set_message(self, message):
         self._message = message
@@ -142,24 +216,28 @@ class TelegramTransport:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
     async def _answer(self, text: str, expandable: bool = False, prefix: str = ""):
-        max_chunk = 4000
         if expandable:
-            for chunk in [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]:
+            for chunk in _split_message(text):
                 await self._current_message.answer(
                     f"<blockquote expandable>{html.escape(prefix + chunk)}</blockquote>",
                     parse_mode="HTML",
                     link_preview_options=self._no_link_preview,
                 )
         else:
-            try:
-                await self._current_message.answer(text, parse_mode="Markdown",
-                                                   link_preview_options=self._no_link_preview)
-            except Exception as e:
-                if "message is too long" in str(e):
-                    for chunk in [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]:
-                        await self._current_message.answer(chunk, link_preview_options=self._no_link_preview)
-                else:
-                    await self._current_message.answer(text, link_preview_options=self._no_link_preview)
+            for chunk in _split_message(text):
+                html_chunk = _markdown_to_html(chunk)
+                try:
+                    await self._current_message.answer(
+                        html_chunk,
+                        parse_mode="HTML",
+                        link_preview_options=self._no_link_preview,
+                    )
+                except Exception as e:
+                    log.debug("[transport] HTML send failed, falling back to plain: %s", e)
+                    await self._current_message.answer(
+                        chunk,
+                        link_preview_options=self._no_link_preview,
+                    )
 
     async def send_message(self, text: str):
         await self._answer(text)
