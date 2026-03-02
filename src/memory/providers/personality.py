@@ -14,6 +14,9 @@ from src.memory.memory import Memory
 
 
 class PersonalityProvider(BaseProvider):
+    COMMON_NAME = "common"
+    COMMON_DESCRIPTION = "Общие важные факты, которые должны помниться всегда"
+
     def __init__(self):
         super().__init__(consolidate_tokens=0)
         self._dir = os.path.join(Memory.memory_dir, "personalities")
@@ -23,6 +26,7 @@ class PersonalityProvider(BaseProvider):
             self._active: list[str] = json.loads(open(self._active_file, encoding="utf-8").read())
         except (FileNotFoundError, json.JSONDecodeError):
             self._active: list[str] = []
+        self._ensure_common()
 
     def _path(self, name: str) -> str:
         return os.path.join(self._dir, f"{name}.md")
@@ -42,12 +46,19 @@ class PersonalityProvider(BaseProvider):
         with open(self._path(name), "w", encoding="utf-8") as f:
             f.write(f"{description}\n---\n{content}")
 
+    def _ensure_common(self):
+        if self.COMMON_NAME not in self._list():
+            self.create(self.COMMON_NAME, self.COMMON_DESCRIPTION, "")
+
     def _list(self) -> list[str]:
         return sorted(f[:-3] for f in os.listdir(self._dir) if f.endswith(".md"))
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         all_names = self._list()
+        # common всегда активна
         active = [n for n in self._active if n in all_names]
+        if self.COMMON_NAME in all_names and self.COMMON_NAME not in active:
+            active = [self.COMMON_NAME] + active
 
         if not all_names:
             index = "(субличностей пока нет)"
@@ -72,7 +83,9 @@ class PersonalityProvider(BaseProvider):
             "Обновляй субличность сразу, как только в разговоре появляется что-то важное для неё. "
             "Если для темы разговора нет подходящей субличности — создай через personality_create. "
             "Имя должно отражать контекст, а не просто тему: "
-            "не 'cooking', а 'home_chef' — не 'user', а 'friend_alex'."
+            "не 'cooking', а 'home_chef' — не 'user', а 'friend_alex'.\n\n"
+            f"Субличность '{self.COMMON_NAME}' всегда активна — храни в ней общие важные факты, "
+            "которые должны помниться независимо от контекста разговора."
         )
 
         parts = [f"## Субличности\n{index}\n\n{instruction}"]
