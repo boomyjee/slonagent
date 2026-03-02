@@ -52,6 +52,7 @@ class FactProvider(BaseProvider):
         retain_mission: str = "",
         custom_instructions: str = "",
         embedding_model: str = "",
+        rerank_model: str = "",
     ):
         """
         Args:
@@ -65,6 +66,7 @@ class FactProvider(BaseProvider):
             custom_instructions:  Замена дефолтных guidelines извлечения (если задано).
             embedding_model:      HuggingFace-имя embedding-модели (по умолчанию Qwen3-Embedding-0.6B).
                                   При смене модели нужно пересоздать БД.
+            rerank_model:         FlashRank модель для cross-encoder реранкинга.
         """
         super().__init__(consolidate_tokens=consolidate_tokens)
         self._model_name          = model_name
@@ -73,6 +75,7 @@ class FactProvider(BaseProvider):
         self._auto_consolidate    = auto_consolidate
         self._retain_mission      = retain_mission
         self._custom_instructions = custom_instructions
+        self._rerank_model        = rerank_model
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -156,6 +159,7 @@ class FactProvider(BaseProvider):
         return await recall_async(
             query, q_vec, self.storage,
             max_tokens=max_tokens or self._recall_max_tokens,
+            rerank_model=self._rerank_model,
         )
 
     # ── Context prompt ───────────────────────────────────────────────────────────
@@ -230,6 +234,7 @@ class FactProvider(BaseProvider):
             response = await recall_async(
                 query[:1500], q_vec, self.storage,
                 max_tokens=max_tokens, budget=budget,
+                rerank_model=self._rerank_model,
             )
             results = [
                 {
@@ -292,6 +297,7 @@ class FactProvider(BaseProvider):
                 storage=self.storage,
                 llm_client=self._llm,
                 model_name=self._model_name,
+                rerank_model=self._rerank_model,
             )
         except Exception as e:
             log.warning("[FactProvider] reflect failed: %s", e, exc_info=True)

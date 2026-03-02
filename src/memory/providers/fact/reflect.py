@@ -272,10 +272,10 @@ def _tool_schemas(has_mental_models: bool) -> list[dict]:
 
 # ── Tool callbacks ─────────────────────────────────────────────────────────────
 
-async def _exec_recall(query: str, storage) -> dict[str, Any]:
+async def _exec_recall(query: str, storage, rerank_model: str) -> dict[str, Any]:
     from src.memory.providers.fact.recall import recall_async
     vec  = await asyncio.to_thread(storage.encode_query, query)
-    resp = await recall_async(query, vec, storage, types=["world", "experience"])
+    resp = await recall_async(query, vec, storage, types=["world", "experience"], rerank_model=rerank_model)
     memories = [
         {
             "id":            r.fact_id,
@@ -290,11 +290,11 @@ async def _exec_recall(query: str, storage) -> dict[str, Any]:
     return {"query": query, "memories": memories, "count": len(memories)}
 
 
-async def _exec_search_observations(query: str, storage) -> dict[str, Any]:
+async def _exec_search_observations(query: str, storage, rerank_model: str) -> dict[str, Any]:
     from src.memory.providers.fact.recall import recall_async
     pending = await asyncio.to_thread(storage.get_pending_consolidation_count)
     vec     = await asyncio.to_thread(storage.encode_query, query)
-    resp    = await recall_async(query, vec, storage, types=["observation"])
+    resp    = await recall_async(query, vec, storage, types=["observation"], rerank_model=rerank_model)
     is_stale = pending > 0
     freshness = "up_to_date" if pending == 0 else "slightly_stale" if pending < 10 else "stale"
     observations = [
@@ -381,11 +381,11 @@ def _exec_expand_sync(memory_ids: list[str], depth: str, storage) -> dict[str, A
     return {"results": results}
 
 
-async def _execute_tool(name: str, args: dict, storage) -> dict[str, Any]:
+async def _execute_tool(name: str, args: dict, storage, rerank_model: str) -> dict[str, Any]:
     if name == "recall":
-        return await _exec_recall(args.get("query", ""), storage)
+        return await _exec_recall(args.get("query", ""), storage, rerank_model)
     if name == "search_observations":
-        return await _exec_search_observations(args.get("query", ""), storage)
+        return await _exec_search_observations(args.get("query", ""), storage, rerank_model)
     if name == "search_mental_models":
         return await _exec_search_mental_models(
             args.get("query", ""), storage, int(args.get("max_results", 5))
@@ -410,6 +410,7 @@ async def run_reflect_agent(
     llm_client,
     model_name: str,
     max_iterations: int = MAX_ITERATIONS,
+    rerank_model: str = "",
 ) -> dict[str, Any]:
     """
     Агентный цикл для fact_reflect.
@@ -566,7 +567,7 @@ async def run_reflect_agent(
             contents.append(response.candidates[0].content)
 
             results = await asyncio.gather(
-                *[_execute_tool(fc.name, dict(fc.args), storage) for fc in other_calls],
+                *[_execute_tool(fc.name, dict(fc.args), storage, rerank_model) for fc in other_calls],
                 return_exceptions=True,
             )
 

@@ -42,8 +42,10 @@ RERANK_CANDIDATES = 30       # pre-filter перед reranking (как у Hindsi
 # budget → множитель кандидатов (как у Hindsight: low < mid < high)
 _BUDGET_FACTOR = {"low": 1, "mid": 2, "high": 4}
 
-# Lazy singleton — загружается один раз при первом вызове
-_ranker = None
+RERANK_MODEL_DEFAULT = "ms-marco-MultiBERT-L-12"
+
+# Lazy singletons по имени модели
+_rankers: dict[str, object] = {}
 
 
 # ── Result models ──────────────────────────────────────────────────────────────
@@ -637,21 +639,21 @@ def _rrf_merge(
 
 # ── Cross-encoder reranking (FlashRank) ───────────────────────────────────────
 
-def _get_ranker():
-    """Lazy singleton FlashRank ranker."""
-    global _ranker
-    if _ranker is None:
+def _get_ranker(model_name: str = ""):
+    """Lazy singleton FlashRank ranker по имени модели."""
+    model_name = model_name or RERANK_MODEL_DEFAULT
+    if model_name not in _rankers:
         from flashrank import Ranker
-        _ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir=".cache/flashrank")
-        log.info("[recall] FlashRank ranker loaded")
-    return _ranker
+        _rankers[model_name] = Ranker(model_name=model_name, cache_dir=".cache/flashrank")
+        log.info("[recall] FlashRank ranker loaded: %s", model_name)
+    return _rankers[model_name]
 
 
 def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def _rerank(query: str, results: list["RecallResult"]) -> list["RecallResult"]:
+def _rerank(query: str, results: list["RecallResult"], rerank_model: str = "") -> list["RecallResult"]:
     """
     Cross-encoder reranking аналогично Hindsight.
 
@@ -679,7 +681,7 @@ def _rerank(query: str, results: list["RecallResult"]) -> list["RecallResult"]:
         passages.append({"id": r.fact_id, "text": doc_text})
 
     try:
-        ranker = _get_ranker()
+        ranker = _get_ranker(rerank_model)
         request = RerankRequest(query=query, passages=passages)
         reranked = ranker.rerank(request)
 
@@ -706,6 +708,7 @@ def recall(
     query_timestamp: Optional[str] = None,
     tags: Optional[list[str]] = None,
     tags_match: Literal["any", "all", "any_strict", "all_strict"] = "any",
+    rerank_model: str = "",
 ) -> RecallResponse:
     """
     4-way поиск + RRF + cross-encoder reranking.
@@ -800,7 +803,7 @@ def recall(
         results.append(r)
 
     # 5. Cross-encoder reranking
-    results = _rerank(query, results)
+    results = _rerank(query, results, rerank_model)
 
     # 6. Token budget
     results = _apply_token_budget(results, max_tokens)
@@ -824,8 +827,9 @@ async def recall_async(
     query_timestamp: Optional[str] = None,
     tags: Optional[list[str]] = None,
     tags_match: Literal["any", "all", "any_strict", "all_strict"] = "any",
+    rerank_model: str = "",
 ) -> RecallResponse:
     return await asyncio.to_thread(
         recall, query, query_vec, storage,
-        types, max_tokens, budget, query_timestamp, tags, tags_match,
+        types, max_tokens, budget, query_timestamp, tags, tags_match, rerank_model,
     )
