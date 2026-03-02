@@ -27,7 +27,8 @@
                 "auto_recall": true,
                 "auto_consolidate": true,
                 "retain_mission": "Focus on facts about the user's life, work, relationships, and goals. Prioritize personal details over generic information.",
-                "custom_instructions": ""
+                "custom_instructions": "",
+                "embedding_model": ""
             },
             {
                 "__class__": "src.memory.providers.hindsight.HindsightProvider",

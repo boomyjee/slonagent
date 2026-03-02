@@ -274,8 +274,7 @@ def _tool_schemas(has_mental_models: bool) -> list[dict]:
 
 async def _exec_recall(query: str, storage) -> dict[str, Any]:
     from src.memory.providers.fact.recall import recall_async
-    from src.memory.providers.fact.storage import Storage
-    vec  = await asyncio.to_thread(Storage.encode_query, query)
+    vec  = await asyncio.to_thread(storage.encode_query, query)
     resp = await recall_async(query, vec, storage, types=["world", "experience"])
     memories = [
         {
@@ -293,9 +292,8 @@ async def _exec_recall(query: str, storage) -> dict[str, Any]:
 
 async def _exec_search_observations(query: str, storage) -> dict[str, Any]:
     from src.memory.providers.fact.recall import recall_async
-    from src.memory.providers.fact.storage import Storage
     pending = await asyncio.to_thread(storage.get_pending_consolidation_count)
-    vec     = await asyncio.to_thread(Storage.encode_query, query)
+    vec     = await asyncio.to_thread(storage.encode_query, query)
     resp    = await recall_async(query, vec, storage, types=["observation"])
     is_stale = pending > 0
     freshness = "up_to_date" if pending == 0 else "slightly_stale" if pending < 10 else "stale"
@@ -321,10 +319,9 @@ async def _exec_search_observations(query: str, storage) -> dict[str, Any]:
 async def _exec_search_mental_models(
     query: str, storage, max_results: int = 5
 ) -> dict[str, Any]:
-    from src.memory.providers.fact.storage import Storage
     pending  = await asyncio.to_thread(storage.get_pending_consolidation_count)
     is_stale = pending > 0
-    vec      = await asyncio.to_thread(Storage.encode_query, query)
+    vec      = await asyncio.to_thread(storage.encode_query, query)
     results  = await asyncio.to_thread(storage.search_mental_models, vec, max_results)
     mental_models = [
         {

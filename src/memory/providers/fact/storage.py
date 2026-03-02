@@ -148,8 +148,7 @@ def ensure_fts(conn: sqlite3.Connection) -> None:
 
 # ── Storage class ──────────────────────────────────────────────────────────────
 
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-EMBEDDING_DIM   = 1024   # размерность Qwen3-Embedding-0.6B
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 
 class Storage:
@@ -157,53 +156,48 @@ class Storage:
     Фасад над SQLite + LanceDB.
 
     Хранит:
-      conn     — SQLite соединение
-      table    — LanceDB таблица векторов фактов
-      mm_table — LanceDB таблица векторов mental models
+      conn       — SQLite соединение
+      table      — LanceDB таблица векторов фактов
+      mm_table   — LanceDB таблица векторов mental models
+      embed_dim  — размерность эмбеддингов (определяется при загрузке модели)
 
-    Статические методы для эмбеддинга (lazy singleton):
+    Методы эмбеддинга:
       encode_query(text)  — вектор поискового запроса (с query prompt)
       encode_texts(texts) — батч векторов для фактов/документов
 
-    Модель фиксирована константой EMBEDDING_MODEL / EMBEDDING_DIM.
+    При смене embedding_model нужно пересоздать БД.
     """
-
-    _embed_model = None
-
-    # ── Embedding (lazy singleton) ───────────────────────────────────────────────
-
-    @staticmethod
-    def _get_embed_model():
-        if Storage._embed_model is None:
-            from sentence_transformers import SentenceTransformer
-            from huggingface_hub import try_to_load_from_cache
-            cached = try_to_load_from_cache(EMBEDDING_MODEL, "config.json") is not None
-            Storage._embed_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=cached)
-            log.info(
-                "[storage] embedding model loaded: %s, dim=%d",
-                EMBEDDING_MODEL,
-                Storage._embed_model.get_sentence_embedding_dimension(),
-            )
-        return Storage._embed_model
-
-    @staticmethod
-    def encode_query(text: str) -> list:
-        """Вектор поискового запроса (с query prompt если поддерживается)."""
-        model = Storage._get_embed_model()
-        if hasattr(model, "prompts") and "query" in (model.prompts or {}):
-            return model.encode(text, prompt_name="query", normalize_embeddings=True).tolist()
-        return model.encode(text, normalize_embeddings=True).tolist()
-
-    @staticmethod
-    def encode_texts(texts) -> list:
-        """Батч-кодирование фактов/наблюдений/описаний (str или list[str])."""
-        return Storage._get_embed_model().encode(texts, normalize_embeddings=True).tolist()
 
     # ── Init ─────────────────────────────────────────────────────────────────────
 
-    def __init__(self, sqlite_path: str, lancedb_path: str):
+    def __init__(self, sqlite_path: str, lancedb_path: str, embedding_model: str = ""):
+        from sentence_transformers import SentenceTransformer
+        from huggingface_hub import try_to_load_from_cache
+        embedding_model = embedding_model or DEFAULT_EMBEDDING_MODEL
+        fully_cached = (
+            try_to_load_from_cache(embedding_model, "model.safetensors") is not None
+            or try_to_load_from_cache(embedding_model, "pytorch_model.bin") is not None
+        )
+        self._model = SentenceTransformer(embedding_model, local_files_only=fully_cached)
+        self._embedding_model = embedding_model
+        self._lancedb_path = lancedb_path
+        self.embed_dim = self._model.get_sentence_embedding_dimension()
+        log.info("[storage] embedding model loaded: %s, dim=%d", embedding_model, self.embed_dim)
+
         self.conn = self._open_sqlite(sqlite_path)
         self.table, self.mm_table = self._open_lancedb(lancedb_path)
+
+    # ── Embedding ────────────────────────────────────────────────────────────────
+
+    def encode_query(self, text: str) -> list:
+        """Вектор поискового запроса (с query prompt если поддерживается)."""
+        if hasattr(self._model, "prompts") and "query" in (self._model.prompts or {}):
+            return self._model.encode(text, prompt_name="query", normalize_embeddings=True).tolist()
+        return self._model.encode(text, normalize_embeddings=True).tolist()
+
+    def encode_texts(self, texts) -> list:
+        """Батч-кодирование фактов/наблюдений/описаний (str или list[str])."""
+        return self._model.encode(texts, normalize_embeddings=True).tolist()
 
     # ── Init helpers ────────────────────────────────────────────────────────────
 
@@ -218,8 +212,7 @@ class Storage:
         log.info("[storage] SQLite ready: %s", db_path)
         return conn
 
-    @staticmethod
-    def _open_lancedb(db_path: str):
+    def _open_lancedb(self, db_path: str):
         os.makedirs(db_path, exist_ok=True)
         db = lancedb.connect(db_path)
         existing = db.table_names()
@@ -230,7 +223,7 @@ class Storage:
             table = db.create_table(_LANCEDB_TABLE, schema=pa.schema([
                 pa.field("fact_id",      pa.string()),
                 pa.field("mentioned_at", pa.string()),
-                pa.field("vector",       pa.list_(pa.float32(), EMBEDDING_DIM)),
+                pa.field("vector",       pa.list_(pa.float32(), self.embed_dim)),
             ]))
 
         if _LANCEDB_MM_TABLE in existing:
@@ -238,7 +231,7 @@ class Storage:
         else:
             mm_table = db.create_table(_LANCEDB_MM_TABLE, schema=pa.schema([
                 pa.field("model_id", pa.string()),
-                pa.field("vector",   pa.list_(pa.float32(), EMBEDDING_DIM)),
+                pa.field("vector",   pa.list_(pa.float32(), self.embed_dim)),
             ]))
 
         log.info("[storage] LanceDB ready: %s", db_path)
@@ -530,7 +523,7 @@ class Storage:
             row,
         )
         self.conn.commit()
-        vec = Storage.encode_texts([mm.description])[0]
+        vec = self.encode_texts([mm.description])[0]
         try:
             self.mm_table.delete(f"model_id = '{mm.model_id}'")
         except Exception:
@@ -591,6 +584,56 @@ class Storage:
             results.append(mm)
 
         return sorted(results, key=lambda m: m.relevance, reverse=True)[:limit]
+
+    # ── Reindex ──────────────────────────────────────────────────────────────────
+
+    def reindex(self) -> None:
+        """
+        Пересчитывает все эмбеддинги в LanceDB с текущей моделью.
+        Нужно вызвать после смены embedding_model — пересоздаёт таблицы с новой размерностью.
+        """
+        import shutil
+        from src.memory.providers.fact.retain import augment_text_for_embedding, Fact
+
+        log.info("[storage] reindex: dropping LanceDB tables at %s", self._lancedb_path)
+        shutil.rmtree(self._lancedb_path, ignore_errors=True)
+        self.table, self.mm_table = self._open_lancedb(self._lancedb_path)
+
+        # факты
+        rows = self.conn.execute(
+            "SELECT fact_id, fact, fact_type, occurred_start, mentioned_at FROM facts"
+        ).fetchall()
+        if rows:
+            facts = [
+                Fact(
+                    fact_id=r["fact_id"],
+                    fact=r["fact"],
+                    fact_type=r["fact_type"],
+                    occurred_start=r["occurred_start"],
+                    mentioned_at=r["mentioned_at"],
+                )
+                for r in rows
+            ]
+            augmented = [augment_text_for_embedding(f) for f in facts]
+            vectors = self.encode_texts(augmented)
+            self.table.add([
+                {"fact_id": f.fact_id, "mentioned_at": f.mentioned_at, "vector": v}
+                for f, v in zip(facts, vectors)
+            ])
+            log.info("[storage] reindex: indexed %d facts", len(facts))
+
+        # mental models
+        mm_rows = self.conn.execute("SELECT * FROM mental_models").fetchall()
+        if mm_rows:
+            mm_list = [self._mm_from_row(r) for r in mm_rows]
+            mm_vecs = self.encode_texts([m.description for m in mm_list])
+            self.mm_table.add([
+                {"model_id": m.model_id, "vector": v}
+                for m, v in zip(mm_list, mm_vecs)
+            ])
+            log.info("[storage] reindex: indexed %d mental models", len(mm_list))
+
+        log.info("[storage] reindex done, model=%s dim=%d", self._embedding_model, self.embed_dim)
 
     def _mm_from_row(self, row, relevance: float = 0.0):
         from src.memory.providers.fact.reflect import MentalModel

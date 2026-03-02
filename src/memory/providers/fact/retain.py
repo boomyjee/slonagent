@@ -681,21 +681,20 @@ def _is_within_time_window(iso_a: Optional[str], iso_b: Optional[str], hours: in
 
 def deduplicate(
     facts: list[Fact],
-    table,
+    storage,
 ) -> tuple[list[Fact], list]:
     """
     Фильтрует дубли по cosine similarity + time window.
     Возвращает (new_facts, vectors) — векторы уже посчитаны, переиспользуем в store_facts.
     """
-    from src.memory.providers.fact.storage import Storage
     if not facts:
         return [], []
 
     augmented = [augment_text_for_embedding(f) for f in facts]
-    vectors = Storage.encode_texts(augmented)
+    vectors = storage.encode_texts(augmented)
 
     try:
-        if table.count_rows() == 0:
+        if storage.table.count_rows() == 0:
             return facts, vectors
     except Exception:
         return facts, vectors
@@ -704,7 +703,7 @@ def deduplicate(
     new_vectors = []
     for fact, vec in zip(facts, vectors):
         try:
-            results = table.search(vec).limit(1).to_list()
+            results = storage.table.search(vec).limit(1).to_list()
         except Exception as e:
             log.warning("[retain] deduplicate search failed: %s", e)
             new_facts.append(fact)
@@ -808,7 +807,7 @@ def store_facts(
     if not facts:
         return [], []
 
-    facts, vectors = deduplicate(facts, storage.table)
+    facts, vectors = deduplicate(facts, storage)
     if not facts:
         return [], []
 
@@ -911,8 +910,7 @@ class _BatchResponse:
 def _find_related_observations_sync(fact_text: str, storage) -> list:
     """Sync recall existing observations related to fact_text."""
     from src.memory.providers.fact.recall import recall
-    from src.memory.providers.fact.storage import Storage as _Storage
-    q_vec = _Storage.encode_query(fact_text[:1000])
+    q_vec = storage.encode_query(fact_text[:1000])
     resp = recall(fact_text, q_vec, storage, types=["observation"], max_tokens=512, budget="low")
     return resp.results
 
@@ -1000,7 +998,6 @@ def _max_str_date(dates) -> Optional[str]:
 
 
 def _store_new_observation(text: str, source_fact_ids: list[str], storage) -> None:
-    from src.memory.providers.fact.storage import Storage as _Storage
     now = datetime.now(timezone.utc).isoformat()
     obs_id = str(uuid.uuid4())
 
@@ -1017,14 +1014,13 @@ def _store_new_observation(text: str, source_fact_ids: list[str], storage) -> No
     )
     storage.conn.commit()
     try:
-        vec = _Storage.encode_texts([text])[0]
+        vec = storage.encode_texts([text])[0]
         storage.insert_vectors([{"fact_id": obs_id, "mentioned_at": mentioned_at, "vector": vec}])
     except Exception as e:
         log.warning("[consolidate] LanceDB write failed for %s: %s", obs_id, e)
 
 
 def _update_observation(observation_id: str, new_text: str, source_fact_ids: list[str], storage) -> None:
-    from src.memory.providers.fact.storage import Storage as _Storage
     row = storage.conn.execute(
         "SELECT source_fact_ids FROM facts WHERE fact_id = ? AND fact_type = 'observation'",
         (observation_id,),
@@ -1059,7 +1055,7 @@ def _update_observation(observation_id: str, new_text: str, source_fact_ids: lis
     try:
         storage.table.delete(f"fact_id = '{observation_id}'")
         now = datetime.now(timezone.utc).isoformat()
-        vec = _Storage.encode_texts([new_text])[0]
+        vec = storage.encode_texts([new_text])[0]
         storage.insert_vectors([{"fact_id": observation_id, "mentioned_at": now, "vector": vec}])
     except Exception as e:
         log.warning("[consolidate] LanceDB update failed for %s: %s", observation_id, e)

@@ -51,6 +51,7 @@ class FactProvider(BaseProvider):
         auto_consolidate: bool = True,
         retain_mission: str = "",
         custom_instructions: str = "",
+        embedding_model: str = "",
     ):
         """
         Args:
@@ -62,6 +63,8 @@ class FactProvider(BaseProvider):
             auto_consolidate:     Запускать create_observations после retain.
             retain_mission:       Кастомная миссия для LLM при извлечении фактов.
             custom_instructions:  Замена дефолтных guidelines извлечения (если задано).
+            embedding_model:      HuggingFace-имя embedding-модели (по умолчанию Qwen3-Embedding-0.6B).
+                                  При смене модели нужно пересоздать БД.
         """
         super().__init__(consolidate_tokens=consolidate_tokens)
         self._model_name          = model_name
@@ -81,7 +84,7 @@ class FactProvider(BaseProvider):
 
         sqlite_path  = os.path.join(Memory.memory_dir, "fact", "facts.db")
         lancedb_path = os.path.join(Memory.memory_dir, "fact", "lancedb")
-        self.storage = Storage(sqlite_path, lancedb_path)
+        self.storage = Storage(sqlite_path, lancedb_path, embedding_model)
         log.info("[FactProvider] Storage initialized")
 
     # ── Consolidate (retain pipeline) ────────────────────────────────────────────
@@ -157,7 +160,7 @@ class FactProvider(BaseProvider):
     # ── Internal recall ──────────────────────────────────────────────────────────
 
     async def _recall(self, query: str, max_tokens: int | None = None) -> RecallResponse:
-        q_vec = await asyncio.to_thread(Storage.encode_query, query)
+        q_vec = await asyncio.to_thread(self.storage.encode_query, query)
         return await recall_async(
             query, q_vec, self.storage,
             max_tokens=max_tokens or self._recall_max_tokens,
@@ -220,7 +223,7 @@ class FactProvider(BaseProvider):
         budget: Annotated[str, "Глубина поиска: low / mid / high (по умолчанию mid)"] = "mid",
     ) -> dict:
         try:
-            q_vec = await asyncio.to_thread(Storage.encode_query, query[:1500])
+            q_vec = await asyncio.to_thread(self.storage.encode_query, query[:1500])
             response = await recall_async(
                 query[:1500], q_vec, self.storage,
                 max_tokens=max_tokens, budget=budget,
