@@ -120,7 +120,7 @@ class UILogHandler(logging.Handler):
     def _category(self, name: str) -> str:
         if name.startswith("src.memory") or name.startswith("memory"):
             return "memory"
-        if name.startswith("aiogram") or name.startswith("src.transport") or name.startswith("httpx") or name.startswith("uvicorn"):
+        if name.startswith("aiogram") or name.startswith("src.transport") or name.startswith("httpx") or name.startswith("uvicorn") or name.startswith("google_genai") or name.startswith("sentence_transformers") or name.startswith("huggingface_hub"):
             return "transport"
         return "agent"
 

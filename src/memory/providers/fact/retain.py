@@ -907,11 +907,11 @@ class _BatchResponse:
     deletes: list[_DeleteAction] = field(default_factory=list)
 
 
-def _find_related_observations_sync(fact_text: str, storage) -> list:
-    """Sync recall existing observations related to fact_text."""
-    from src.memory.providers.fact.recall import recall
-    q_vec = storage.encode_query(fact_text[:1000])
-    resp = recall(fact_text, q_vec, storage, types=["observation"], max_tokens=512, budget="low")
+async def _find_related_observations(fact_text: str, storage) -> list:
+    """Async recall existing observations related to fact_text."""
+    from src.memory.providers.fact.recall import recall_async
+    q_vec = await asyncio.to_thread(storage.encode_query, fact_text[:1000])
+    resp = await recall_async(fact_text, q_vec, storage, types=["observation"], max_tokens=512, budget="low")
     return resp.results
 
 
@@ -1092,11 +1092,10 @@ async def create_observations(storage, client, model_name: str) -> int:
         if not batch:
             break
 
-        # Параллельный recall существующих observations для каждого факта
-        per_fact_obs = await asyncio.gather(*[
-            asyncio.to_thread(_find_related_observations_sync, r["fact"], storage)
-            for r in batch
-        ])
+        # recall существующих observations для каждого факта (последовательно — SQLite не thread-safe)
+        per_fact_obs = []
+        for r in batch:
+            per_fact_obs.append(await _find_related_observations(r["fact"], storage))
 
         # Union observations (дедупликация) + per-fact mapping для security check
         seen_ids: set[str] = set()
