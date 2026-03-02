@@ -176,16 +176,21 @@ class FactProvider(BaseProvider):
             return ""
 
         conv_lines: list[str] = []
+        obs_lines: list[str] = []
         doc_by_id: dict[str, list[str]] = {}
         for r in response.results:
             if r.document_id:
                 doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}")
+            elif r.fact_type == "observation":
+                obs_lines.append(f"- {r.fact}")
             else:
                 conv_lines.append(f"- {r.fact}")
 
         parts = []
         if conv_lines:
             parts.append("Из разговоров:\n" + "\n".join(conv_lines))
+        if obs_lines:
+            parts.append("Синтезированные наблюдения (выведены из фактов):\n" + "\n".join(obs_lines))
         for doc_id, lines in doc_by_id.items():
             parts.append(
                 f"Из документа [id={doc_id}] (факты документа, не реальные события):\n"

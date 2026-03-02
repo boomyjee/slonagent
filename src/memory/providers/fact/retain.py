@@ -669,6 +669,34 @@ DEDUP_SIMILARITY_THRESHOLD = 0.95
 DEDUP_TIME_WINDOW_HOURS = 24
 
 
+def _is_dedup(fact: "Fact", top: dict, storage) -> bool:
+    """
+    Определяет, является ли новый факт дублем существующего top-результата.
+
+    Факт из документа → дубль без учёта времени (пересказ документа через неделю тоже дубль).
+    Факт из разговора → дубль только в пределах DEDUP_TIME_WINDOW_HOURS.
+    """
+    row = storage.conn.execute(
+        "SELECT occurred_start, document_id FROM facts WHERE fact_id = ?", (top["fact_id"],)
+    ).fetchone()
+    existing_document_id = row["document_id"] if row else None
+    existing_occurred_start = row["occurred_start"] if row else None
+
+    if existing_document_id:
+        if fact.document_id and fact.document_id != existing_document_id:
+            # разные документы — применяем time window
+            pass
+        else:
+            # разговор эхоит документ, или тот же документ — дубль без time window
+            return True
+
+    return _is_within_time_window(
+        fact.occurred_start or fact.mentioned_at,
+        existing_occurred_start or top.get("mentioned_at"),
+        DEDUP_TIME_WINDOW_HOURS,
+    )
+
+
 def _is_within_time_window(iso_a: Optional[str], iso_b: Optional[str], hours: int) -> bool:
     if not iso_a or not iso_b:
         return True  # нет временной инфы — считаем потенциальным дублем
@@ -717,9 +745,7 @@ def deduplicate(
 
         top = results[0]
         similarity = 1.0 - top.get("_distance", 1.0)
-        if similarity >= DEDUP_SIMILARITY_THRESHOLD and _is_within_time_window(
-            fact.mentioned_at, top.get("mentioned_at"), DEDUP_TIME_WINDOW_HOURS
-        ):
+        if similarity >= DEDUP_SIMILARITY_THRESHOLD and _is_dedup(fact, top, storage):
             log.debug("[retain] dedup skip: similarity=%.3f fact=%s", similarity, fact.fact[:60])
         else:
             new_facts.append(fact)
