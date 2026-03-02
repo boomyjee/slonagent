@@ -167,6 +167,29 @@ CONCISE_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
 ) + _CAUSAL_RELATIONSHIPS_SECTION + _OUTPUT_FORMAT_SECTION
 
 
+def _build_extraction_prompt(retain_mission: str = "", custom_instructions: str = "") -> str:
+    """Строит промпт извлечения фактов с опциональными mission и custom_instructions."""
+    if retain_mission:
+        mission_section = f"## RETAIN MISSION\n{retain_mission}\n\n"
+    else:
+        mission_section = ""
+
+    if custom_instructions:
+        guidelines = custom_instructions
+    else:
+        guidelines = _CONCISE_GUIDELINES
+
+    return (
+        _BASE_FACT_EXTRACTION_PROMPT.format(
+            retain_mission_section=mission_section,
+            extraction_guidelines=guidelines,
+            examples=_CONCISE_EXAMPLES,
+        )
+        + _CAUSAL_RELATIONSHIPS_SECTION
+        + _OUTPUT_FORMAT_SECTION
+    )
+
+
 # ── Data models ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -176,6 +199,10 @@ class RetainItem:
     event_date: Optional[datetime] = field(default_factory=datetime.utcnow)
     document_id: Optional[str] = None
     tags: list[str] = field(default_factory=list)
+    retain_mission: str = ""
+    custom_instructions: str = ""
+    metadata: Optional[dict] = None
+    entities: Optional[list[str]] = None
 
 
 @dataclass
@@ -189,6 +216,7 @@ class Fact:
     entities: list[str] = field(default_factory=list)
     document_id: Optional[str] = None
     chunk_id: Optional[str] = None
+    context: str = ""
     tags: list[str] = field(default_factory=list)
     # causal_relations: [(target_fact_id, strength), ...] — заполняется после gather
     causal_relations: list[tuple[str, float]] = field(default_factory=list)
@@ -264,6 +292,7 @@ def _build_user_message(
     total_chunks: int,
     event_date: Optional[datetime],
     context: str = "",
+    metadata: Optional[dict] = None,
 ) -> str:
     sanitized_chunk = _sanitize_text(chunk)
     sanitized_context = _sanitize_text(context) if context else "none"
@@ -275,10 +304,15 @@ def _build_user_message(
         if event_date else ""
     )
 
+    metadata_line = ""
+    if metadata:
+        meta_str = ", ".join(f"{k}={v}" for k, v in metadata.items())
+        metadata_line = f"Metadata: {meta_str}\n"
+
     return f"""Extract facts from the following text chunk.
 
 Chunk: {chunk_index + 1}/{total_chunks}
-{event_date_line}Context: {sanitized_context}
+{event_date_line}{metadata_line}Context: {sanitized_context}
 
 Text:
 {sanitized_chunk}"""
@@ -286,12 +320,17 @@ Text:
 
 # ── LLM extraction ─────────────────────────────────────────────────────────────
 
-def _parse_facts_from_json(raw_json: dict, event_date: datetime, mentioned_at: str) -> list[Fact]:
+def _parse_facts_from_json(
+    raw_json: dict, event_date: datetime, mentioned_at: str
+) -> tuple[list[Fact], bool]:
+    """Возвращает (facts, has_malformed)."""
     facts = []
     raw_facts = raw_json.get("facts", [])
+    has_malformed = False
 
     for i, item in enumerate(raw_facts):
         if not isinstance(item, dict):
+            has_malformed = True
             continue
 
         def get_value(field_name):
@@ -359,18 +398,23 @@ def _parse_facts_from_json(raw_json: dict, event_date: datetime, mentioned_at: s
                 continue
             local_causal.append((target_idx, strength))
 
-        f = Fact(
-            fact=combined_text,
-            fact_type=fact_type,
-            occurred_start=occurred_start,
-            occurred_end=occurred_end,
-            mentioned_at=mentioned_at,
-            entities=entities,
-        )
+        try:
+            f = Fact(
+                fact=combined_text,
+                fact_type=fact_type,
+                occurred_start=occurred_start,
+                occurred_end=occurred_end,
+                mentioned_at=mentioned_at,
+                entities=entities,
+            )
+        except Exception as e:
+            log.error("[retain] failed to create Fact at index %d: %s", i, e)
+            has_malformed = True
+            continue
         f._local_causal = local_causal  # временный атрибут, удалим после резолва
         facts.append(f)
 
-    return facts
+    return facts, has_malformed
 
 
 class _OutputTooLongError(Exception):
@@ -385,11 +429,15 @@ async def _extract_from_chunk(
     context: str,
     client,
     model_name: str,
+    retain_mission: str = "",
+    custom_instructions: str = "",
+    metadata: Optional[dict] = None,
 ) -> list[Fact]:
     """Один LLM-запрос. Бросает _OutputTooLongError если ответ был обрезан."""
     effective_date = event_date or datetime.now(timezone.utc)
-    user_message = _build_user_message(chunk, chunk_index, total_chunks, event_date, context)
+    user_message = _build_user_message(chunk, chunk_index, total_chunks, event_date, context, metadata)
     mentioned_at = effective_date.isoformat()
+    system_prompt = _build_extraction_prompt(retain_mission, custom_instructions)
 
     for attempt in range(3):
         try:
@@ -398,7 +446,7 @@ async def _extract_from_chunk(
                 client.models.generate_content,
                 model=model_name,
                 contents=[
-                    {"role": "user", "parts": [{"text": CONCISE_FACT_EXTRACTION_PROMPT}]},
+                    {"role": "user", "parts": [{"text": system_prompt}]},
                     {"role": "model", "parts": [{"text": "Understood. I will extract significant facts from the text you provide."}]},
                     {"role": "user", "parts": [{"text": user_message}]},
                 ],
@@ -422,7 +470,15 @@ async def _extract_from_chunk(
                 continue
 
             data, _ = json.JSONDecoder().raw_decode(raw, m.start())
-            return _parse_facts_from_json(data, effective_date, mentioned_at)
+            facts, has_malformed = _parse_facts_from_json(data, effective_date, mentioned_at)
+            raw_count = len(data.get("facts", []))
+            if has_malformed and raw_count > 0 and len(facts) < raw_count * 0.8 and attempt < 2:
+                log.warning(
+                    "[retain] chunk %d: %d/%d facts valid on attempt %d, retrying...",
+                    chunk_index, len(facts), raw_count, attempt + 1,
+                )
+                continue
+            return facts
 
         except _OutputTooLongError:
             raise  # пробрасываем наверх для auto-split
@@ -457,11 +513,15 @@ async def _extract_from_chunk_auto_split(
     context: str,
     client,
     model_name: str,
+    retain_mission: str = "",
+    custom_instructions: str = "",
+    metadata: Optional[dict] = None,
 ) -> list[Fact]:
     """Обёртка с рекурсивным авто-сплитом при OutputTooLong."""
     try:
         return await _extract_from_chunk(
-            chunk, chunk_index, total_chunks, event_date, context, client, model_name
+            chunk, chunk_index, total_chunks, event_date, context, client, model_name,
+            retain_mission, custom_instructions, metadata,
         )
     except _OutputTooLongError:
         first, second = _split_chunk(chunk)
@@ -474,8 +534,14 @@ async def _extract_from_chunk_auto_split(
             chunk_index, len(chunk), len(first), len(second),
         )
         sub_results = await asyncio.gather(
-            _extract_from_chunk_auto_split(first,  chunk_index, total_chunks, event_date, context, client, model_name),
-            _extract_from_chunk_auto_split(second, chunk_index, total_chunks, event_date, context, client, model_name),
+            _extract_from_chunk_auto_split(
+                first,  chunk_index, total_chunks, event_date, context, client, model_name,
+                retain_mission, custom_instructions, metadata,
+            ),
+            _extract_from_chunk_auto_split(
+                second, chunk_index, total_chunks, event_date, context, client, model_name,
+                retain_mission, custom_instructions, metadata,
+            ),
         )
         return sub_results[0] + sub_results[1]
 
@@ -505,7 +571,8 @@ async def extract_facts(
         chunks = chunk_text(item.content)
         for chunk_idx, chunk in enumerate(chunks):
             tasks.append(_limited(_extract_from_chunk_auto_split(
-                chunk, chunk_idx, len(chunks), item.event_date, item.context, client, model_name
+                chunk, chunk_idx, len(chunks), item.event_date, item.context, client, model_name,
+                item.retain_mission, item.custom_instructions, item.metadata,
             )))
             task_meta.append((item_idx, chunk_idx, chunk))
 
@@ -530,7 +597,15 @@ async def extract_facts(
         for local_pos, fact in enumerate(chunk_facts):
             fact.document_id = doc_id
             fact.chunk_id = chunk_id
+            fact.context = item.context
             fact.tags = list(item.tags)
+            # Мёрдж user-provided entities (R6)
+            if item.entities:
+                existing = set(fact.entities)
+                for ent in item.entities:
+                    if ent not in existing:
+                        fact.entities.append(ent)
+                        existing.add(ent)
             local_causal = getattr(fact, "_local_causal", [])
             fact.causal_relations = [
                 (chunk_facts[target_idx].fact_id, strength)
@@ -686,8 +761,12 @@ def build_causal_links(facts: list[Fact], storage) -> int:
 
 
 def build_temporal_links(facts: list[Fact], storage) -> int:
-    """Ищет факты в том же временном окне и вставляет temporal links."""
+    """Ищет факты в том же временном окне и вставляет temporal links.
+
+    Вес = max(0.3, 1.0 - time_diff / window_seconds) — убывает с расстоянием по времени.
+    """
     links = []
+    window_secs = TEMPORAL_LINK_WINDOW_HOURS * 3600
     for fact in facts:
         if not fact.mentioned_at:
             continue
@@ -698,7 +777,13 @@ def build_temporal_links(facts: list[Fact], storage) -> int:
         window_start = (ts - timedelta(hours=TEMPORAL_LINK_WINDOW_HOURS)).isoformat()
         window_end   = (ts + timedelta(hours=TEMPORAL_LINK_WINDOW_HOURS)).isoformat()
         for n in storage.get_facts_in_time_window(window_start, window_end, fact.fact_id):
-            links.append((fact.fact_id, n["fact_id"], "temporal", 1.0))
+            try:
+                n_ts = datetime.fromisoformat(n["mentioned_at"])
+                time_diff = abs((ts - n_ts).total_seconds())
+                weight = max(0.3, 1.0 - time_diff / window_secs)
+            except (ValueError, TypeError):
+                weight = 1.0
+            links.append((fact.fact_id, n["fact_id"], "temporal", weight))
     storage.insert_links(links)
     return len(links)
 
@@ -743,222 +828,318 @@ def store_facts(
 
 # ── Consolidation (observation pipeline) ──────────────────────────────────────
 
-MIN_FACTS_PER_CLUSTER = 2
-MIN_NEW_FACTS         = 5
-MAX_FACTS_PER_CLUSTER = 30
-MAX_CLUSTERS_PER_RUN  = 10
+CONSOLIDATION_LLM_BATCH_SIZE = 8   # фактов на один LLM-вызов (1:1 с Hindsight)
 
-CONSOLIDATION_PROMPT = """\
-You are analyzing a set of facts to derive higher-level observations and patterns.
+_CONSOLIDATION_PROMPT = """\
+You are a memory consolidation system. Synthesize facts into observations \
+and merge with existing observations when appropriate.
 
-Facts (JSON):
-{facts_json}
+## MISSION
+Track every detail: names, numbers, dates, places, and relationships. \
+Prefer specifics over abstractions, never generalise.
 
-Identify meaningful PATTERNS or BELIEFS that emerge from MULTIPLE facts above.
-Return ONLY valid JSON matching this schema exactly:
+Processing rules (always apply):
+- REDUNDANT: same info worded differently → UPDATE the existing observation.
+- CONTRADICTION/UPDATE: capture both states with temporal markers ("used to X, now Y").
+- RESOLVE REFERENCES: when a new fact provides a concrete value resolving a vague \
+placeholder in an existing observation, UPDATE the observation to embed the resolved \
+value explicitly.
+- NEVER merge observations about different people or unrelated topics.
 
-{{
-  "observations": [
-    {{
-      "text": "Concise, precise pattern statement (1-2 sentences)",
-      "trend": "stable|strengthening|weakening|new|stale",
-      "evidence": [
-        {{
-          "fact_id": "<fact_id from the list above>",
-          "quote": "Exact or near-exact text from the fact",
-          "relevance": "One sentence: why this fact supports the observation"
-        }}
-      ]
-    }}
-  ]
-}}
+NEW FACTS:
+{facts_text}
+
+EXISTING OBSERVATIONS (JSON array, pooled from recalls across all facts above):
+{observations_text}
+
+Each observation includes:
+- id: unique identifier for updating
+- text: the observation content
+
+Compare the facts against existing observations:
+- Same topic as an existing observation → UPDATE it (observation_id + source_fact_ids)
+- New topic with durable knowledge → CREATE a new observation (source_fact_ids)
+- Cross-reference facts within the batch: a later fact may resolve a vague reference in an earlier one
+- Purely ephemeral facts → omit them (no create/update needed)
+
+Output a JSON object with three arrays.
+
+Example:
+{{"creates": [{{"text": "Alice lives in Berlin", "source_fact_ids": ["uuid1", "uuid2"]}}],
+  "updates": [{{"text": "Alice works at Acme Corp as senior engineer", "observation_id": "uuid3", "source_fact_ids": ["uuid4"]}}],
+  "deletes": [{{"observation_id": "uuid5"}}]}}
 
 Rules:
-- Each observation MUST cite ≥ 2 different facts as evidence
-- Observations describe PATTERNS, not individual facts
-- Do NOT repeat a single fact as a standalone observation
-- Trend definitions:
-    "new"          — ALL evidence is < 7 days old
-    "strengthening" — > 60% of evidence occurred in the last 30 days (but some is older)
-    "weakening"    — < 20% of evidence is recent (< 30 days), rest is older
-    "stale"        — NO evidence in the last 30 days
-    "stable"       — evidence distributed evenly across time
-- Return {{"observations": []}} if no meaningful patterns exist
+- "source_fact_ids": copy the EXACT UUID strings shown in brackets [uuid] from NEW FACTS.
+- "observation_id": copy the EXACT "id" string from EXISTING OBSERVATIONS.
+- "deletes": only when an observation is directly superseded or contradicted by new facts.
+- Return {{"creates": [], "updates": [], "deletes": []}} if nothing durable is found.\
 """
 
 
 @dataclass
-class ObservationEvidence:
-    fact_id: str
-    quote: str
-    relevance: str = ""
+class _CreateAction:
+    text: str
+    source_fact_ids: list[str]
 
 
 @dataclass
-class Observation:
-    observation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    text: str = ""
-    trend: str = "stable"
-    evidence: list[ObservationEvidence] = field(default_factory=list)
-    source_fact_ids: list[str] = field(default_factory=list)
-    mentioned_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+class _UpdateAction:
+    text: str
+    observation_id: str
+    source_fact_ids: list[str]
+
+
+@dataclass
+class _DeleteAction:
+    observation_id: str
+
+
+@dataclass
+class _BatchResponse:
+    creates: list[_CreateAction] = field(default_factory=list)
+    updates: list[_UpdateAction] = field(default_factory=list)
+    deletes: list[_DeleteAction] = field(default_factory=list)
+
+
+def _find_related_observations_sync(fact_text: str, storage) -> list:
+    """Sync recall existing observations related to fact_text."""
+    from src.memory.providers.fact.recall import recall
+    from src.memory.providers.fact.storage import Storage as _Storage
+    q_vec = _Storage.encode_query(fact_text[:1000])
+    resp = recall(fact_text, q_vec, storage, types=["observation"], max_tokens=512, budget="low")
+    return resp.results
+
+
+def _build_observations_for_prompt(union_obs: list, storage) -> list[dict]:
+    """Строит обогащённый список observations для промпта: proof_count + source_memories."""
+    obs_list = []
+    for o in union_obs:
+        row = storage.conn.execute(
+            "SELECT source_fact_ids FROM facts WHERE fact_id = ?", (o.fact_id,)
+        ).fetchone()
+        source_ids: list[str] = json.loads(row["source_fact_ids"] or "[]") if row else []
+        source_rows = storage.get_facts_by_ids(source_ids) if source_ids else []
+
+        obs_data: dict = {
+            "id": o.fact_id,
+            "text": o.fact,
+            "proof_count": len(source_ids) or 1,
+        }
+        if o.occurred_start:
+            obs_data["occurred_start"] = o.occurred_start
+        if o.mentioned_at:
+            obs_data["mentioned_at"] = o.mentioned_at
+        if source_rows:
+            obs_data["source_memories"] = [
+                {k: v for k, v in {"text": r["fact"], "mentioned_at": r["mentioned_at"]}.items() if v}
+                for r in source_rows
+            ]
+        obs_list.append(obs_data)
+    return obs_list
+
+
+async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, model_name: str) -> _BatchResponse:
+    """Single LLM call: batch of facts + recalled observations → creates/updates/deletes."""
+    facts_text = "\n".join(
+        " | ".join(filter(None, [
+            f"[{r['fact_id']}] {r['fact']}",
+            f"occurred_start={r['occurred_start']}" if r["occurred_start"] else None,
+            f"occurred_end={r['occurred_end']}" if r["occurred_end"] else None,
+            f"mentioned_at={r['mentioned_at']}" if r["mentioned_at"] else None,
+        ]))
+        for r in batch
     )
+    obs_list = await asyncio.to_thread(_build_observations_for_prompt, union_obs, storage)
+    observations_text = json.dumps(obs_list, ensure_ascii=False, indent=2)
+    prompt = _CONSOLIDATION_PROMPT.format(facts_text=facts_text, observations_text=observations_text)
+
+    for attempt in range(3):
+        try:
+            response = await client.aio.models.generate_content(
+                model=model_name,
+                contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                config={"response_mime_type": "application/json"},
+            )
+            data = json.loads(response.text.strip())
+            return _BatchResponse(
+                creates=[
+                    _CreateAction(text=c["text"], source_fact_ids=c.get("source_fact_ids", []))
+                    for c in data.get("creates", []) if isinstance(c, dict) and c.get("text")
+                ],
+                updates=[
+                    _UpdateAction(text=u["text"], observation_id=u["observation_id"], source_fact_ids=u.get("source_fact_ids", []))
+                    for u in data.get("updates", []) if isinstance(u, dict) and u.get("text") and u.get("observation_id")
+                ],
+                deletes=[
+                    _DeleteAction(observation_id=d["observation_id"])
+                    for d in data.get("deletes", []) if isinstance(d, dict) and d.get("observation_id")
+                ],
+            )
+        except Exception as e:
+            log.warning("[consolidate] LLM call failed (attempt %d/3): %s", attempt + 1, e)
+    return _BatchResponse()
 
 
-def _compute_trend(evidence_timestamps: list[datetime]) -> str:
-    if not evidence_timestamps:
-        return "stable"
-    now = datetime.now(timezone.utc)
-    recent_cutoff = now - timedelta(days=30)
-    new_cutoff    = now - timedelta(days=7)
-    stamps = [ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts for ts in evidence_timestamps]
-    if all(ts >= new_cutoff for ts in stamps):
-        return "new"
-    if all(ts < recent_cutoff for ts in stamps):
-        return "stale"
-    ratio = sum(1 for ts in stamps if ts >= recent_cutoff) / len(stamps)
-    if ratio > 0.6:
-        return "strengthening"
-    if ratio < 0.2:
-        return "weakening"
-    return "stable"
+def _min_str_date(dates) -> Optional[str]:
+    """Минимальная дата из итерируемого (строки ISO или None)."""
+    valid = [d for d in dates if d]
+    return min(valid) if valid else None
 
 
-def _cluster_facts_by_entity(fact_rows, storage) -> list[list]:
-    fact_ids = [r["fact_id"] for r in fact_rows]
-    if not fact_ids:
-        return []
-    placeholders = ",".join("?" * len(fact_ids))
-    rows = storage.conn.execute(
-        f"SELECT fe.fact_id, fe.entity_id FROM fact_entities fe WHERE fe.fact_id IN ({placeholders})",
-        fact_ids,
-    ).fetchall()
-    entity_to_facts: dict[str, list[str]] = {}
-    fact_to_entities: dict[str, list[str]] = {}
-    for r in rows:
-        entity_to_facts.setdefault(r["entity_id"], []).append(r["fact_id"])
-        fact_to_entities.setdefault(r["fact_id"], []).append(r["entity_id"])
-    row_map = {r["fact_id"]: r for r in fact_rows}
-    visited: set[str] = set()
-    clusters: list[list] = []
-    for fid in fact_ids:
-        if fid in visited:
-            continue
-        cluster_ids: set[str] = {fid}
-        queue = [fid]
-        while queue:
-            current = queue.pop()
-            for eid in fact_to_entities.get(current, []):
-                for neighbor in entity_to_facts.get(eid, []):
-                    if neighbor not in cluster_ids:
-                        cluster_ids.add(neighbor)
-                        queue.append(neighbor)
-        visited.update(cluster_ids)
-        cluster = [row_map[cid] for cid in cluster_ids if cid in row_map]
-        clusters.append(cluster[:MAX_FACTS_PER_CLUSTER])
-    no_entity = [row_map[fid] for fid in fact_ids if fid not in fact_to_entities]
-    if no_entity:
-        clusters.append(no_entity[:MAX_FACTS_PER_CLUSTER])
-    return [c for c in clusters if len(c) >= MIN_FACTS_PER_CLUSTER]
+def _max_str_date(dates) -> Optional[str]:
+    """Максимальная дата из итерируемого (строки ISO или None)."""
+    valid = [d for d in dates if d]
+    return max(valid) if valid else None
 
 
-async def _extract_observations(cluster: list, client, model_name: str) -> list[Observation]:
-    facts_data = [
-        {"fact_id": r["fact_id"], "fact": r["fact"], "fact_type": r["fact_type"],
-         "occurred_start": r["occurred_start"], "mentioned_at": r["mentioned_at"]}
-        for r in cluster
-    ]
-    prompt = CONSOLIDATION_PROMPT.format(facts_json=json.dumps(facts_data, ensure_ascii=False, indent=2))
-    try:
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=[{"role": "user", "parts": [{"text": prompt}]}],
-            config={"response_mime_type": "application/json"},
-        )
-        data = json.loads(response.text.strip())
-    except Exception as e:
-        log.error("[retain] consolidation LLM call failed: %s", e)
-        return []
-
-    valid_fact_ids = {r["fact_id"] for r in cluster}
-    fact_timestamps: dict[str, Optional[datetime]] = {}
-    for r in cluster:
-        ts_str = r["mentioned_at"] or r["occurred_start"]
-        if ts_str:
-            try:
-                fact_timestamps[r["fact_id"]] = datetime.fromisoformat(ts_str)
-            except ValueError:
-                pass
-
-    observations: list[Observation] = []
-    for item in data.get("observations", []):
-        if not isinstance(item, dict):
-            continue
-        text = item.get("text", "").strip()
-        if not text:
-            continue
-        evidence = [
-            ObservationEvidence(fact_id=ev["fact_id"], quote=ev.get("quote", ""), relevance=ev.get("relevance", ""))
-            for ev in item.get("evidence", [])
-            if isinstance(ev, dict) and ev.get("fact_id") in valid_fact_ids
-        ]
-        if len(evidence) < MIN_FACTS_PER_CLUSTER:
-            continue
-        ev_ts = [fact_timestamps[e.fact_id] for e in evidence if e.fact_id in fact_timestamps and fact_timestamps[e.fact_id]]
-        obs = Observation(text=text, trend=item.get("trend") or _compute_trend(ev_ts),
-                          evidence=evidence, source_fact_ids=[e.fact_id for e in evidence])
-        observations.append(obs)
-    return observations
-
-
-def _store_observation(obs: Observation, storage) -> None:
-    from src.memory.providers.fact.storage import Storage
+def _store_new_observation(text: str, source_fact_ids: list[str], storage) -> None:
+    from src.memory.providers.fact.storage import Storage as _Storage
     now = datetime.now(timezone.utc).isoformat()
+    obs_id = str(uuid.uuid4())
+
+    source_rows = storage.get_facts_by_ids(source_fact_ids)
+    occurred_start = _min_str_date(r["occurred_start"] for r in source_rows)
+    occurred_end   = _max_str_date(r["occurred_end"]   for r in source_rows)
+    mentioned_at   = _max_str_date(r["mentioned_at"]   for r in source_rows) or now
+
     storage.conn.execute(
-        "INSERT OR IGNORE INTO facts (fact_id, fact, fact_type, mentioned_at, source_fact_ids) VALUES (?, ?, 'observation', ?, ?)",
-        (obs.observation_id, obs.text, now, json.dumps(obs.source_fact_ids)),
+        """INSERT OR IGNORE INTO facts
+           (fact_id, fact, fact_type, occurred_start, occurred_end, mentioned_at, source_fact_ids)
+           VALUES (?, ?, 'observation', ?, ?, ?, ?)""",
+        (obs_id, text, occurred_start, occurred_end, mentioned_at, json.dumps(source_fact_ids)),
     )
     storage.conn.commit()
-    storage.insert_observation_evidence(
-        obs.observation_id,
-        [{"fact_id": e.fact_id, "quote": e.quote, "relevance": e.relevance} for e in obs.evidence],
-    )
-    storage.mark_consolidated(obs.source_fact_ids)
     try:
-        vec = Storage.encode_texts([obs.text])[0]
-        storage.insert_vectors([{"fact_id": obs.observation_id, "mentioned_at": now, "vector": vec}])
+        vec = _Storage.encode_texts([text])[0]
+        storage.insert_vectors([{"fact_id": obs_id, "mentioned_at": mentioned_at, "vector": vec}])
     except Exception as e:
-        log.warning("[retain] LanceDB write for observation %s failed: %s", obs.observation_id, e)
+        log.warning("[consolidate] LanceDB write failed for %s: %s", obs_id, e)
 
 
-async def create_observations(storage, client, model_name: str, min_new_facts: int = MIN_NEW_FACTS) -> list[Observation]:
-    """Создаёт observations из накопленных необработанных фактов."""
-    fact_rows = await asyncio.to_thread(storage.get_unconsolidated_facts, 200)
-    if len(fact_rows) < min_new_facts:
-        log.debug("[retain] skip create_observations: %d facts < %d", len(fact_rows), min_new_facts)
-        return []
-    clusters = (await asyncio.to_thread(_cluster_facts_by_entity, fact_rows, storage))[:MAX_CLUSTERS_PER_RUN]
-    log.info("[retain] create_observations: %d facts in %d clusters", len(fact_rows), len(clusters))
+def _update_observation(observation_id: str, new_text: str, source_fact_ids: list[str], storage) -> None:
+    from src.memory.providers.fact.storage import Storage as _Storage
+    row = storage.conn.execute(
+        "SELECT source_fact_ids FROM facts WHERE fact_id = ? AND fact_type = 'observation'",
+        (observation_id,),
+    ).fetchone()
+    if not row:
+        return
+    existing_ids = json.loads(row["source_fact_ids"] or "[]")
+    merged_ids = list(dict.fromkeys(existing_ids + source_fact_ids))
 
-    sem = asyncio.Semaphore(OBSERVATION_WORKERS)
+    source_rows = storage.get_facts_by_ids(source_fact_ids)
+    new_occurred_start = _min_str_date(r["occurred_start"] for r in source_rows)
+    new_occurred_end   = _max_str_date(r["occurred_end"]   for r in source_rows)
+    new_mentioned_at   = _max_str_date(r["mentioned_at"]   for r in source_rows)
 
-    async def _limited(coro):
-        async with sem:
-            return await coro
+    storage.conn.execute(
+        """UPDATE facts SET
+               fact = ?,
+               source_fact_ids = ?,
+               occurred_start = CASE WHEN occurred_start IS NULL OR (? IS NOT NULL AND ? < occurred_start) THEN ? ELSE occurred_start END,
+               occurred_end   = CASE WHEN occurred_end   IS NULL OR (? IS NOT NULL AND ? > occurred_end)   THEN ? ELSE occurred_end   END,
+               mentioned_at   = CASE WHEN mentioned_at   IS NULL OR (? IS NOT NULL AND ? > mentioned_at)   THEN ? ELSE mentioned_at   END
+           WHERE fact_id = ? AND fact_type = 'observation'""",
+        (
+            new_text, json.dumps(merged_ids),
+            new_occurred_start, new_occurred_start, new_occurred_start,
+            new_occurred_end,   new_occurred_end,   new_occurred_end,
+            new_mentioned_at,   new_mentioned_at,   new_mentioned_at,
+            observation_id,
+        ),
+    )
+    storage.conn.commit()
+    try:
+        storage.table.delete(f"fact_id = '{observation_id}'")
+        now = datetime.now(timezone.utc).isoformat()
+        vec = _Storage.encode_texts([new_text])[0]
+        storage.insert_vectors([{"fact_id": observation_id, "mentioned_at": now, "vector": vec}])
+    except Exception as e:
+        log.warning("[consolidate] LanceDB update failed for %s: %s", observation_id, e)
 
-    obs_lists = await asyncio.gather(*[
-        _limited(_extract_observations(cluster, client, model_name)) for cluster in clusters
-    ])
 
-    all_obs: list[Observation] = []
-    for obs_list in obs_lists:
-        for obs in obs_list:
-            await asyncio.to_thread(_store_observation, obs, storage)
-            all_obs.append(obs)
-            log.info("[retain] observation created: %r (trend=%s, evidence=%d)", obs.text[:80], obs.trend, len(obs.evidence))
-    log.info("[retain] create_observations done: %d observations created", len(all_obs))
-    return all_obs
+def _delete_observation(observation_id: str, storage) -> None:
+    storage.conn.execute(
+        "DELETE FROM facts WHERE fact_id = ? AND fact_type = 'observation'",
+        (observation_id,),
+    )
+    storage.conn.commit()
+    try:
+        storage.table.delete(f"fact_id = '{observation_id}'")
+    except Exception as e:
+        log.warning("[consolidate] LanceDB delete failed for %s: %s", observation_id, e)
+
+
+async def create_observations(storage, client, model_name: str) -> int:
+    """Consolidation loop: обрабатывает все неконсолидированные факты батчами по CONSOLIDATION_LLM_BATCH_SIZE.
+
+    1:1 с Hindsight: для каждого батча делает recall существующих observations,
+    затем один LLM-вызов, который возвращает creates/updates/deletes.
+    """
+    total = await asyncio.to_thread(storage.get_pending_consolidation_count)
+    if total == 0:
+        log.debug("[consolidate] skip: no unconsolidated facts")
+        return 0
+
+    log.info("[consolidate] starting: %d unconsolidated facts", total)
+    n_created = n_updated = n_deleted = n_processed = 0
+
+    while True:
+        batch = await asyncio.to_thread(storage.get_unconsolidated_facts, CONSOLIDATION_LLM_BATCH_SIZE)
+        if not batch:
+            break
+
+        # Параллельный recall существующих observations для каждого факта
+        per_fact_obs = await asyncio.gather(*[
+            asyncio.to_thread(_find_related_observations_sync, r["fact"], storage)
+            for r in batch
+        ])
+
+        # Union observations (дедупликация) + per-fact mapping для security check
+        seen_ids: set[str] = set()
+        union_obs: list = []
+        per_fact_obs_ids: dict[str, set[str]] = {}
+        for fact_row, obs_list in zip(batch, per_fact_obs):
+            fid = fact_row["fact_id"]
+            per_fact_obs_ids[fid] = {o.fact_id for o in obs_list}
+            for o in obs_list:
+                if o.fact_id not in seen_ids:
+                    seen_ids.add(o.fact_id)
+                    union_obs.append(o)
+
+        result = await _consolidate_llm_batch(batch, union_obs, storage, client, model_name)
+        valid_fact_ids = {r["fact_id"] for r in batch}
+
+        for create in result.creates:
+            valid_sources = [fid for fid in create.source_fact_ids if fid in valid_fact_ids]
+            if valid_sources:
+                await asyncio.to_thread(_store_new_observation, create.text, valid_sources, storage)
+                n_created += 1
+
+        for update in result.updates:
+            valid_sources = [fid for fid in update.source_fact_ids if fid in valid_fact_ids]
+            if not valid_sources:
+                continue
+            if not any(update.observation_id in per_fact_obs_ids.get(fid, set()) for fid in valid_sources):
+                log.debug("[consolidate] rejected update — obs %s not in recall for sources", update.observation_id)
+                continue
+            await asyncio.to_thread(_update_observation, update.observation_id, update.text, valid_sources, storage)
+            n_updated += 1
+
+        for delete in result.deletes:
+            if delete.observation_id not in seen_ids:
+                log.debug("[consolidate] rejected delete — obs %s not in recall", delete.observation_id)
+                continue
+            await asyncio.to_thread(_delete_observation, delete.observation_id, storage)
+            n_deleted += 1
+
+        await asyncio.to_thread(storage.mark_consolidated, [r["fact_id"] for r in batch])
+        n_processed += len(batch)
+
+    log.info("[consolidate] done: %d processed → %d created, %d updated, %d deleted",
+             n_processed, n_created, n_updated, n_deleted)
+    return n_created
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────

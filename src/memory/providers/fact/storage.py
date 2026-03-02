@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS facts (
     document_id     TEXT,
     chunk_id        TEXT REFERENCES chunks(chunk_id) ON DELETE SET NULL,
     source_fact_ids TEXT,
+    context         TEXT,
     consolidated    INTEGER NOT NULL DEFAULT 0,
     tags            TEXT NOT NULL DEFAULT '[]'
 );
@@ -141,6 +142,8 @@ _LANCEDB_MM_TABLE = "mental_model_vectors"
 def ensure_fts(conn: sqlite3.Connection) -> None:
     conn.executescript(_FTS_DDL)
     conn.commit()
+
+
 
 
 # ── Storage class ──────────────────────────────────────────────────────────────
@@ -267,14 +270,15 @@ class Storage:
             """
             INSERT OR IGNORE INTO facts
                 (fact_id, fact, fact_type, occurred_start, occurred_end, mentioned_at,
-                 document_id, chunk_id, source_fact_ids, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 document_id, chunk_id, source_fact_ids, context, tags)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (f.fact_id, f.fact, f.fact_type,
                  f.occurred_start, f.occurred_end, f.mentioned_at, f.document_id,
                  getattr(f, "chunk_id", None),
                  json.dumps(getattr(f, "source_fact_ids", None) or None),
+                 getattr(f, "context", None) or None,
                  json.dumps(getattr(f, "tags", None) or []))
                 for f in facts
             ],

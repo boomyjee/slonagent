@@ -25,7 +25,9 @@
                 "model_name": "gemini-2.5-flash",
                 "api_key": "$GEMINI_API_KEY",
                 "auto_recall": true,
-                "auto_consolidate": true
+                "auto_consolidate": true,
+                "retain_mission": "Focus on facts about the user's life, work, relationships, and goals. Prioritize personal details over generic information.",
+                "custom_instructions": ""
             },
             {
                 "__class__": "src.memory.providers.hindsight.HindsightProvider",

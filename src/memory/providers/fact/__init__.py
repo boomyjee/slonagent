@@ -49,21 +49,27 @@ class FactProvider(BaseProvider):
         recall_max_tokens: int = 2_000,
         auto_recall: bool = True,
         auto_consolidate: bool = True,
+        retain_mission: str = "",
+        custom_instructions: str = "",
     ):
         """
         Args:
-            model_name:         Имя LLM-модели (Gemini) для извлечения фактов и reflect.
-            api_key:            API-ключ Gemini.
-            consolidate_tokens: Порог токенов накопленных ходов для запуска retain.
-            recall_max_tokens:  Мягкий лимит токенов в auto-recall (get_context_prompt).
-            auto_recall:        Автоматически подмешивать recall в системный промпт.
-            auto_consolidate:   Запускать create_observations после retain.
+            model_name:           Имя LLM-модели (Gemini) для извлечения фактов и reflect.
+            api_key:              API-ключ Gemini.
+            consolidate_tokens:   Порог токенов накопленных ходов для запуска retain.
+            recall_max_tokens:    Мягкий лимит токенов в auto-recall (get_context_prompt).
+            auto_recall:          Автоматически подмешивать recall в системный промпт.
+            auto_consolidate:     Запускать create_observations после retain.
+            retain_mission:       Кастомная миссия для LLM при извлечении фактов.
+            custom_instructions:  Замена дефолтных guidelines извлечения (если задано).
         """
         super().__init__(consolidate_tokens=consolidate_tokens)
-        self._model_name        = model_name
-        self._recall_max_tokens = recall_max_tokens
-        self._auto_recall       = auto_recall
-        self._auto_consolidate  = auto_consolidate
+        self._model_name          = model_name
+        self._recall_max_tokens   = recall_max_tokens
+        self._auto_recall         = auto_recall
+        self._auto_consolidate    = auto_consolidate
+        self._retain_mission      = retain_mission
+        self._custom_instructions = custom_instructions
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -109,11 +115,15 @@ class FactProvider(BaseProvider):
                         context="attached document",
                         event_date=None,
                         document_id=doc_id,
+                        retain_mission=self._retain_mission,
+                        custom_instructions=self._custom_instructions,
                     ))
                     items.append(RetainItem(
                         content=f"{label} загрузил документ {doc_id}",
                         context="document upload event",
                         event_date=ts,
+                        retain_mission=self._retain_mission,
+                        custom_instructions=self._custom_instructions,
                     ))
                 else:
                     if conv_ts is None:
@@ -126,6 +136,8 @@ class FactProvider(BaseProvider):
                 content="\n".join(conv_lines),
                 context="conversation",
                 event_date=conv_ts,
+                retain_mission=self._retain_mission,
+                custom_instructions=self._custom_instructions,
             ))
 
         if not items:

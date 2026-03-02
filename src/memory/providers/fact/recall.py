@@ -57,8 +57,10 @@ class RecallResult:
     occurred_end: Optional[str] = None
     mentioned_at: Optional[str] = None
     document_id: Optional[str] = None
+    context: Optional[str] = None
     tags: list[str] = field(default_factory=list)
     score: float = 0.0
+    temporal_score: float = 0.0
     sources: list[str] = field(default_factory=list)
 
 
@@ -83,11 +85,13 @@ class RecallResponse:
 
 def _row_to_result(row: sqlite3.Row, score: float = 0.0, source: str = "") -> RecallResult:
     import json as _json
-    tags_raw = row["tags"] if "tags" in row.keys() else "[]"
+    keys = row.keys()
+    tags_raw = row["tags"] if "tags" in keys else "[]"
     try:
         tags = _json.loads(tags_raw or "[]")
     except (ValueError, TypeError):
         tags = []
+    context = (row["context"] or None) if "context" in keys else None
     return RecallResult(
         fact_id=row["fact_id"],
         fact=row["fact"],
@@ -96,6 +100,7 @@ def _row_to_result(row: sqlite3.Row, score: float = 0.0, source: str = "") -> Re
         occurred_end=row["occurred_end"] or None,
         mentioned_at=row["mentioned_at"] or None,
         document_id=row["document_id"] or None,
+        context=context,
         tags=tags,
         score=score,
         sources=[source] if source else [],
@@ -228,6 +233,90 @@ def _entity_frequency(storage, entity_id: str) -> int:
     return row["cnt"] if row else 0
 
 
+def _observation_graph_expansion(
+    seed_ids: list[str],
+    storage,
+    budget: int,
+) -> list[tuple[str, float]]:
+    """
+    S3: Observation graph expansion (аналог Hindsight link_expansion_retrieval.py).
+
+    Для observations: observation → source_fact_ids → entities →
+    все world-факты с теми же сущностями → их observations (кроме seeds).
+    """
+    if not seed_ids:
+        return []
+
+    placeholders = ",".join("?" * len(seed_ids))
+
+    # Шаг 1: собираем source_fact_ids из observation-seeds
+    obs_rows = storage.conn.execute(
+        f"""
+        SELECT fact_id, source_fact_ids FROM facts
+        WHERE fact_id IN ({placeholders})
+          AND fact_type = 'observation'
+        """,
+        seed_ids,
+    ).fetchall()
+
+    source_ids: list[str] = []
+    for row in obs_rows:
+        try:
+            import json as _json
+            ids = _json.loads(row["source_fact_ids"] or "[]")
+            source_ids.extend(ids)
+        except Exception:
+            pass
+
+    if not source_ids:
+        return []
+
+    src_placeholders = ",".join("?" * len(source_ids))
+
+    # Шаг 2: entities источников (с фильтром по частоте)
+    entity_rows = storage.conn.execute(
+        f"""
+        SELECT DISTINCT fe.entity_id
+        FROM fact_entities fe
+        WHERE fe.fact_id IN ({src_placeholders})
+          AND (SELECT COUNT(*) FROM fact_entities WHERE entity_id = fe.entity_id) < ?
+        """,
+        [*source_ids, MAX_ENTITY_FREQUENCY],
+    ).fetchall()
+
+    entity_ids = [r["entity_id"] for r in entity_rows]
+    if not entity_ids:
+        return []
+
+    ent_placeholders = ",".join("?" * len(entity_ids))
+
+    # Шаг 3: all world-facts with those entities → their observations (excluding seeds)
+    result_rows = storage.conn.execute(
+        f"""
+        WITH connected_sources AS (
+            SELECT DISTINCT fe.fact_id AS source_id
+            FROM fact_entities fe
+            WHERE fe.entity_id IN ({ent_placeholders})
+        ),
+        obs_matches AS (
+            SELECT f.fact_id, jsfid.value AS matched_source
+            FROM facts f, json_each(f.source_fact_ids) jsfid
+            WHERE f.fact_type = 'observation'
+              AND f.fact_id NOT IN ({placeholders})
+              AND jsfid.value IN (SELECT source_id FROM connected_sources)
+        )
+        SELECT fact_id, COUNT(DISTINCT matched_source) AS score
+        FROM obs_matches
+        GROUP BY fact_id
+        ORDER BY score DESC
+        LIMIT ?
+        """,
+        [*entity_ids, *seed_ids, budget],
+    ).fetchall()
+
+    return [(r["fact_id"], float(r["score"])) for r in result_rows]
+
+
 def _graph_link_expansion(
     seed_ids: list[str],
     storage,
@@ -238,6 +327,8 @@ def _graph_link_expansion(
 
     Priority: entity co-occurrence > causal links > fallback (semantic/temporal/entity).
     Fallback score умножается на 0.5x как у Hindsight.
+
+    Для seeds типа 'observation' дополнительно выполняется observation graph expansion (S3).
     """
     if not seed_ids:
         return []
@@ -321,6 +412,12 @@ def _graph_link_expansion(
         if fid not in score_map:  # entity/causal уже приоритетнее
             score_map[fid] = float(row["score"])
 
+    # --- Query 4: observation graph expansion (S3) ---
+    obs_expanded = _observation_graph_expansion(seed_ids, storage, budget)
+    for fid, score in obs_expanded:
+        if fid not in score_map:
+            score_map[fid] = score
+
     sorted_ids = sorted(score_map, key=lambda x: score_map[x], reverse=True)[:budget]
     return [(fid, score_map[fid]) for fid in sorted_ids]
 
@@ -372,6 +469,32 @@ def _extract_temporal_constraint(
     return None
 
 
+def _temporal_proximity(
+    row: sqlite3.Row,
+    mid_date: datetime,
+    total_days: float,
+) -> float:
+    """Вычисляет temporal proximity score для одного факта (1:1 с Hindsight)."""
+    best_date: Optional[datetime] = None
+    try:
+        if row["occurred_start"] and row["occurred_end"]:
+            s = datetime.fromisoformat(row["occurred_start"])
+            e = datetime.fromisoformat(row["occurred_end"])
+            best_date = s + (e - s) / 2
+        elif row["occurred_start"]:
+            best_date = datetime.fromisoformat(row["occurred_start"])
+        elif row["mentioned_at"]:
+            best_date = datetime.fromisoformat(row["mentioned_at"])
+    except (ValueError, TypeError):
+        pass
+
+    if best_date is None:
+        return 0.5
+
+    days_from_mid = abs((best_date - mid_date).total_seconds() / 86400)
+    return 1.0 - min(days_from_mid / max(total_days / 2, 1.0), 1.0) if total_days > 0 else 1.0
+
+
 def _temporal_search(
     start: datetime,
     end: datetime,
@@ -380,13 +503,19 @@ def _temporal_search(
     tags: Optional[list[str]] = None,
     tags_match: str = "any",
     types: Optional[list[str]] = None,
-) -> list[str]:
-    """Факты в временном диапазоне + опциональные фильтры."""
+) -> list[tuple[str, float]]:
+    """
+    Факты в временном диапазоне + опциональные фильтры.
+    Возвращает [(fact_id, temporal_proximity_score)], отсортированные по proximity DESC.
+    """
+    total_days = (end - start).total_seconds() / 86400
+    mid_date = start + (end - start) / 2
+
     tags_clause, tags_params = _tags_where(tags, tags_match)
     ft_clause,   ft_params   = _fact_types_where(types)
     rows = storage.conn.execute(
         f"""
-        SELECT fact_id FROM facts f
+        SELECT fact_id, occurred_start, occurred_end, mentioned_at FROM facts f
         WHERE (
             (occurred_start IS NOT NULL AND occurred_start <= ? AND (occurred_end IS NULL OR occurred_end >= ?))
             OR (mentioned_at IS NOT NULL AND mentioned_at BETWEEN ? AND ?)
@@ -404,7 +533,82 @@ def _temporal_search(
             limit,
         ),
     ).fetchall()
-    return [r["fact_id"] for r in rows]
+
+    results = []
+    for r in rows:
+        score = _temporal_proximity(r, mid_date, total_days)
+        results.append((r["fact_id"], score))
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
+
+def _temporal_spread(
+    entry_scores: dict[str, float],
+    start: datetime,
+    end: datetime,
+    storage,
+    budget: int,
+) -> dict[str, float]:
+    """
+    BFS spreading через temporal/causal links от temporal entry points (S1).
+
+    Аналог Hindsight retrieval.py spreading loop:
+      propagated = parent_score * link.weight * causal_boost * 0.7
+      combined   = max(neighbor_proximity, propagated)
+    """
+    if not entry_scores:
+        return {}
+
+    total_days = (end - start).total_seconds() / 86400
+    mid_date = start + (end - start) / 2
+
+    results: dict[str, float] = dict(entry_scores)
+    frontier = list(entry_scores.keys())
+    visited: set[str] = set(frontier)
+    budget_remaining = budget - len(frontier)
+    batch_size = 20
+
+    while frontier and budget_remaining > 0:
+        batch = frontier[:batch_size]
+        frontier = frontier[batch_size:]
+        placeholders = ",".join("?" * len(batch))
+
+        rows = storage.conn.execute(
+            f"""
+            SELECT fl.source_id, fl.target_id AS neighbor_id,
+                   fl.strength AS weight, fl.link_type,
+                   f.occurred_start, f.occurred_end, f.mentioned_at
+            FROM fact_links fl
+            JOIN facts f ON f.fact_id = fl.target_id
+            WHERE fl.source_id IN ({placeholders})
+              AND fl.link_type IN ('temporal', 'caused_by')
+              AND fl.strength >= 0.1
+              AND fl.target_id NOT IN ({placeholders})
+            ORDER BY fl.strength DESC
+            LIMIT ?
+            """,
+            [*batch, *batch, batch_size * 10],
+        ).fetchall()
+
+        for row in rows:
+            neighbor_id = row["neighbor_id"]
+            if neighbor_id in visited:
+                continue
+
+            parent_score = results.get(row["source_id"], 0.5)
+            causal_boost = 2.0 if row["link_type"] == "caused_by" else 1.0
+            propagated = parent_score * row["weight"] * causal_boost * 0.7
+            neighbor_proximity = _temporal_proximity(row, mid_date, total_days)
+            combined = max(neighbor_proximity, propagated)
+
+            if combined > 0.2:
+                results[neighbor_id] = combined
+                visited.add(neighbor_id)
+                if budget_remaining > 0:
+                    frontier.append(neighbor_id)
+                    budget_remaining -= 1
+
+    return results
 
 
 # ── RRF ────────────────────────────────────────────────────────────────────────
@@ -470,6 +674,8 @@ def _rerank(query: str, results: list["RecallResult"]) -> list["RecallResult"]:
                 doc_text = f"[Date: {date_readable} ({date_iso})] {doc_text}"
             except ValueError:
                 pass
+        if r.context:
+            doc_text = f"{r.context}: {doc_text}"
         passages.append({"id": r.fact_id, "text": doc_text})
 
     try:
@@ -544,15 +750,20 @@ def recall(
     graph_hits = _graph_link_expansion(semantic_ids[:limit], storage, budget=limit * 2)
     graph_ids = [fid for fid, _ in graph_hits]
 
-    # 4. Temporal
+    # 4. Temporal + spreading (S1/S2)
     temporal_range = _extract_temporal_constraint(query, ref_date)
-    temporal_ids = (
-        _temporal_search(
-            temporal_range[0], temporal_range[1], storage, limit,
+    temporal_ids: list[str] = []
+    temporal_scores: dict[str, float] = {}
+    if temporal_range:
+        t_start, t_end = temporal_range
+        entry_hits = _temporal_search(
+            t_start, t_end, storage, limit,
             tags=tags, tags_match=tags_match, types=types,
         )
-        if temporal_range else []
-    )
+        entry_scores = {fid: score for fid, score in entry_hits}
+        spread_scores = _temporal_spread(entry_scores, t_start, t_end, storage, budget=limit * 2)
+        temporal_scores = spread_scores
+        temporal_ids = sorted(spread_scores, key=lambda x: spread_scores[x], reverse=True)
 
     lists = [semantic_ids, bm25_ids, graph_ids]
     sources = ["semantic", "bm25", "graph"]
@@ -585,6 +796,7 @@ def recall(
             continue
         r = _row_to_result(row_map[fid], score=rrf_scores[fid])
         r.sources = rrf_sources[fid]
+        r.temporal_score = temporal_scores.get(fid, 0.0)
         results.append(r)
 
     # 5. Cross-encoder reranking
