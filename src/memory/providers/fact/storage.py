@@ -181,7 +181,9 @@ class GoogleEmbedder:
         from google import genai
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_options = {"httpx_client": http_client} if http_client else {}
+        http_options = {"api_version": "v1alpha"}
+        if http_client:
+            http_options["httpx_client"] = http_client
         self._client = genai.Client(api_key=api_key, http_options=http_options)
         self._model = model
         # Определяем размерность через тестовый запрос
@@ -199,12 +201,17 @@ class GoogleEmbedder:
     def encode_texts(self, texts) -> list:
         if isinstance(texts, str):
             texts = [texts]
-        result = self._client.models.embed_content(
-            model=self._model,
-            contents=texts,
-            config={"task_type": "RETRIEVAL_DOCUMENT"},
-        )
-        return [list(e.values) for e in result.embeddings]
+        batch_size = 100
+        all_embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            result = self._client.models.embed_content(
+                model=self._model,
+                contents=batch,
+                config={"task_type": "RETRIEVAL_DOCUMENT"},
+            )
+            all_embeddings.extend(list(e.values) for e in result.embeddings)
+        return all_embeddings
 
 
 def _make_embedder(embedding_model) -> "LocalEmbedder | GoogleEmbedder":
@@ -698,7 +705,7 @@ class Storage:
             ])
             log.info("[storage] reindex: indexed %d mental models", len(mm_list))
 
-        log.info("[storage] reindex done, model=%s dim=%d", self._embedding_model, self.embed_dim)
+        log.info("[storage] reindex done, model=%s dim=%d", self._embedder, self.embed_dim)
 
     def _mm_from_row(self, row, relevance: float = 0.0):
         from src.memory.providers.fact.reflect import MentalModel

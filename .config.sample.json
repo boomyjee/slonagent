@@ -30,7 +30,7 @@
                 "custom_instructions": "",
                 "embedding_model": {
                     "provider": "google",
-                    "model": "models/text-embedding-004",
+                    "model": "models/gemini-embedding-001",
                     "api_key": "$GEMINI_API_KEY"
                 }
             },
