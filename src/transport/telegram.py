@@ -240,7 +240,7 @@ class TelegramTransport:
                     )
 
     async def send_message(self, text: str):
-        await self._answer(text)
+        await self._answer((text or "").strip() or "[…]")
 
     async def inject_message(self, text: str):
         for chat_id in self.allowed_user_ids:
