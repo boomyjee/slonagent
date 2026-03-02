@@ -17,6 +17,7 @@ class Dashboard:
     def __init__(self, port: int = 8765):
         self._port = port
         self._queue: asyncio.Queue = None
+        self._loop: asyncio.AbstractEventLoop = None
         self._incoming: asyncio.Queue = asyncio.Queue()
         self._clients: set = set()
         self._buffer: deque = deque(maxlen=_BUFFER_SIZE)
@@ -30,11 +31,13 @@ class Dashboard:
     def _emit(self, event: dict) -> None:
         event["ts"] = datetime.now().strftime("%H:%M:%S")
         self._buffer.append(event)
-        if self._queue is not None:
-            try:
-                self._queue.put_nowait(event)
-            except asyncio.QueueFull:
-                pass
+        if self._queue is None or self._loop is None:
+            return
+        try:
+            # call_soon_threadsafe безопасен из любого потока
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
+        except RuntimeError:
+            pass
 
     def add_chat(self, role: str, text: str) -> None:
         self._emit({"type": "chat", "role": role, "text": text})
@@ -62,6 +65,7 @@ class Dashboard:
     async def run_async(self) -> None:
         import uvicorn
 
+        self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue(maxsize=2000)
         asyncio.create_task(self._broadcaster())
 
