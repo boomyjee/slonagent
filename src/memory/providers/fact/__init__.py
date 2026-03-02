@@ -146,11 +146,8 @@ class FactProvider(BaseProvider):
         if not items:
             return
 
-        try:
-            await retain(items, self._llm, self._model_name, self.storage,
-                         with_observations=self._auto_consolidate)
-        except Exception as e:
-            log.warning("[FactProvider] retain failed: %s", e, exc_info=True)
+        retain(items, self._llm, self._model_name, self.storage,
+               with_observations=self._auto_consolidate)
 
     # ── Internal recall ──────────────────────────────────────────────────────────
 

@@ -1191,7 +1191,7 @@ async def create_observations(storage, client, model_name: str) -> int:
 
 # ── Public entry point ─────────────────────────────────────────────────────────
 
-async def retain(
+async def _retain_impl(
     items: list[RetainItem],
     client,
     model_name: str,
@@ -1223,3 +1223,14 @@ async def retain(
         await create_observations(storage, client, model_name)
 
     return new_facts
+
+# ── Background scheduling ───────────────────────────────────────────────────────
+_retain_lock = asyncio.Lock()
+def retain(items: list[RetainItem],client,model_name: str,storage,with_observations: bool = True) -> None:
+    async def _run() -> None:
+        async with _retain_lock:
+            try:
+                await _retain_impl(items, client, model_name, storage, with_observations)
+            except Exception as e:
+                log.warning("[retain] background task failed: %s", e, exc_info=True)
+    asyncio.get_event_loop().create_task(_run())
