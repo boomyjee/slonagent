@@ -63,8 +63,8 @@ class SandboxSkill(Skill):
             for host, container in mounts.items():
                 lines.append(f"  - {host}  →  {container}")
         lines.append(
-            "Чтобы примонтировать папку с хост-машины, попроси пользователя выполнить:\n"
-            "  /config write exec.folders[] <абсолютный путь к папке>"
+            "Чтобы примонтировать папку с хост-машины, попроси пользователя написать в чат команду (команда пойдет в обход тебя):\n"
+            "  /config write sandbox.folders[] <абсолютный путь к папке>"
         )
         return "\n".join(lines)
 
@@ -148,12 +148,22 @@ class SandboxSkill(Skill):
             err = f"Ошибка при запуске {self.runtime}: {e}"
             logging.error("[exec] %s", err)
             return {"error": err}
+        
+        stdout = proc.stdout
+        stderr = proc.stderr
+
+        CHAR_LIMIT = 40000
+        res = {}
+        if len(stdout)>CHAR_LIMIT or len(stderr)>CHAR_LIMIT:
+            res['error'] = "Overflow, output truncated"
+            stdout = stdout[:CHAR_LIMIT]
+            stderr = stderr[:CHAR_LIMIT]
 
         logging.info("[exec] exit_code=%d", proc.returncode)
-        if proc.stdout: logging.info("[exec] stdout:\n%s", proc.stdout.rstrip())
-        if proc.stderr: logging.warning("[exec] stderr:\n%s", proc.stderr.rstrip())
+        if stdout: logging.info("[exec] stdout:\n%s", stdout.rstrip())
+        if stderr: logging.warning("[exec] stderr:\n%s", stderr.rstrip())
 
-        return {"stdout": proc.stdout, "stderr": proc.stderr, "exit_code": proc.returncode}
+        return {**res, "stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
 
     @tool("Прочитать текстовый файл из workspace.")
     def read_file(
