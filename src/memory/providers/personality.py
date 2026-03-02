@@ -26,7 +26,6 @@ class PersonalityProvider(BaseProvider):
             self._active: list[str] = json.loads(open(self._active_file, encoding="utf-8").read())
         except (FileNotFoundError, json.JSONDecodeError):
             self._active: list[str] = []
-        self._ensure_common()
 
     def _path(self, name: str) -> str:
         return os.path.join(self._dir, f"{name}.md")
@@ -47,18 +46,20 @@ class PersonalityProvider(BaseProvider):
             f.write(f"{description}\n---\n{content}")
 
     def _ensure_common(self):
-        if self.COMMON_NAME not in self._list():
-            self.create(self.COMMON_NAME, self.COMMON_DESCRIPTION, "")
+        if self.COMMON_NAME not in self._active:
+            if self.COMMON_NAME not in self._list():
+                self.create(self.COMMON_NAME, self.COMMON_DESCRIPTION, "")
+            self.load(self._active + [self.COMMON_NAME])
 
     def _list(self) -> list[str]:
         return sorted(f[:-3] for f in os.listdir(self._dir) if f.endswith(".md"))
 
     async def get_context_prompt(self, user_text: str = "") -> str:
+
+        self._ensure_common()
+
         all_names = self._list()
-        # common всегда активна
         active = [n for n in self._active if n in all_names]
-        if self.COMMON_NAME in all_names and self.COMMON_NAME not in active:
-            active = [self.COMMON_NAME] + active
 
         if not all_names:
             index = "(субличностей пока нет)"
@@ -113,7 +114,7 @@ class PersonalityProvider(BaseProvider):
         name: Annotated[str, "Имя субличности"],
         content: Annotated[str, "Полное новое содержимое субличности"],
     ) -> dict:
-        if name != self.COMMON_NAME and name not in self._active:
+        if name not in self._active:
             return {"error": f"Субличность '{name}' не активна. Активные: {self._active}. Сначала вызови personality_load."}
         if not os.path.exists(self._path(name)):
             return {"error": f"Субличность '{name}' не найдена."}
