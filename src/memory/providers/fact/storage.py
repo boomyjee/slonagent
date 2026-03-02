@@ -497,7 +497,11 @@ class Storage:
                 return []
         except Exception:
             return []
-        return self.table.search(query_vec).limit(limit).to_list()
+        try:
+            return self.table.search(query_vec).limit(limit).to_list()
+        except Exception as e:
+            log.warning("[storage] search_vectors failed: %s", e)
+            return []
 
     def insert_vectors(self, rows: list[dict]) -> None:
         if rows:

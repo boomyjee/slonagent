@@ -703,7 +703,13 @@ def deduplicate(
     new_facts = []
     new_vectors = []
     for fact, vec in zip(facts, vectors):
-        results = table.search(vec).limit(1).to_list()
+        try:
+            results = table.search(vec).limit(1).to_list()
+        except Exception as e:
+            log.warning("[retain] deduplicate search failed: %s", e)
+            new_facts.append(fact)
+            new_vectors.append(vec)
+            continue
         if not results:
             new_facts.append(fact)
             new_vectors.append(vec)
