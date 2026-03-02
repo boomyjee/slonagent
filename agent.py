@@ -91,9 +91,13 @@ class Skill:
         method = getattr(self, method_name)
         args = dict(tool_call.args or {})
 
-        if inspect.iscoroutinefunction(method):
-            return await method(**args)
-        return method(**args)
+        try:
+            if inspect.iscoroutinefunction(method):
+                return await method(**args)
+            return method(**args)
+        except Exception as e:
+            logging.exception("[skill] %s failed", tool_call.name)
+            return {"error": str(e)}
 
 
 class Agent:
