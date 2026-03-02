@@ -478,6 +478,7 @@ async def _extract_from_chunk(
                     chunk_index, len(facts), raw_count, attempt + 1,
                 )
                 continue
+            log.info("[retain] chunk %d/%d: extracted %d facts", chunk_index + 1, total_chunks, len(facts))
             return facts
 
         except _OutputTooLongError:
@@ -965,8 +966,10 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
                 contents=[{"role": "user", "parts": [{"text": prompt}]}],
                 config={"response_mime_type": "application/json"},
             )
+            if not response.text:
+                raise ValueError("empty response from LLM")
             data = json.loads(response.text.strip())
-            return _BatchResponse(
+            result = _BatchResponse(
                 creates=[
                     _CreateAction(text=c["text"], source_fact_ids=c.get("source_fact_ids", []))
                     for c in data.get("creates", []) if isinstance(c, dict) and c.get("text")
@@ -980,6 +983,11 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
                     for d in data.get("deletes", []) if isinstance(d, dict) and d.get("observation_id")
                 ],
             )
+            log.info(
+                "[consolidate] LLM decision: +%d create / %d update / %d delete",
+                len(result.creates), len(result.updates), len(result.deletes),
+            )
+            return result
         except Exception as e:
             log.warning("[consolidate] LLM call failed (attempt %d/3): %s", attempt + 1, e)
     return _BatchResponse()
