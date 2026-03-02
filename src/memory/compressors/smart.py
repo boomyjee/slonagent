@@ -219,7 +219,7 @@ class SmartCompressor:
                 )
                 raw = response.text or ""
             except Exception as e:
-                log.warning("[compress] LLM failed for group %d: %s — keeping original", idx, e)
+                log.warning("[compress] LLM failed for group %d: %s — keeping original", idx, e, exc_info=True)
                 return turns
 
             snapshot = self._extract_state_snapshot(raw) or raw.strip()
@@ -317,7 +317,7 @@ class SmartCompressor:
                 tmp = f.name
             os.replace(tmp, path)
         except Exception as e:
-            log.warning("[compress] save failed: %s", e)
+            log.warning("[compress] save failed: %s", e, exc_info=True)
             if tmp and os.path.exists(tmp):
                 os.unlink(tmp)
         return path

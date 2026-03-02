@@ -170,7 +170,7 @@ class FactProvider(BaseProvider):
         try:
             response = await self._recall(user_text[:1500])
         except Exception as e:
-            log.warning("[FactProvider] recall for context failed: %s", e)
+            log.warning("[FactProvider] recall for context failed: %s", e, exc_info=True)
             return ""
         if not response.results:
             return ""
@@ -241,7 +241,7 @@ class FactProvider(BaseProvider):
                 "pending_consolidation": response.pending_consolidation,
             }
         except Exception as e:
-            log.warning("[FactProvider] recall tool failed: %s", e)
+            log.warning("[FactProvider] recall tool failed: %s", e, exc_info=True)
             return {"error": str(e)}
 
     @tool("Получить полный текст документа из памяти по его document_id.")
@@ -264,7 +264,7 @@ class FactProvider(BaseProvider):
                 "chunk_count": len(chunks),
             }
         except Exception as e:
-            log.warning("[FactProvider] get_document failed: %s", e)
+            log.warning("[FactProvider] get_document failed: %s", e, exc_info=True)
             return {"error": str(e)}
 
     @tool("Глубокий анализ памяти с рассуждением. Используй для сложных вопросов о прошлом.")
@@ -281,5 +281,5 @@ class FactProvider(BaseProvider):
                 model_name=self._model_name,
             )
         except Exception as e:
-            log.warning("[FactProvider] reflect failed: %s", e)
+            log.warning("[FactProvider] reflect failed: %s", e, exc_info=True)
             return {"error": str(e)}

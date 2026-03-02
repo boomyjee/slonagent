@@ -45,7 +45,7 @@ class SimpleMemProvider(BaseProvider):
                 return {"result": "Ничего не найдено."}
             return {"results": [{"content": l} for l in lines]}
         except Exception as e:
-            log.error("[SimpleMemProvider] search_memory: %s", e)
+            log.error("[SimpleMemProvider] search_memory: %s", e, exc_info=True)
             return {"error": str(e)}
 
     async def _consolidate(self, pending):
@@ -68,4 +68,4 @@ class SimpleMemProvider(BaseProvider):
             await asyncio.to_thread(_run)
             log.info("[SimpleMemProvider] консолидация: %d сообщений.", len(messages))
         except Exception as e:
-            log.error("[SimpleMemProvider] ошибка консолидации: %s", e)
+            log.error("[SimpleMemProvider] ошибка консолидации: %s", e, exc_info=True)

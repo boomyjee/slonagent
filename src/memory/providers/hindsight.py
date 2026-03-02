@@ -251,7 +251,7 @@ class HindsightProvider(BaseProvider):
             n_doc = sum(1 for i in items if "document_id" in i)
             log.info("[HindsightProvider] retain_batch %d items (%d doc, %d conv)", len(items), n_doc, len(items) - n_doc)
         except Exception as e:
-            log.warning("[HindsightProvider] retain_batch failed: %s", e)
+            log.warning("[HindsightProvider] retain_batch failed: %s", e, exc_info=True)
 
     # ── context ───────────────────────────────────────────────────────────────
 
@@ -261,7 +261,7 @@ class HindsightProvider(BaseProvider):
         try:
             results = await self._recall(user_text[:1500], self._recall_max_tokens)
         except Exception as e:
-            log.warning("[HindsightProvider] recall failed: %s", e)
+            log.warning("[HindsightProvider] recall failed: %s", e, exc_info=True)
             return ""
         if not results:
             return ""
@@ -296,7 +296,7 @@ class HindsightProvider(BaseProvider):
             results = [{"text": t, "document_id": d} for t, d in raw]
             return {"results": results, "count": len(results)}
         except Exception as e:
-            log.warning("[HindsightProvider] recall tool failed: %s", e)
+            log.warning("[HindsightProvider] recall tool failed: %s", e, exc_info=True)
             return {"error": str(e)}
 
     @tool("Получить полный текст документа из памяти по его document_id.")
@@ -321,7 +321,7 @@ class HindsightProvider(BaseProvider):
                     "created_at": str(doc.created_at),
                 }
         except Exception as e:
-            log.warning("[HindsightProvider] get_document failed: %s", e)
+            log.warning("[HindsightProvider] get_document failed: %s", e, exc_info=True)
             return {"error": str(e)}
 
     @tool("Глубокий анализ памяти с рассуждением. Используй для сложных вопросов о прошлом.")
@@ -337,5 +337,5 @@ class HindsightProvider(BaseProvider):
             )
             return {"answer": getattr(response, "answer", str(response))}
         except Exception as e:
-            log.warning("[HindsightProvider] reflect failed: %s", e)
+            log.warning("[HindsightProvider] reflect failed: %s", e, exc_info=True)
             return {"error": str(e)}

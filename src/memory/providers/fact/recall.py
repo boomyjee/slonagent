@@ -689,7 +689,7 @@ def _rerank(query: str, results: list["RecallResult"]) -> list["RecallResult"]:
 
         results.sort(key=lambda r: r.score, reverse=True)
     except Exception as e:
-        log.warning("[recall] reranking failed, keeping RRF order: %s", e)
+        log.warning("[recall] reranking failed, keeping RRF order: %s", e, exc_info=True)
 
     return results
 

@@ -295,7 +295,7 @@ class SemanticProvider(BaseProvider):
                 ]
                 return entries
             except Exception as e:
-                log.warning("[SemanticProvider] extraction attempt %d failed: %s", attempt + 1, e)
+                log.warning("[SemanticProvider] extraction attempt %d failed: %s", attempt + 1, e, exc_info=True)
         return []
 
     # ── consolidation & context ────────────────────────────────────────────────
@@ -345,7 +345,7 @@ class SemanticProvider(BaseProvider):
         try:
             entries = await asyncio.to_thread(self._search, user_text[:1500])
         except Exception as e:
-            log.warning("[SemanticProvider] recall for context failed: %s", e)
+            log.warning("[SemanticProvider] recall for context failed: %s", e, exc_info=True)
             return ""
         if not entries:
             return ""
@@ -375,7 +375,7 @@ class SemanticProvider(BaseProvider):
         try:
             entries = await asyncio.to_thread(self._search, query)
         except Exception as e:
-            log.warning("[SemanticProvider] search failed: %s", e)
+            log.warning("[SemanticProvider] search failed: %s", e, exc_info=True)
             return "Ошибка поиска."
         if not entries:
             return "Ничего не найдено."

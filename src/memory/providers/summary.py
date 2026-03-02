@@ -107,5 +107,5 @@ class SummaryProvider(BaseProvider):
 
             log.info("Консолидация завершена.")
         except Exception as e:
-            log.error("Ошибка консолидации: %s", e)
+            log.error("Ошибка консолидации: %s", e, exc_info=True)
 

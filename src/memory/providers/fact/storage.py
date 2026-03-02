@@ -493,7 +493,7 @@ class Storage:
         try:
             return self.table.search(query_vec).limit(limit).to_list()
         except Exception as e:
-            log.warning("[storage] search_vectors failed: %s", e)
+            log.warning("[storage] search_vectors failed: %s", e, exc_info=True)
             return []
 
     def insert_vectors(self, rows: list[dict]) -> None:
@@ -501,7 +501,7 @@ class Storage:
             try:
                 self.table.add(rows)
             except Exception as e:
-                log.warning("[storage] insert_vectors failed: %s", e)
+                log.warning("[storage] insert_vectors failed: %s", e, exc_info=True)
 
     # ── Mental models ────────────────────────────────────────────────────────────
 

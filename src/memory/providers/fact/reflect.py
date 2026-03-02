@@ -508,7 +508,7 @@ async def run_reflect_agent(
                 ),
             )
         except Exception as e:
-            log.warning("[reflect_agent] LLM error iter %d: %s", iteration + 1, e)
+            log.warning("[reflect_agent] LLM error iter %d: %s", iteration + 1, e, exc_info=True)
             has_evidence = bool(
                 available_memory_ids or available_observation_ids or available_mental_model_ids
             )

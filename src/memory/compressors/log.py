@@ -412,7 +412,7 @@ class LogCompressor:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(observations)
         except Exception as e:
-            log.warning("[LogCompressor] write LOG.md failed: %s", e)
+            log.warning("[LogCompressor] write LOG.md failed: %s", e, exc_info=True)
 
     def _split_recent(self, turns: list) -> tuple[list, list]:
         """Отделяет recent_turns (последние до recent_tokens) от turns для наблюдения."""
@@ -449,7 +449,7 @@ class LogCompressor:
             )
             return _parse_observations(response.text.strip())
         except Exception as e:
-            log.error("[LogCompressor] Observer LLM failed: %s", e)
+            log.error("[LogCompressor] Observer LLM failed: %s", e, exc_info=True)
             return ""
 
     async def _run_reflector(self, observations: str, compression_level: int = 0) -> str:
@@ -474,7 +474,7 @@ class LogCompressor:
             )
             reflected = _parse_observations(response.text.strip())
         except Exception as e:
-            log.error("[LogCompressor] Reflector LLM failed: %s", e)
+            log.error("[LogCompressor] Reflector LLM failed: %s", e, exc_info=True)
             return ""
 
         if not reflected:

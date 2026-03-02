@@ -408,7 +408,7 @@ def _parse_facts_from_json(
                 entities=entities,
             )
         except Exception as e:
-            log.error("[retain] failed to create Fact at index %d: %s", i, e)
+            log.error("[retain] failed to create Fact at index %d: %s", i, e, exc_info=True)
             has_malformed = True
             continue
         f._local_causal = local_causal  # временный атрибут, удалим после резолва
@@ -705,7 +705,7 @@ def deduplicate(
         try:
             results = storage.table.search(vec).limit(1).to_list()
         except Exception as e:
-            log.warning("[retain] deduplicate search failed: %s", e)
+            log.warning("[retain] deduplicate search failed: %s", e, exc_info=True)
             new_facts.append(fact)
             new_vectors.append(vec)
             continue
@@ -1017,7 +1017,7 @@ def _store_new_observation(text: str, source_fact_ids: list[str], storage) -> No
         vec = storage.encode_texts([text])[0]
         storage.insert_vectors([{"fact_id": obs_id, "mentioned_at": mentioned_at, "vector": vec}])
     except Exception as e:
-        log.warning("[consolidate] LanceDB write failed for %s: %s", obs_id, e)
+        log.warning("[consolidate] LanceDB write failed for %s: %s", obs_id, e, exc_info=True)
 
 
 def _update_observation(observation_id: str, new_text: str, source_fact_ids: list[str], storage) -> None:
@@ -1058,7 +1058,7 @@ def _update_observation(observation_id: str, new_text: str, source_fact_ids: lis
         vec = storage.encode_texts([new_text])[0]
         storage.insert_vectors([{"fact_id": observation_id, "mentioned_at": now, "vector": vec}])
     except Exception as e:
-        log.warning("[consolidate] LanceDB update failed for %s: %s", observation_id, e)
+        log.warning("[consolidate] LanceDB update failed for %s: %s", observation_id, e, exc_info=True)
 
 
 def _delete_observation(observation_id: str, storage) -> None:
@@ -1070,7 +1070,7 @@ def _delete_observation(observation_id: str, storage) -> None:
     try:
         storage.table.delete(f"fact_id = '{observation_id}'")
     except Exception as e:
-        log.warning("[consolidate] LanceDB delete failed for %s: %s", observation_id, e)
+        log.warning("[consolidate] LanceDB delete failed for %s: %s", observation_id, e, exc_info=True)
 
 
 async def create_observations(storage, client, model_name: str) -> int:

@@ -14,7 +14,7 @@ def save_turns_json(path, turns):
             tmp = f.name
         os.replace(tmp, path)
     except Exception as e:
-        log.warning("save_turns_json %s: %s", path, e)
+        log.warning("save_turns_json %s: %s", path, e, exc_info=True)
         if tmp:
             os.unlink(tmp)
 
@@ -32,7 +32,7 @@ def load_turns_json(path):
     except FileNotFoundError:
         return []
     except Exception as e:
-        log.warning("load_turns_json %s: %s", path, e)
+        log.warning("load_turns_json %s: %s", path, e, exc_info=True)
         return []
 
 
@@ -64,7 +64,7 @@ class Memory:
         try:
             result = await self.compressor.compress(self._turns)
         except Exception as e:
-            log.warning("[memory] compressor failed: %s", e)
+            log.warning("[memory] compressor failed: %s", e, exc_info=True)
             result = self._turns
 
         if len(result) < len(self._turns):

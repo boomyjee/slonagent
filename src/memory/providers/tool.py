@@ -59,7 +59,7 @@ class ToolProvider(BaseProvider):
         except FileNotFoundError:
             return {}
         except Exception as e:
-            log.warning("[ToolProvider] load failed: %s", e)
+            log.warning("[ToolProvider] load failed: %s", e, exc_info=True)
             return {}
 
     def _save(self):
@@ -69,7 +69,7 @@ class ToolProvider(BaseProvider):
                 json.dump(self._tool_stats, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self._tool_stats_file)
         except Exception as e:
-            log.warning("[ToolProvider] save failed: %s", e)
+            log.warning("[ToolProvider] save failed: %s", e, exc_info=True)
 
     async def _consolidate(self, pending: list):
         tool_names: set[str] = set()
@@ -132,7 +132,7 @@ class ToolProvider(BaseProvider):
             entry["content"] = (response.text or "").strip()
             log.info("[ToolProvider] summarized %s", tool_name)
         except Exception as e:
-            log.warning("[ToolProvider] summarize failed for %s: %s", tool_name, e)
+            log.warning("[ToolProvider] summarize failed for %s: %s", tool_name, e, exc_info=True)
 
     async def get_tool_prompt(self, tool_name: str) -> str:
         entry = self._tool_stats.get(tool_name)
