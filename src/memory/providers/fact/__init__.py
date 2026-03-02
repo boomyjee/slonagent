@@ -168,13 +168,12 @@ class FactProvider(BaseProvider):
         obs_lines: list[str] = []
         doc_by_id: dict[str, list[str]] = {}
         for r in response.results:
-            prefix = "[✓]" if r.score >= 0.88 else "[~]" if r.score >= 0.75 else "[?]"
             if r.document_id:
-                doc_by_id.setdefault(r.document_id, []).append(f"  {prefix} {r.fact}")
+                doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}")
             elif r.fact_type == "observation":
-                obs_lines.append(f"{prefix} {r.fact}")
+                obs_lines.append(f"- {r.fact}")
             else:
-                conv_lines.append(f"{prefix} {r.fact}")
+                conv_lines.append(f"- {r.fact}")
 
         parts = []
         if conv_lines:
@@ -198,7 +197,7 @@ class FactProvider(BaseProvider):
 
         body = "\n\n".join(parts)
         return (
-            f'<fact_memories query="{query_label}">\n'
+            f'<fact_memories sorted_by_relevance="1" query="{query_label}">\n'
             + body + "\n"
             "</fact_memories>\n\n"
             "Управляй долгосрочной памятью: fact_recall, fact_reflect"
