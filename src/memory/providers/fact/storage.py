@@ -146,9 +146,81 @@ def ensure_fts(conn: sqlite3.Connection) -> None:
 
 
 
-# ── Storage class ──────────────────────────────────────────────────────────────
+# ── Embedders ──────────────────────────────────────────────────────────────────
 
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+
+class LocalEmbedder:
+    """Локальный embedder через sentence-transformers."""
+
+    def __init__(self, model_name: str):
+        from sentence_transformers import SentenceTransformer
+        from huggingface_hub import try_to_load_from_cache
+        fully_cached = (
+            try_to_load_from_cache(model_name, "model.safetensors") is not None
+            or try_to_load_from_cache(model_name, "pytorch_model.bin") is not None
+        )
+        self._model = SentenceTransformer(model_name, local_files_only=fully_cached)
+        self.dimension = self._model.get_sentence_embedding_dimension()
+
+    def encode_query(self, text: str) -> list:
+        if hasattr(self._model, "prompts") and "query" in (self._model.prompts or {}):
+            return self._model.encode(text, prompt_name="query", normalize_embeddings=True).tolist()
+        return self._model.encode(text, normalize_embeddings=True).tolist()
+
+    def encode_texts(self, texts) -> list:
+        return self._model.encode(texts, normalize_embeddings=True).tolist()
+
+
+class GoogleEmbedder:
+    """Google Gemini embedder (text-embedding-004) с task_type для асимметричного retrieval."""
+
+    def __init__(self, model: str, api_key: str):
+        import httpx
+        from google import genai
+        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
+        http_options = {"httpx_client": http_client} if http_client else {}
+        self._client = genai.Client(api_key=api_key, http_options=http_options)
+        self._model = model
+        # Определяем размерность через тестовый запрос
+        result = self._client.models.embed_content(model=model, contents="test")
+        self.dimension = len(result.embeddings[0].values)
+
+    def encode_query(self, text: str) -> list:
+        result = self._client.models.embed_content(
+            model=self._model,
+            contents=text,
+            config={"task_type": "RETRIEVAL_QUERY"},
+        )
+        return list(result.embeddings[0].values)
+
+    def encode_texts(self, texts) -> list:
+        if isinstance(texts, str):
+            texts = [texts]
+        result = self._client.models.embed_content(
+            model=self._model,
+            contents=texts,
+            config={"task_type": "RETRIEVAL_DOCUMENT"},
+        )
+        return [list(e.values) for e in result.embeddings]
+
+
+def _make_embedder(embedding_model) -> "LocalEmbedder | GoogleEmbedder":
+    """Создаёт embedder по конфигу: строка → LocalEmbedder, dict → по provider."""
+    if isinstance(embedding_model, str):
+        return LocalEmbedder(embedding_model or DEFAULT_EMBEDDING_MODEL)
+    provider = embedding_model.get("provider", "local")
+    if provider == "google":
+        return GoogleEmbedder(
+            model=embedding_model.get("model", "models/text-embedding-004"),
+            api_key=embedding_model["api_key"],
+        )
+    return LocalEmbedder(embedding_model.get("model", DEFAULT_EMBEDDING_MODEL))
+
+
+# ── Storage class ──────────────────────────────────────────────────────────────
 
 
 class Storage:
@@ -170,19 +242,11 @@ class Storage:
 
     # ── Init ─────────────────────────────────────────────────────────────────────
 
-    def __init__(self, sqlite_path: str, lancedb_path: str, embedding_model: str = ""):
-        from sentence_transformers import SentenceTransformer
-        from huggingface_hub import try_to_load_from_cache
-        embedding_model = embedding_model or DEFAULT_EMBEDDING_MODEL
-        fully_cached = (
-            try_to_load_from_cache(embedding_model, "model.safetensors") is not None
-            or try_to_load_from_cache(embedding_model, "pytorch_model.bin") is not None
-        )
-        self._model = SentenceTransformer(embedding_model, local_files_only=fully_cached)
-        self._embedding_model = embedding_model
+    def __init__(self, sqlite_path: str, lancedb_path: str, embedding_model=None):
+        self._embedder = _make_embedder(embedding_model or DEFAULT_EMBEDDING_MODEL)
         self._lancedb_path = lancedb_path
-        self.embed_dim = self._model.get_sentence_embedding_dimension()
-        log.info("[storage] embedding model loaded: %s, dim=%d", embedding_model, self.embed_dim)
+        self.embed_dim = self._embedder.dimension
+        log.info("[storage] embedder loaded: %s, dim=%d", type(self._embedder).__name__, self.embed_dim)
 
         self.conn = self._open_sqlite(sqlite_path)
         self.table, self.mm_table = self._open_lancedb(lancedb_path)
@@ -190,14 +254,12 @@ class Storage:
     # ── Embedding ────────────────────────────────────────────────────────────────
 
     def encode_query(self, text: str) -> list:
-        """Вектор поискового запроса (с query prompt если поддерживается)."""
-        if hasattr(self._model, "prompts") and "query" in (self._model.prompts or {}):
-            return self._model.encode(text, prompt_name="query", normalize_embeddings=True).tolist()
-        return self._model.encode(text, normalize_embeddings=True).tolist()
+        """Вектор поискового запроса (с query task_type/prompt если поддерживается)."""
+        return self._embedder.encode_query(text)
 
     def encode_texts(self, texts) -> list:
         """Батч-кодирование фактов/наблюдений/описаний (str или list[str])."""
-        return self._model.encode(texts, normalize_embeddings=True).tolist()
+        return self._embedder.encode_texts(texts)
 
     # ── Init helpers ────────────────────────────────────────────────────────────
 

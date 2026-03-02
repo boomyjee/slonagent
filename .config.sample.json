@@ -28,7 +28,11 @@
                 "auto_consolidate": true,
                 "retain_mission": "Focus on facts about the user's life, work, relationships, and goals. Prioritize personal details over generic information.",
                 "custom_instructions": "",
-                "embedding_model": ""
+                "embedding_model": {
+                    "provider": "google",
+                    "model": "models/text-embedding-004",
+                    "api_key": "$GEMINI_API_KEY"
+                }
             },
             {
                 "__class__": "src.memory.providers.hindsight.HindsightProvider",
