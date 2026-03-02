@@ -69,7 +69,7 @@ def UITransportWrapper(transport_class):
             while True:
                 text = await self.dashboard.get_incoming()
                 self.dashboard.call_later(self.dashboard.add_chat, "user", text)
-                await self.inject_message(f"[web] {text}")
+                await self.inject_message(text)
 
         async def start(self):
             dashboard_task = asyncio.create_task(self.dashboard.run_async())

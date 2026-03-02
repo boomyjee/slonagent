@@ -244,7 +244,7 @@ class TelegramTransport:
 
     async def inject_message(self, text: str):
         for chat_id in self.allowed_user_ids:
-            sent = await self.bot.send_message(chat_id, text, link_preview_options=self._no_link_preview)
+            sent = await self.bot.send_message(chat_id, "[→]" + text, link_preview_options=self._no_link_preview)
             self._current_message = sent
             self._tool_msg = None
             self._tool_call_text = ""
