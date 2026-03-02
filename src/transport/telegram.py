@@ -214,6 +214,16 @@ class TelegramTransport:
         await self.bot.download_file((await self.bot.get_file(file_id)).file_path, buf)
         return buf.getvalue()
 
+    async def _typing_loop(self, chat_id: int) -> None:
+        try:
+            while True:
+                await self.bot.send_chat_action(chat_id=chat_id, action="typing")
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.debug("[transport] typing loop stopped for %s: %s", chat_id, e)
+
     async def _process_messages(self, messages: list[Message]):
         first = messages[0]
         self._current_message = first
@@ -221,7 +231,7 @@ class TelegramTransport:
         self._tool_call_text = ""
 
         self._skill.set_message(first)
-        await self.bot.send_chat_action(chat_id=first.chat.id, action="typing")
+        typing_task = asyncio.create_task(self._typing_loop(first.chat.id))
 
         message_parts = []
         user_texts = []
@@ -292,6 +302,8 @@ class TelegramTransport:
         except Exception as e:
             logging.exception("Error processing message")
             await first.answer(f"Произошла ошибка при обработке: {e}", link_preview_options=self._no_link_preview)
+        finally:
+            typing_task.cancel()
 
     async def start(self):
         logging.info("Starting TelegramTransport...")
