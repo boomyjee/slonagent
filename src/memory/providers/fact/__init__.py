@@ -168,13 +168,13 @@ class FactProvider(BaseProvider):
         obs_lines: list[str] = []
         doc_by_id: dict[str, list[str]] = {}
         for r in response.results:
-            label = "" if r.score >= 0.88 else " [~]" if r.score >= 0.75 else " [?]"
+            prefix = "[✓]" if r.score >= 0.88 else "[~]" if r.score >= 0.75 else "[?]"
             if r.document_id:
-                doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}{label}")
+                doc_by_id.setdefault(r.document_id, []).append(f"  {prefix} {r.fact}")
             elif r.fact_type == "observation":
-                obs_lines.append(f"- {r.fact}{label}")
+                obs_lines.append(f"{prefix} {r.fact}")
             else:
-                conv_lines.append(f"- {r.fact}{label}")
+                conv_lines.append(f"{prefix} {r.fact}")
 
         parts = []
         if conv_lines:
