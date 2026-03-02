@@ -39,10 +39,10 @@ pip install -r requirements.txt
     "allowed_user_ids": [123456789]
   },
   "agent": {
-    "model_name": "gemini-2.5-flash",
+    "model_name": "gemini-3-flash-preview",
     "api_key": "$GEMINI_API_KEY",
     "memory_compressor": {
-      "__class__": "src.memory.compressors.smart.SmartCompressor",
+      "__class__": "src.memory.compressors.log.LogCompressor",
       "api_key": "$GEMINI_API_KEY",
       "model_name": "gemini-2.5-flash"
     },
@@ -51,6 +51,9 @@ pip install -r requirements.txt
         "__class__": "src.memory.providers.fact.FactProvider",
         "model_name": "gemini-2.5-flash",
         "api_key": "$GEMINI_API_KEY"
+      },
+      {
+        "__class__": "src.memory.providers.personality.PersonalityProvider"
       }
     ],
     "skills": [
@@ -87,9 +90,9 @@ start.bat --cli
 Реализация [Mastra Observational Memory](https://mastra.ai/docs/memory/overview) 1:1 с теми же промптами.
 
 Параметры:
-- `compress_after_tokens` — сколько токенов должно накопиться в истории, прежде чем Observer запустится (default: 1000)
-- `recent_tokens` — сколько токенов свежей истории оставлять несжатыми (default: 500)
-- `reflect_after_tokens` — при каком объёме наблюдений запускается Reflector (default: 2000)
+- `compress_after_tokens` — сколько токенов должно накопиться в истории, прежде чем Observer запустится (default: 30000)
+- `recent_tokens` — сколько токенов свежей истории оставлять несжатыми (default: 6000)
+- `reflect_after_tokens` — при каком объёме наблюдений запускается Reflector (default: 40000)
 
 ## Провайдеры памяти
 
@@ -107,7 +110,7 @@ start.bat --cli
 
 ### FactProvider
 
-Локальная реализация [Hindsight](https://github.com/plastic-labs/hindsight) без внешних серверов.
+Локальная реализация [Hindsight](https://github.com/vectorize-io/hindsight) без внешних серверов.
 
 Пайплайн при каждой консолидации:
 1. **retain** — разбивает диалог на чанки, LLM извлекает факты, сущности дедуплицируются через EntityResolver, факты сохраняются в SQLite + LanceDB
