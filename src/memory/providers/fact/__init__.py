@@ -26,7 +26,7 @@ from agent import tool
 from src.memory.memory import Memory
 from src.memory.providers.base import BaseProvider
 from src.memory.providers.fact.retain import RetainItem, retain
-from src.memory.providers.fact.recall import recall_async, RecallResponse
+from src.memory.providers.fact.recall import recall_async
 from src.memory.providers.fact.storage import Storage
 
 log = logging.getLogger(__name__)
@@ -152,34 +152,28 @@ class FactProvider(BaseProvider):
         retain(items, self._llm, self._model_name, self.storage,
                with_observations=self._auto_consolidate)
 
-    # ── Internal recall ──────────────────────────────────────────────────────────
-
-    async def _recall(self, query: str, max_tokens: int | None = None) -> RecallResponse:
+    async def _recall_text(self, query: str, query_label: str, max_tokens: int | None = None, budget: str = "mid", min_score: float = 0.0) -> str:
+        """Recall + форматирование результатов в читаемый текст для агента."""
         q_vec = await asyncio.to_thread(self.storage.encode_query, query)
-        return await recall_async(
+        response = await recall_async(
             query, q_vec, self.storage,
             max_tokens=max_tokens or self._recall_max_tokens,
+            budget=budget,
             rerank_model=self._rerank_model,
         )
-
-    # ── Context prompt ───────────────────────────────────────────────────────────
-
-    async def get_context_prompt(self, user_text: str = "") -> str:
-        """Автоматический recall по тексту пользователя → системный промпт."""
-        if not self._auto_recall or not user_text:
-            return ""
-        try:
-            response = await self._recall(user_text[:1500])
-        except Exception as e:
-            log.warning("[FactProvider] recall for context failed: %s", e, exc_info=True)
-            return ""
         if not response.results:
             return ""
+
+        if min_score:
+            relevant = [r for r in response.results if r.score >= min_score]
+            results = relevant or response.results[:3]
+        else:
+            results = response.results
 
         conv_lines: list[str] = []
         obs_lines: list[str] = []
         doc_by_id: dict[str, list[str]] = {}
-        for r in response.results:
+        for r in results:
             if r.document_id:
                 doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}")
             elif r.fact_type == "observation":
@@ -198,21 +192,34 @@ class FactProvider(BaseProvider):
                 + "\n".join(lines)
             )
 
-        staleness_note = ""
+        if not parts:
+            return ""
+
         if response.is_stale:
-            staleness_note = (
-                f"\n⚠ Память требует консолидации "
-                f"({response.pending_consolidation} необработанных фактов). "
-                "Используй fact_reflect для глубокого анализа."
+            parts.append(
+                f"⚠ Память не до конца обработана "
+                f"({response.pending_consolidation} необработанных фактов — наблюдения ещё синтезируются)."
             )
 
+        body = "\n\n".join(parts)
         return (
-            "<fact_memories>\n"
-            + "\n\n".join(parts)
-            + staleness_note + "\n"
+            f'<fact_memories query="{query_label}">\n'
+            + body + "\n"
             "</fact_memories>\n\n"
             "Управляй долгосрочной памятью: fact_recall, fact_reflect"
         )
+
+    AUTO_RECALL_MIN_SCORE = 0.78
+
+    async def get_context_prompt(self, user_text: str = "") -> str:
+        """Автоматический recall по тексту пользователя → системный промпт."""
+        if not self._auto_recall or not user_text:
+            return ""
+        try:
+            return await self._recall_text(user_text[:1500], query_label="$LAST_USER_MESSAGE", min_score=self.AUTO_RECALL_MIN_SCORE)
+        except Exception as e:
+            log.warning("[FactProvider] recall for context failed: %s", e, exc_info=True)
+            return ""
 
     # ── Tools ────────────────────────────────────────────────────────────────────
 
@@ -230,29 +237,8 @@ class FactProvider(BaseProvider):
         budget: Annotated[str, "Глубина поиска: low / mid / high (по умолчанию mid)"] = "mid",
     ) -> dict:
         try:
-            q_vec = await asyncio.to_thread(self.storage.encode_query, query[:1500])
-            response = await recall_async(
-                query[:1500], q_vec, self.storage,
-                max_tokens=max_tokens, budget=budget,
-                rerank_model=self._rerank_model,
-            )
-            results = [
-                {
-                    "fact": r.fact,
-                    "fact_type": r.fact_type,
-                    "occurred": r.occurred_start,
-                    "document_id": r.document_id,
-                    "score": round(r.score, 3),
-                    "sources": r.sources,
-                }
-                for r in response.results
-            ]
-            return {
-                "results": results,
-                "count": len(results),
-                "freshness": response.freshness,
-                "pending_consolidation": response.pending_consolidation,
-            }
+            body = await self._recall_text(query[:1500], query_label="$TOOL_QUERY", max_tokens=max_tokens, budget=budget)
+            return {"memories": body or "Ничего не найдено."}
         except Exception as e:
             log.warning("[FactProvider] recall tool failed: %s", e, exc_info=True)
             return {"error": str(e)}
