@@ -113,7 +113,7 @@ class PersonalityProvider(BaseProvider):
         name: Annotated[str, "Имя субличности"],
         content: Annotated[str, "Полное новое содержимое субличности"],
     ) -> dict:
-        if name not in self._active:
+        if name != self.COMMON_NAME and name not in self._active:
             return {"error": f"Субличность '{name}' не активна. Активные: {self._active}. Сначала вызови personality_load."}
         if not os.path.exists(self._path(name)):
             return {"error": f"Субличность '{name}' не найдена."}
