@@ -68,9 +68,10 @@ class Memory:
             result = self._turns
 
         if len(result) < len(self._turns):
+            old_count = len(self._turns)
             self._turns = result
             save_turns_json(self._state_file, self._turns)
-            log.info("[memory] compressor: %d → %d turns", len(self._turns) + (len(self._turns) - len(result)), len(result))
+            log.info("[memory] compressor: %d → %d turns", old_count, len(result))
 
         return self._turns
 

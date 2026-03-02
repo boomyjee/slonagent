@@ -15,7 +15,7 @@ class CliTransport:
         print(f"[system]\n{text}\n")
 
     async def send_thinking(self, text: str):
-        print(f"[думает...]\n")
+        print(f"[думает...]\n{text}\n")
 
     async def on_tool_call(self, name: str, args: dict):
         print(f"[{name}] {args}")

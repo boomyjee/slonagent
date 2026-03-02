@@ -1,4 +1,6 @@
 import warnings
+# Перехват warnings — единственный способ перекрыть то, что другие модули
+# (в т.ч. зависимости) меняют формат логов и включают предупреждения внутри себя.
 _original_warn = warnings.warn
 def _warn(msg, category=UserWarning, stacklevel=1, source=None, **kw):
     if issubclass(category, (DeprecationWarning, ResourceWarning, FutureWarning)):
