@@ -149,11 +149,6 @@ class FactProvider(BaseProvider):
         try:
             await retain(items, self._llm, self._model_name, self.storage,
                          with_observations=self._auto_consolidate)
-            n_doc = sum(1 for i in items if i.document_id)
-            log.info(
-                "[FactProvider] retain %d items (%d doc, %d conv)",
-                len(items), n_doc, len(items) - n_doc,
-            )
         except Exception as e:
             log.warning("[FactProvider] retain failed: %s", e)
 

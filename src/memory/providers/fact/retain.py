@@ -1156,6 +1156,7 @@ async def retain(
     """
     Полный retain pipeline: LLM → dedup → store → graph links → create_observations.
     """
+    log.info("[retain] started: %d items", len(items))
     facts, chunk_meta = await extract_facts(items, client, model_name)
     if not facts:
         return []
