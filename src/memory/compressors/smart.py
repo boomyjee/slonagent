@@ -157,11 +157,11 @@ class SmartCompressor:
 
             new_parts = []
             for part in turn.get("parts", []):
-                if not isinstance(part, dict) or "functionResponse" not in part:
+                if not isinstance(part, dict) or "function_response" not in part:
                     new_parts.append(part)
                     continue
 
-                fr = part["functionResponse"]
+                fr = part["function_response"]
                 resp_text = json.dumps(fr.get("response", {}), ensure_ascii=False)
                 part_tokens = len(resp_text) // 4
 
@@ -177,7 +177,7 @@ class SmartCompressor:
                     compact_text += f"\npreview: {resp_text[:self.preview_char_length]}…"
 
                 new_parts.append({
-                    "functionResponse": {
+                    "function_response": {
                         "name": fr.get("name"),
                         "response": {"result": compact_text},
                     }
@@ -265,10 +265,10 @@ class SmartCompressor:
                     continue
                 if text := part.get("text"):
                     lines.append(f"[{role}]: {text}")
-                elif fc := part.get("functionCall"):
+                elif fc := part.get("function_call"):
                     args = json.dumps(fc.get("args", {}), ensure_ascii=False)
                     lines.append(f"[{role}/tool_call]: {fc.get('name')} {args}")
-                elif fr := part.get("functionResponse"):
+                elif fr := part.get("function_response"):
                     resp = json.dumps(fr.get("response", {}), ensure_ascii=False)
                     if len(resp) > 500:
                         resp = resp[:500] + "…"

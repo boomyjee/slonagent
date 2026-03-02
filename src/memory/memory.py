@@ -3,13 +3,31 @@ import json, logging, os, sys, tempfile
 log = logging.getLogger(__name__)
 from datetime import datetime, timezone
 
+from google.genai import types
+
+def _part_to_jsonable(p) -> dict:
+    """Part (dict или объект SDK) → dict для JSON. Один формат — snake_case (как в SDK), model_dump(mode='json') даёт bytes→base64."""
+    if hasattr(p, "model_dump"):
+        return p.model_dump(mode="json", exclude_none=True)
+    return types.Part.model_validate(p).model_dump(mode="json", exclude_none=True)
+
+def _turn_to_dict(turn) -> dict:
+    """Turn (dict или Content) → единый dict для хранения и провайдеров. Parts в snake_case (формат SDK), JSON-ready."""
+    if isinstance(turn, dict):
+        parts = [_part_to_jsonable(p) for p in turn.get("parts", [])]
+        return {**turn, "parts": parts}
+    role = getattr(turn, "role", None)
+    role = getattr(role, "value", role) if role is not None and hasattr(role, "value") else role
+    parts = [_part_to_jsonable(p) for p in (getattr(turn, "parts", None) or [])]
+    return {"role": role or "model", "parts": parts}
+
+
 def save_turns_json(path, turns):
     dir_ = os.path.dirname(os.path.abspath(path))
     tmp = None
     try:
-        data = [t for t in turns if isinstance(t, dict) and all(isinstance(p, dict) for p in t.get("parts", []))]
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=dir_, delete=False, suffix=".tmp") as f:
-            for turn in data:
+            for turn in turns:
                 f.write(json.dumps(turn, ensure_ascii=False) + "\n")
             tmp = f.name
         os.replace(tmp, path)
@@ -50,14 +68,17 @@ class Memory:
     def count_tokens(turns: list) -> int:
         total = 0
         for turn in turns:
-            if isinstance(turn, dict):
-                parts = turn.get("parts", [])
-                for part in parts:
-                    if isinstance(part, dict) and "text" in part:
-                        total += len(part["text"]) // 4
-            else:
-                for part in getattr(turn, "parts", None) or []:
-                    total += len(getattr(part, "text", "") or "") // 4
+            if not isinstance(turn, dict):
+                continue
+            for part in turn.get("parts", []):
+                if not isinstance(part, dict):
+                    continue
+                if "text" in part:
+                    total += len(part["text"]) // 4
+                elif fc := part.get("function_call"):
+                    total += (len(fc.get("name", "")) + len(json.dumps(fc.get("args", {}), ensure_ascii=False))) // 4
+                elif fr := part.get("function_response"):
+                    total += (len(fr.get("name", "")) + len(json.dumps(fr.get("response", {}), ensure_ascii=False))) // 4
         return total
 
     async def get_contents(self) -> list:
@@ -76,10 +97,11 @@ class Memory:
         return self._turns
 
     async def add_turn(self, turn):
-        if isinstance(turn, dict) and "_timestamp" not in turn:
-            turn["_timestamp"] = datetime.now(timezone.utc).isoformat()
-        self._turns.append(turn)
-        if isinstance(turn, dict) and turn.get("role") == "model":
+        normalized = _turn_to_dict(turn)
+        if "_timestamp" not in normalized:
+            normalized["_timestamp"] = datetime.now(timezone.utc).isoformat()
+        self._turns.append(normalized)
+        if normalized.get("role") == "model":
             save_turns_json(self._state_file, self._turns)
         for provider in self.providers:
-            await provider.add_turn(turn)
+            await provider.add_turn(normalized)
