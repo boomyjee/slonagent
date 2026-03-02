@@ -733,7 +733,7 @@ def deduplicate(
 
 # ── Graph link building ────────────────────────────────────────────────────────
 
-SEMANTIC_LINK_THRESHOLD = 0.85
+SEMANTIC_LINK_THRESHOLD = 0.65
 TEMPORAL_LINK_WINDOW_HOURS = 24
 
 
