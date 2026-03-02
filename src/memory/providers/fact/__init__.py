@@ -152,7 +152,7 @@ class FactProvider(BaseProvider):
         retain(items, self._llm, self._model_name, self.storage,
                with_observations=self._auto_consolidate)
 
-    async def _recall_text(self, query: str, query_label: str, max_tokens: int | None = None, budget: str = "mid", min_score: float = 0.0) -> str:
+    async def _recall_text(self, query: str, query_label: str, max_tokens: int | None = None, budget: str = "mid") -> str:
         """Recall + форматирование результатов в читаемый текст для агента."""
         q_vec = await asyncio.to_thread(self.storage.encode_query, query)
         response = await recall_async(
@@ -164,22 +164,17 @@ class FactProvider(BaseProvider):
         if not response.results:
             return ""
 
-        if min_score:
-            relevant = [r for r in response.results if r.score >= min_score]
-            results = relevant or response.results[:3]
-        else:
-            results = response.results
-
         conv_lines: list[str] = []
         obs_lines: list[str] = []
         doc_by_id: dict[str, list[str]] = {}
-        for r in results:
+        for r in response.results:
+            label = "" if r.score >= 0.88 else " [~]" if r.score >= 0.75 else " [?]"
             if r.document_id:
-                doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}")
+                doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}{label}")
             elif r.fact_type == "observation":
-                obs_lines.append(f"- {r.fact}")
+                obs_lines.append(f"- {r.fact}{label}")
             else:
-                conv_lines.append(f"- {r.fact}")
+                conv_lines.append(f"- {r.fact}{label}")
 
         parts = []
         if conv_lines:
@@ -209,14 +204,12 @@ class FactProvider(BaseProvider):
             "Управляй долгосрочной памятью: fact_recall, fact_reflect"
         )
 
-    AUTO_RECALL_MIN_SCORE = 0.78
-
     async def get_context_prompt(self, user_text: str = "") -> str:
         """Автоматический recall по тексту пользователя → системный промпт."""
         if not self._auto_recall or not user_text:
             return ""
         try:
-            return await self._recall_text(user_text[:1500], query_label="$LAST_USER_MESSAGE", min_score=self.AUTO_RECALL_MIN_SCORE)
+            return await self._recall_text(user_text[:1500], query_label="$LAST_USER_MESSAGE")
         except Exception as e:
             log.warning("[FactProvider] recall for context failed: %s", e, exc_info=True)
             return ""
