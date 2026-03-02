@@ -275,7 +275,7 @@ class TelegramTransport:
             if content:
                 message_parts.append({
                     "text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>",
-                    "_document_id": f"[{attachment.file_unique_id}]{filename}",
+                    "_document_id": f"{attachment.file_unique_id}_{filename}",
                 })
             else:
                 message_parts.append({"text": f"<attached_file {attrs} />"})
