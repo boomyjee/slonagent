@@ -150,7 +150,7 @@ class FactProvider(BaseProvider):
             await retain(items, self._llm, self._model_name, self.storage,
                          with_observations=self._auto_consolidate)
         except Exception as e:
-            log.warning("[FactProvider] retain failed: %s", e)
+            log.warning("[FactProvider] retain failed: %s", e, exc_info=True)
 
     # ── Internal recall ──────────────────────────────────────────────────────────
 

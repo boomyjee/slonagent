@@ -327,7 +327,7 @@ class Storage:
     ) -> list[sqlite3.Row]:
         return self.conn.execute(
             """
-            SELECT fact_id FROM facts
+            SELECT fact_id, mentioned_at FROM facts
             WHERE mentioned_at BETWEEN ? AND ? AND fact_id != ?
             LIMIT ?
             """,
@@ -498,7 +498,10 @@ class Storage:
 
     def insert_vectors(self, rows: list[dict]) -> None:
         if rows:
-            self.table.add(rows)
+            try:
+                self.table.add(rows)
+            except Exception as e:
+                log.warning("[storage] insert_vectors failed: %s", e)
 
     # ── Mental models ────────────────────────────────────────────────────────────
 
