@@ -1031,7 +1031,7 @@ def _max_str_date(dates) -> Optional[str]:
     return max(valid) if valid else None
 
 
-def _store_new_observation(text: str, source_fact_ids: list[str], storage) -> None:
+def _store_new_observation(text: str, source_fact_ids: list[str], storage, tags: list[str] | None = None) -> None:
     now = datetime.now(timezone.utc).isoformat()
     obs_id = str(uuid.uuid4())
 
@@ -1042,9 +1042,10 @@ def _store_new_observation(text: str, source_fact_ids: list[str], storage) -> No
 
     storage.conn.execute(
         """INSERT OR IGNORE INTO facts
-           (fact_id, fact, fact_type, occurred_start, occurred_end, mentioned_at, source_fact_ids)
-           VALUES (?, ?, 'observation', ?, ?, ?, ?)""",
-        (obs_id, text, occurred_start, occurred_end, mentioned_at, json.dumps(source_fact_ids)),
+           (fact_id, fact, fact_type, occurred_start, occurred_end, mentioned_at, source_fact_ids, tags)
+           VALUES (?, ?, 'observation', ?, ?, ?, ?, ?)""",
+        (obs_id, text, occurred_start, occurred_end, mentioned_at,
+         json.dumps(source_fact_ids), json.dumps(tags or [])),
     )
     storage.conn.commit()
     try:
@@ -1054,14 +1055,15 @@ def _store_new_observation(text: str, source_fact_ids: list[str], storage) -> No
         log.warning("[consolidate] LanceDB write failed for %s: %s", obs_id, e, exc_info=True)
 
 
-def _update_observation(observation_id: str, new_text: str, source_fact_ids: list[str], storage) -> None:
+def _update_observation(observation_id: str, new_text: str, source_fact_ids: list[str], storage, tags: list[str] | None = None) -> None:
     row = storage.conn.execute(
-        "SELECT source_fact_ids FROM facts WHERE fact_id = ? AND fact_type = 'observation'",
+        "SELECT source_fact_ids, tags FROM facts WHERE fact_id = ? AND fact_type = 'observation'",
         (observation_id,),
     ).fetchone()
     if not row:
         return
     existing_ids = json.loads(row["source_fact_ids"] or "[]")
+    merged_tags = list(set(json.loads(row["tags"] or "[]")) | set(tags or []))
     merged_ids = list(dict.fromkeys(existing_ids + source_fact_ids))
 
     source_rows = storage.get_facts_by_ids(source_fact_ids)
@@ -1073,12 +1075,13 @@ def _update_observation(observation_id: str, new_text: str, source_fact_ids: lis
         """UPDATE facts SET
                fact = ?,
                source_fact_ids = ?,
+               tags = ?,
                occurred_start = CASE WHEN occurred_start IS NULL OR (? IS NOT NULL AND ? < occurred_start) THEN ? ELSE occurred_start END,
                occurred_end   = CASE WHEN occurred_end   IS NULL OR (? IS NOT NULL AND ? > occurred_end)   THEN ? ELSE occurred_end   END,
                mentioned_at   = CASE WHEN mentioned_at   IS NULL OR (? IS NOT NULL AND ? > mentioned_at)   THEN ? ELSE mentioned_at   END
            WHERE fact_id = ? AND fact_type = 'observation'""",
         (
-            new_text, json.dumps(merged_ids),
+            new_text, json.dumps(merged_ids), json.dumps(merged_tags),
             new_occurred_start, new_occurred_start, new_occurred_start,
             new_occurred_end,   new_occurred_end,   new_occurred_end,
             new_mentioned_at,   new_mentioned_at,   new_mentioned_at,
@@ -1126,48 +1129,57 @@ async def create_observations(storage, client, model_name: str) -> int:
         if not batch:
             break
 
-        # recall существующих observations для каждого факта (последовательно — SQLite не thread-safe)
-        per_fact_obs = []
+        # Группируем по тегам — факты с разными тегами не смешиваем в одном наблюдении
+        tag_groups: dict[tuple, list] = {}
         for r in batch:
-            per_fact_obs.append(await _find_related_observations(r["fact"], storage))
+            tag_key = tuple(sorted(json.loads(r["tags"] or "[]")))
+            tag_groups.setdefault(tag_key, []).append(r)
 
-        # Union observations (дедупликация) + per-fact mapping для security check
-        seen_ids: set[str] = set()
-        union_obs: list = []
-        per_fact_obs_ids: dict[str, set[str]] = {}
-        for fact_row, obs_list in zip(batch, per_fact_obs):
-            fid = fact_row["fact_id"]
-            per_fact_obs_ids[fid] = {o.fact_id for o in obs_list}
-            for o in obs_list:
-                if o.fact_id not in seen_ids:
-                    seen_ids.add(o.fact_id)
-                    union_obs.append(o)
+        for tag_key, group in tag_groups.items():
+            group_tags = list(tag_key)
 
-        result = await _consolidate_llm_batch(batch, union_obs, storage, client, model_name)
-        valid_fact_ids = {r["fact_id"] for r in batch}
+            # recall существующих observations для каждого факта (последовательно — SQLite не thread-safe)
+            per_fact_obs = []
+            for r in group:
+                per_fact_obs.append(await _find_related_observations(r["fact"], storage))
 
-        for create in result.creates:
-            valid_sources = [fid for fid in create.source_fact_ids if fid in valid_fact_ids]
-            if valid_sources:
-                await asyncio.to_thread(_store_new_observation, create.text, valid_sources, storage)
-                n_created += 1
+            # Union observations (дедупликация) + per-fact mapping для security check
+            seen_ids: set[str] = set()
+            union_obs: list = []
+            per_fact_obs_ids: dict[str, set[str]] = {}
+            for fact_row, obs_list in zip(group, per_fact_obs):
+                fid = fact_row["fact_id"]
+                per_fact_obs_ids[fid] = {o.fact_id for o in obs_list}
+                for o in obs_list:
+                    if o.fact_id not in seen_ids:
+                        seen_ids.add(o.fact_id)
+                        union_obs.append(o)
 
-        for update in result.updates:
-            valid_sources = [fid for fid in update.source_fact_ids if fid in valid_fact_ids]
-            if not valid_sources:
-                continue
-            if not any(update.observation_id in per_fact_obs_ids.get(fid, set()) for fid in valid_sources):
-                log.debug("[consolidate] rejected update — obs %s not in recall for sources", update.observation_id)
-                continue
-            await asyncio.to_thread(_update_observation, update.observation_id, update.text, valid_sources, storage)
-            n_updated += 1
+            result = await _consolidate_llm_batch(group, union_obs, storage, client, model_name)
+            valid_fact_ids = {r["fact_id"] for r in group}
 
-        for delete in result.deletes:
-            if delete.observation_id not in seen_ids:
-                log.debug("[consolidate] rejected delete — obs %s not in recall", delete.observation_id)
-                continue
-            await asyncio.to_thread(_delete_observation, delete.observation_id, storage)
-            n_deleted += 1
+            for create in result.creates:
+                valid_sources = [fid for fid in create.source_fact_ids if fid in valid_fact_ids]
+                if valid_sources:
+                    await asyncio.to_thread(_store_new_observation, create.text, valid_sources, storage, group_tags)
+                    n_created += 1
+
+            for update in result.updates:
+                valid_sources = [fid for fid in update.source_fact_ids if fid in valid_fact_ids]
+                if not valid_sources:
+                    continue
+                if not any(update.observation_id in per_fact_obs_ids.get(fid, set()) for fid in valid_sources):
+                    log.debug("[consolidate] rejected update — obs %s not in recall for sources", update.observation_id)
+                    continue
+                await asyncio.to_thread(_update_observation, update.observation_id, update.text, valid_sources, storage, group_tags)
+                n_updated += 1
+
+            for delete in result.deletes:
+                if delete.observation_id not in seen_ids:
+                    log.debug("[consolidate] rejected delete — obs %s not in recall", delete.observation_id)
+                    continue
+                await asyncio.to_thread(_delete_observation, delete.observation_id, storage)
+                n_deleted += 1
 
         await asyncio.to_thread(storage.mark_consolidated, [r["fact_id"] for r in batch])
         n_processed += len(batch)
