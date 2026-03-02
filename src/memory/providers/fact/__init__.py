@@ -190,7 +190,7 @@ class FactProvider(BaseProvider):
             parts.append("Из разговоров:\n" + "\n".join(conv_lines))
         for doc_id, lines in doc_by_id.items():
             parts.append(
-                f"Из документа {doc_id} (факты документа, не реальные события):\n"
+                f"Из документа [id={doc_id}] (факты документа, не реальные события):\n"
                 + "\n".join(lines)
             )
 
@@ -213,7 +213,7 @@ class FactProvider(BaseProvider):
     # ── Tools ────────────────────────────────────────────────────────────────────
 
     @tool("Семантический поиск по долгосрочной памяти (факты, события, контекст).")
-    async def fact_recall(
+    async def recall(
         self,
         query: Annotated[str, "Поисковый запрос"],
         max_tokens: Annotated[int, "Мягкий лимит токенов в ответе (по умолчанию 2000)"] = 2_000,
@@ -243,13 +243,13 @@ class FactProvider(BaseProvider):
                 "pending_consolidation": response.pending_consolidation,
             }
         except Exception as e:
-            log.warning("[FactProvider] fact_recall tool failed: %s", e)
+            log.warning("[FactProvider] recall tool failed: %s", e)
             return {"error": str(e)}
 
     @tool("Получить полный текст документа из памяти по его document_id.")
-    async def fact_get_document(
+    async def get_document(
         self,
-        document_id: Annotated[str, "ID документа (из результатов fact_recall)"],
+        document_id: Annotated[str, "ID документа (из результатов factprovider_recall)"],
     ) -> dict:
         try:
             rows = await asyncio.to_thread(
@@ -266,11 +266,11 @@ class FactProvider(BaseProvider):
                 "chunk_count": len(chunks),
             }
         except Exception as e:
-            log.warning("[FactProvider] fact_get_document failed: %s", e)
+            log.warning("[FactProvider] get_document failed: %s", e)
             return {"error": str(e)}
 
     @tool("Глубокий анализ памяти с рассуждением. Используй для сложных вопросов о прошлом.")
-    async def fact_reflect(
+    async def reflect(
         self,
         query: Annotated[str, "Вопрос для глубокого анализа"],
     ) -> dict:
@@ -283,5 +283,5 @@ class FactProvider(BaseProvider):
                 model_name=self._model_name,
             )
         except Exception as e:
-            log.warning("[FactProvider] fact_reflect failed: %s", e)
+            log.warning("[FactProvider] reflect failed: %s", e)
             return {"error": str(e)}
