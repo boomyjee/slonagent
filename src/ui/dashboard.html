@@ -82,24 +82,41 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   document.getElementById('pane-' + t.dataset.tab).classList.add('active');
 }));
 
-function addChat(role, text, ts) {
+function addChat(chatId, role, text, ts) {
   const p = document.getElementById('chat-msgs');
-  const d = document.createElement('div'); d.className = 'msg';
+  const d = document.createElement('div');
+  d.className = 'msg';
+  d.dataset.chatId = String(chatId ?? '');
   d.innerHTML = `<div class="msg-hdr ${role}">${ts} ${role==='user'?'Вы':'Агент'}</div><div class="msg-body">${esc(text)}</div>`;
-  p.appendChild(d); bottom(p);
+  const el = chatId ? p.querySelector('.msg[data-chat-id="' + String(chatId) + '"]') : null;
+  if (el) el.replaceWith(d);
+  else p.appendChild(d);
+  bottom(p);
 }
 
-function addColl(title, text, ts) {
+function addColl(collapsibleId, title, text, ts) {
   const p = document.getElementById('chat-msgs');
-  const d = document.createElement('div'); d.className = 'coll';
-  d.innerHTML = `<div class="coll-hdr"><span class="arr">&#9658;</span><span>${esc(title)}</span><span style="color:#555;margin-left:auto;font-size:11px">${ts}</span></div><div class="coll-body">${esc(text)}</div>`;
-  d.querySelector('.coll-hdr').onclick = () => {
-    const b = d.querySelector('.coll-body'), a = d.querySelector('.arr');
-    const open = b.style.display === 'block';
-    b.style.display = open ? 'none' : 'block';
-    a.innerHTML = open ? '&#9658;' : '&#9660;';
-  };
-  p.appendChild(d); bottom(p);
+  const el = collapsibleId ? p.querySelector('.coll[data-collapsible-id="' + String(collapsibleId) + '"]') : null;
+  if (el) {
+    el.querySelector('.coll-body').innerHTML = esc(text);
+    const hdrSpan = el.querySelector('.coll-hdr span:nth-child(2)');
+    if (hdrSpan) hdrSpan.textContent = title;
+    const tsSpan = el.querySelector('.coll-hdr span:last-child');
+    if (tsSpan) tsSpan.textContent = ts;
+  } else {
+    const d = document.createElement('div');
+    d.className = 'coll';
+    d.dataset.collapsibleId = String(collapsibleId ?? '');
+    d.innerHTML = `<div class="coll-hdr"><span class="arr">&#9658;</span><span>${esc(title)}</span><span style="color:#555;margin-left:auto;font-size:11px">${ts}</span></div><div class="coll-body">${esc(text)}</div>`;
+    d.querySelector('.coll-hdr').onclick = () => {
+      const b = d.querySelector('.coll-body'), a = d.querySelector('.arr');
+      const open = b.style.display === 'block';
+      b.style.display = open ? 'none' : 'block';
+      a.innerHTML = open ? '&#9658;' : '&#9660;';
+    };
+    p.appendChild(d);
+  }
+  bottom(p);
 }
 
 function addLog(cat, level, text, ts) {
@@ -139,8 +156,8 @@ function connect() {
   ws.onerror = () => ws.close();
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
-    if (ev.type === 'chat') { addChat(ev.role, ev.text, ev.ts); if (ev.role === 'assistant') btn.disabled = false; }
-    else if (ev.type === 'collapsible') addColl(ev.title, ev.text, ev.ts);
+    if (ev.type === 'chat') { addChat(ev.chat_id, ev.role, ev.text, ev.ts); if (ev.role === 'assistant') btn.disabled = false; }
+    else if (ev.type === 'collapsible') addColl(ev.collapsible_id, ev.title, ev.text, ev.ts);
     else if (ev.type === 'log') addLog(ev.category, ev.level, ev.text, ev.ts);
   };
 }

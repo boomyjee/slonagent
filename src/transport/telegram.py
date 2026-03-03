@@ -215,32 +215,33 @@ class TelegramTransport:
         except Exception:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
-    async def _answer(self, text: str, expandable: bool = False, prefix: str = ""):
-        if expandable:
-            for chunk in _split_message(text):
-                await self._current_message.answer(
-                    f"<blockquote expandable>{html.escape(prefix + chunk)}</blockquote>",
-                    parse_mode="HTML",
-                    link_preview_options=self._no_link_preview,
-                )
-        else:
-            for chunk in _split_message(text):
-                html_chunk = _markdown_to_html(chunk)
+    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = ""):
+        if messages is None:
+            messages = []
+        chunks = _split_message(text)
+        for m, chunk in enumerate(chunks):
+            if expandable:
+                body = f"<blockquote expandable>{html.escape(prefix + chunk)}</blockquote>"
+            else:
+                body = _markdown_to_html(chunk)
+            if m < len(messages):
                 try:
-                    await self._current_message.answer(
-                        html_chunk,
-                        parse_mode="HTML",
-                        link_preview_options=self._no_link_preview,
-                    )
+                    messages[m] = await messages[m].edit_text(body, parse_mode="HTML", link_preview_options=self._no_link_preview)
                 except Exception as e:
-                    log.debug("[transport] HTML send failed, falling back to plain: %s", e)
-                    await self._current_message.answer(
-                        chunk,
-                        link_preview_options=self._no_link_preview,
-                    )
+                    if "message is not modified" not in str(e):
+                        raise
+            else:
+                messages.append(await self._current_message.answer(body, parse_mode="HTML", link_preview_options=self._no_link_preview))
+        for msg in messages[len(chunks):]:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+        del messages[len(chunks):]
+        return messages
 
-    async def send_message(self, text: str):
-        await self._answer((text or "").strip() or "[…]")
+    async def send_message(self, text: str, stream_id=None):
+        return await self._answer((text or "").strip() or "[…]", messages=stream_id)
 
     async def inject_message(self, text: str):
         for chat_id in self.allowed_user_ids:
@@ -260,8 +261,8 @@ class TelegramTransport:
         if not self.verbose: return
         await self._answer(text[:3500] + ("..." if len(text) > 3500 else ""), expandable=True, prefix="🔧 ")
 
-    async def send_thinking(self, text: str):
-        await self._answer(text, expandable=True, prefix="🧠 ")
+    async def send_thinking(self, text: str, stream_id=None):
+        return await self._answer(text, expandable=True, prefix="🧠 ", messages=stream_id)
 
     async def send_code(self, lang: str, code: str):
         await self._answer(f"```{lang}\n{code}\n```")

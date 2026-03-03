@@ -137,17 +137,31 @@ class Agent:
         return result
 
 
-    async def _llm(self, contents, config, label: str = ""):
+    async def _llm_stream(self, contents, config, label: str = ""):
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
-                return await asyncio.to_thread(
-                    self.client.models.generate_content,
+                stream = await self.client.aio.models.generate_content_stream(
                     model=self.model_name, contents=contents, config=config,
                 )
+                text, thinking_text = "", ""
+                stream_id, thinking_id = None, None
+                function_call_parts = []
+                
+                async for chunk in stream:
+                    parts = chunk.candidates[0].content.parts or [] if chunk.candidates else []
+                    for p in parts:
+                        if getattr(p, "thought", False) and getattr(p, "text", None):
+                            thinking_text += p.text
+                            thinking_id = await self.transport.send_thinking(thinking_text, thinking_id)
+                        elif getattr(p, "function_call", None):
+                            function_call_parts.append(p)
+                        elif getattr(p, "text", None) and not getattr(p, "function_call", None):
+                            text += p.text
+                            stream_id = await self.transport.send_message(text, stream_id)
+                return function_call_parts, text
             except Exception as e:
-                if attempt + 1 == max_retries or "503" not in str(e) and "UNAVAILABLE" not in str(e):
-                    raise
+                if attempt + 1 == max_retries or "503" not in str(e) and "UNAVAILABLE" not in str(e): raise
                 wait = delay * 2 ** attempt
                 logging.warning("[agent] LLM %s unavailable, retry %d/%d in %ds", label, attempt + 1, max_retries, wait)
                 await asyncio.sleep(wait)
@@ -222,12 +236,6 @@ class Agent:
             await self.transport.send_system_prompt("[Инструменты модели]\n"+"\n".join(tools_info))
 
 
-        async def send_thinking(response):
-            parts = response.candidates[0].content.parts or []
-            thought_parts = [p.text for p in parts if getattr(p, "thought", False) and p.text]
-            if thought_parts:
-                await self.transport.send_thinking("\n\n".join(thought_parts))
-
         try:
             config = types.GenerateContentConfig(
                 system_instruction="\n\n".join(system_parts),
@@ -236,17 +244,17 @@ class Agent:
                 thinking_config=types.ThinkingConfig(include_thoughts=self.include_thoughts),
             )
             logging.info("[agent] → LLM %s", self.model_name)
-            response = await self._llm(self.strip_contents_private(await self.memory.get_contents()), config)
+            function_call_parts, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), config)
             logging.info("[agent] ← LLM")
-            await send_thinking(response)
 
             iteration = 0
-            while response.function_calls and iteration < self.max_iterations:
-                await self.memory.add_turn(response.candidates[0].content)
+            while function_call_parts and iteration < self.max_iterations:
+                await self.memory.add_turn({"role": "model", "parts": function_call_parts})
 
                 fn_response_parts = []
                 extra_parts = []
-                for tool_call in response.function_calls:
+                for function_call_part in function_call_parts:
+                    tool_call = function_call_part.function_call
                     logging.info("Инструмент: %s", tool_call.name)
                     skill = tool_to_skill.get(tool_call.name)
                     if not skill:
@@ -267,13 +275,11 @@ class Agent:
 
                 iteration += 1
                 logging.info("[agent] → LLM iteration %d", iteration)
-                response = await self._llm(self.strip_contents_private(await self.memory.get_contents()), config, str(iteration))
+                function_call_parts, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), config, str(iteration))
                 logging.info("[agent] ← LLM iteration %d", iteration)
-                await send_thinking(response)
 
-            await self.transport.send_message(response.text or "")
-            await self.memory.add_turn({"role": "model", "parts": [{"text": response.text or ""}]})
+            await self.memory.add_turn({"role": "model", "parts": [{"text": text or ""}]})
 
         except Exception as e:
-            logging.exception("Ошибка при обращении к Gemini")
-            await self.transport.send_message(f"Ошибка: {e}")
+            logging.warning("Ошибка при обращении к Gemini: %s", e, exc_info=True)
+            await self.transport.send_message(f"Ошибка при обращении к Gemini: {e}")

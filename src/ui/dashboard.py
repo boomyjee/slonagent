@@ -39,11 +39,11 @@ class Dashboard:
         except RuntimeError:
             pass
 
-    def add_chat(self, role: str, text: str) -> None:
-        self._emit({"type": "chat", "role": role, "text": text})
+    def add_chat(self, role: str, text: str, chat_id=None) -> None:
+        self._emit({"type": "chat", "role": role, "text": text, "chat_id": chat_id})
 
-    def add_collapsible(self, title: str, text: str) -> None:
-        self._emit({"type": "collapsible", "title": title, "text": text})
+    def add_collapsible(self, title: str, text: str, collapsible_id=None) -> None:
+        self._emit({"type": "collapsible", "title": title, "text": text, "collapsible_id": collapsible_id})
 
     def add_log(self, category: str, level: str, text: str) -> None:
         self._emit({"type": "log", "category": category, "level": level, "text": text})
