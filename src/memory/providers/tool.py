@@ -75,15 +75,18 @@ class ToolProvider(BaseProvider):
         tool_names: set[str] = set()
         call = None
         call_time = None
+        contents = []
         for turn in pending:
             if not isinstance(turn, dict): continue
+            text_parts = []
             for part in turn.get("parts", []):
                 fc = fr = None
                 if not isinstance(part, dict):
                     continue
                 fc = part.get("function_call")
                 fr = part.get("function_response")
-
+                if "text" in part:
+                    text_parts.append(part["text"])
                 if fc:
                     call = fc
                     call_time = turn.get("_timestamp")
@@ -105,9 +108,13 @@ class ToolProvider(BaseProvider):
                             pass
 
                         tool_names.add(call["name"])
+                        text_parts.append(f"\n[Tool call: {call['name']}({json.dumps(call.get('args') or {}, ensure_ascii=False)}]\n")
+                        text_parts.append(f"\n[Tool response: {call['name']} → {json.dumps(res.get('response') or {}, ensure_ascii=False)}]\n")
                     call = None
+            if text_parts:
+                contents.append({"role": turn.get("role", "model"), "parts": [{"text": p} for p in text_parts]})
 
-        contents = Agent.strip_contents_private(pending)
+        contents = Agent.strip_contents_private(contents)
         if tool_names:
             await asyncio.gather(*[self._summarize_tool_use(name, contents) for name in tool_names])
             log.info("[ToolProvider] consolidated %d tools: %s", len(tool_names), list(tool_names))
