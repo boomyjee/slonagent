@@ -148,6 +148,7 @@ class Agent:
                 stream_id, thinking_id = None, None
                 function_call_parts = []
                 
+                last_chunk = None
                 async for chunk in stream:
                     parts = chunk.candidates[0].content.parts or [] if chunk.candidates else []
                     for p in parts:
@@ -159,6 +160,11 @@ class Agent:
                         elif getattr(p, "text", None) and not getattr(p, "function_call", None):
                             text += p.text
                             stream_id = await self.transport.send_message(text, stream_id)
+                    last_chunk = chunk
+                if last_chunk and (u := last_chunk.usage_metadata):
+                    logging.info("[agent] tokens: in=%s out=%s total=%s %s",
+                        u.prompt_token_count, u.candidates_token_count, u.total_token_count,
+                        f"(iter {label})" if label else "")
                 return function_call_parts, text
             except Exception as e:
                 if attempt + 1 == max_retries or "503" not in str(e) and "UNAVAILABLE" not in str(e): raise
