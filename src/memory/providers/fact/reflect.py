@@ -474,7 +474,7 @@ async def run_reflect_agent(
         return _auto_config()
 
     contents: list = [
-        types.Content(role="user", parts=[types.Part.from_text(query)])
+        types.Content(role="user", parts=[types.Part.from_text(text=query)])
     ]
 
     available_memory_ids:       set[str] = set()
