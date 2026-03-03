@@ -86,6 +86,8 @@ class Memory:
                     total += (len(fc.get("name", "")) + len(json.dumps(fc.get("args", {}), ensure_ascii=False))) // 4
                 elif fr := part.get("function_response"):
                     total += (len(fr.get("name", "")) + len(json.dumps(fr.get("response", {}), ensure_ascii=False))) // 4
+                elif part.get("inline_data") or part.get("file_data"):
+                    total += 258  # ~кол-во визуальных токенов в low-res режиме Gemini
         return total
 
     async def get_contents(self) -> list:
