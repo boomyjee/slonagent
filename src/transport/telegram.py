@@ -178,6 +178,7 @@ class TelegramTransport:
         self._current_message: Message | None = None
         self._media_groups: dict[str, list[Message]] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
+        self._pending_answer = {}
 
     def set_agent(self, agent):
         self.agent = agent
@@ -215,9 +216,30 @@ class TelegramTransport:
         except Exception:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
+    # throttle
     async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = ""):
-        if messages is None:
+        if messages is None: 
             messages = []
+            await self._do_answer(text, messages, expandable, prefix)
+            return messages
+
+        key = id(messages)
+        if self._pending_answer.get(key):
+            self._pending_answer[key] = text
+            return messages
+        self._pending_answer[key] = text
+
+        THROTLE_DELAY = 1.0
+        async def _do():
+            await asyncio.sleep(THROTLE_DELAY)
+            recent_text = self._pending_answer[key]
+            self._pending_answer[key] = None
+            await self._do_answer(recent_text,messages,expandable,prefix)
+        
+        asyncio.create_task(_do())
+        return messages
+
+    async def _do_answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = ""):
         chunks = _split_message(text)
         for m, chunk in enumerate(chunks):
             if expandable:
@@ -238,7 +260,6 @@ class TelegramTransport:
             except Exception:
                 pass
         del messages[len(chunks):]
-        return messages
 
     async def send_message(self, text: str, stream_id=None):
         return await self._answer((text or "").strip() or "[…]", messages=stream_id)
