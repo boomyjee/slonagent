@@ -70,27 +70,36 @@ def _markdown_to_html(text: str) -> str:
     return text
 
 
-def _split_message(content: str, max_len: int = 3500) -> list[str]:
-    """Split content into chunks ≤ max_len, preferring line breaks over word breaks.
-
-    Default limit is 3500 (not 4096) to leave headroom for HTML tag expansion
-    when markdown is converted after splitting.
+def _split_message_to_html(content: str, converter, max_len: int = 4096) -> list[str]:
+    """Split content into html chunks ≤ max_len, preferring line breaks over word breaks.
     """
-    if len(content) <= max_len:
-        return [content]
     chunks: list[str] = []
     while content:
-        if len(content) <= max_len:
-            chunks.append(content)
+        converted = converter(content)
+
+        if len(converted) <= max_len:
+            chunks.append(converted)
             break
-        cut = content[:max_len]
-        pos = cut.rfind('\n')
-        if pos == -1:
-            pos = cut.rfind(' ')
-        if pos == -1:
-            pos = max_len
-        chunks.append(content[:pos])
-        content = content[pos:].lstrip()
+
+        limit = max_len
+        step = 100
+
+        while True:
+            cut = content[:limit]
+            pos = cut.rfind('\n')
+            if pos == -1:
+                pos = cut.rfind(' ')
+            if pos == -1:
+                pos = limit
+
+            converted = converter(content[:pos])
+            if len(converted) <= max_len or limit <= step:
+                chunks.append(converted)
+                content = content[pos:].lstrip()
+                break
+            else:
+                limit -= step
+
     return chunks
 
 
@@ -189,7 +198,6 @@ class TelegramTransport:
         pass
 
     async def on_tool_call(self, name: str, args: dict):
-        if not self.verbose: return
         lines = "\n".join(f"  {html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
         call_text = f"<b>[{html.escape(name)}]</b>\n{lines}" if lines else f"<b>[{html.escape(name)}]</b>"
         self._tool_call_text = call_text[:2000]
@@ -217,10 +225,10 @@ class TelegramTransport:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
     # throttle
-    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = ""):
+    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = "", max_chunks = None):
         if messages is None: 
             messages = []
-            await self._do_answer(text, messages, expandable, prefix)
+            await self._do_answer(text, messages, expandable, prefix, max_chunks)
             return messages
 
         key = id(messages)
@@ -234,18 +242,35 @@ class TelegramTransport:
             await asyncio.sleep(THROTLE_DELAY)
             recent_text = self._pending_answer[key]
             self._pending_answer[key] = None
-            await self._do_answer(recent_text,messages,expandable,prefix)
+            await self._do_answer(recent_text,messages,expandable,prefix, max_chunks)
         
         asyncio.create_task(_do())
         return messages
 
-    async def _do_answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = ""):
-        chunks = _split_message(text)
-        for m, chunk in enumerate(chunks):
-            if expandable:
-                body = f"<blockquote expandable>{html.escape(prefix + chunk)}</blockquote>"
-            else:
-                body = _markdown_to_html(chunk)
+    async def _do_answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = "", max_chunks = None):
+
+        if expandable:
+            escaped_prefix = html.escape(prefix)
+            overhead = len(escaped_prefix) + 36  # <blockquote expandable>…</blockquote>
+            converter = html.escape
+        else:
+            overhead = 0
+            converter = _markdown_to_html
+
+        if max_chunks: overhead += 3
+        raw_chunks = _split_message_to_html(text, converter, max_len=4096 - overhead)            
+
+        if max_chunks:
+            if len(raw_chunks) > max_chunks:
+                raw_chunks = raw_chunks[:max_chunks]
+                raw_chunks[max_chunks-1] += "..."
+
+        if expandable:
+            bodies = [f"<blockquote expandable>{escaped_prefix}{c}</blockquote>" for c in raw_chunks]
+        else:
+            bodies = raw_chunks
+
+        for m, body in enumerate(bodies):
             if m < len(messages):
                 try:
                     messages[m] = await messages[m].edit_text(body, parse_mode="HTML", link_preview_options=self._no_link_preview)
@@ -254,12 +279,12 @@ class TelegramTransport:
                         raise
             else:
                 messages.append(await self._current_message.answer(body, parse_mode="HTML", link_preview_options=self._no_link_preview))
-        for msg in messages[len(chunks):]:
+        for msg in messages[len(bodies):]:
             try:
                 await msg.delete()
             except Exception:
                 pass
-        del messages[len(chunks):]
+        del messages[len(bodies):]
 
     async def send_message(self, text: str, stream_id=None):
         return await self._answer((text or "").strip() or "[…]", messages=stream_id)
@@ -280,7 +305,7 @@ class TelegramTransport:
 
     async def send_system_prompt(self, text: str):
         if not self.verbose: return
-        await self._answer(text[:3500] + ("..." if len(text) > 3500 else ""), expandable=True, prefix="🔧 ")
+        await self._answer(text, expandable=True, prefix="🔧 ", max_chunks=1)
 
     async def send_thinking(self, text: str, stream_id=None):
         return await self._answer(text, expandable=True, prefix="🧠 ", messages=stream_id)
