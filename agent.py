@@ -224,15 +224,23 @@ class Agent:
             await self.transport.start()
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
-        resp = await asyncio.to_thread(
-            self.client.models.generate_content,
-            model=self.transcription_model_name,
-            contents=types.Content(role="user", parts=[
-                types.Part.from_bytes(data=data, mime_type=mime_type),
-                types.Part.from_text(text="Transcribe the audio. Return only the transcript text."),
-            ]),
-        )
-        return resp.text
+        max_retries, delay = 5, 0.5
+        for attempt in range(max_retries):
+            try:
+                resp = await asyncio.to_thread(
+                    self.client.models.generate_content,
+                    model=self.transcription_model_name,
+                    contents=types.Content(role="user", parts=[
+                        types.Part.from_bytes(data=data, mime_type=mime_type),
+                        types.Part.from_text(text="Transcribe the audio. Return only the transcript text."),
+                    ]),
+                )
+                return resp.text
+            except Exception as e:
+                if attempt + 1 == max_retries: raise
+                wait = delay * 2 ** attempt
+                logging.warning("[agent] transcribe_audio retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, e)
+                await asyncio.sleep(wait)
 
     async def process_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
         for skill in self.skills:
