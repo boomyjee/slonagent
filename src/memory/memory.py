@@ -6,17 +6,12 @@ from datetime import datetime, timezone
 from google.genai import types
 
 def _part_to_jsonable(p) -> dict:
-    """Part (dict или объект SDK) → dict для JSON. Snake_case, JSON-safe (bytes только из SDK → base64 через model_dump)."""
+    """Part (dict или объект SDK) → dict для JSON. SDK-объекты сериализуем через model_dump (bytes→base64 и т.п.)."""
     if hasattr(p, "model_dump"):
         return p.model_dump(mode="json", exclude_none=True)
     if not isinstance(p, dict):
         return {}
-    # Только поля Part — лишнее (transport _document_id и т.п.) отбрасываем
-    allowed = {k: v for k, v in p.items() if k in types.Part.model_fields}
-    if not allowed:
-        text = p.get("content") or p.get("text") or ""
-        return {"text": text} if text else {}
-    return allowed
+    return dict(p)
 
 def _turn_to_dict(turn) -> dict:
     """Turn (dict или Content) → единый dict для хранения и провайдеров. Parts в snake_case (формат SDK), JSON-ready."""
