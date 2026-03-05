@@ -23,7 +23,6 @@ Staleness API:
 """
 import asyncio
 import logging
-import math
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -42,7 +41,7 @@ RERANK_CANDIDATES = 30       # pre-filter перед reranking (как у Hindsi
 # budget → множитель кандидатов (как у Hindsight: low < mid < high)
 _BUDGET_FACTOR = {"low": 1, "mid": 2, "high": 4}
 
-RERANK_MODEL_DEFAULT = "ms-marco-MultiBERT-L-12"
+RERANK_MODEL_DEFAULT = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 
 # Lazy singletons по имени модели
 _rankers: dict[str, object] = {}
@@ -637,33 +636,27 @@ def _rrf_merge(
     ]
 
 
-# ── Cross-encoder reranking (FlashRank) ───────────────────────────────────────
+# ── Cross-encoder reranking (SentenceTransformers) ────────────────────────────
 
 def _get_ranker(model_name: str = ""):
-    """Lazy singleton FlashRank ranker по имени модели."""
+    """Lazy singleton SentenceTransformers CrossEncoder по имени модели."""
     model_name = model_name or RERANK_MODEL_DEFAULT
     if model_name not in _rankers:
-        from flashrank import Ranker
-        _rankers[model_name] = Ranker(model_name=model_name, cache_dir=".cache/flashrank")
-        log.info("[recall] FlashRank ranker loaded: %s", model_name)
+        from sentence_transformers import CrossEncoder
+        _rankers[model_name] = CrossEncoder(model_name)
+        log.info("[recall] CrossEncoder loaded: %s", model_name)
     return _rankers[model_name]
-
-
-def _sigmoid(x: float) -> float:
-    return 1.0 / (1.0 + math.exp(-x))
 
 
 def _rerank(query: str, results: list["RecallResult"], rerank_model: str = "") -> list["RecallResult"]:
     """
-    Cross-encoder reranking аналогично Hindsight.
+    Cross-encoder reranking через SentenceTransformers CrossEncoder.
 
     Формат документа (как у Hindsight):
       [Date: June 5, 2022 (2022-06-05)] fact_text
     """
     if not results:
         return results
-
-    from flashrank import RerankRequest
 
     passages = []
     for r in results:
@@ -678,16 +671,15 @@ def _rerank(query: str, results: list["RecallResult"], rerank_model: str = "") -
                 pass
         if r.context:
             doc_text = f"{r.context}: {doc_text}"
-        passages.append({"id": r.fact_id, "text": doc_text})
+        passages.append(doc_text)
 
     try:
         ranker = _get_ranker(rerank_model)
-        request = RerankRequest(query=query, passages=passages)
-        reranked = ranker.rerank(request)
+        pairs = [(query, doc) for doc in passages]
+        scores = ranker.predict(pairs)
 
-        id_to_score = {item["id"]: _sigmoid(item["score"]) for item in reranked}
-        for r in results:
-            r.score = id_to_score.get(r.fact_id, r.score)
+        for r, score in zip(results, scores):
+            r.score = float(score)
 
         results.sort(key=lambda r: r.score, reverse=True)
     except Exception as e:
