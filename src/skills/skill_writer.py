@@ -81,7 +81,7 @@ class MySkill(Skill):
                 return {"status": "active", "code": f.read()}
         return {"error": f"Скилл {name!r} не найден"}
 
-    @bypass("install_package")
+    @bypass("install_package", "Установить Python-пакет: /install_package <пакет>")
     def install_package(self, package: str) -> str:
         if not package:
             return "Использование: /install_package <пакет>"
@@ -93,7 +93,7 @@ class MySkill(Skill):
             return f"✅ {result.stdout.strip().splitlines()[-1]}"
         return f"❌ {result.stderr.strip()}"
 
-    @bypass("approve_skill")
+    @bypass("approve_skill", "Активировать pending-скилл: /approve_skill <имя>")
     def approve_skill(self, name: str) -> str:
         if name not in self._pending:
             return f"Нет pending-скилла {name!r}"
@@ -108,7 +108,7 @@ class MySkill(Skill):
             f.write(code)
         return f"Скилл {name!r} активирован, тулы: {result['tools']}"
 
-    @bypass("delete_skill")
+    @bypass("delete_skill", "Удалить скилл: /delete_skill <имя>")
     def delete_skill(self, name: str) -> str:
         if name in self._pending:
             self._pending.pop(name)
@@ -119,7 +119,7 @@ class MySkill(Skill):
             return f"Скилл {name!r} удалён"
         return f"Скилл {name!r} не найден"
 
-    @bypass("skills")
+    @bypass("skills", "Список кастомных скиллов", standalone=True)
     def skills_list(self, args: str = "") -> str:
         rows = [f"pending  {n}" for n in sorted(self._pending)]
         rows += [f"active   {n}" for n in sorted(self._active)]

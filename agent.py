@@ -13,10 +13,12 @@ def tool(description: str):
     return decorator
 
 
-def bypass(command: str):
+def bypass(command: str, description: str = "", standalone: bool = False):
     def decorator(fn):
         fn._is_bypass = True
         fn._bypass_command = command
+        fn._bypass_description = description
+        fn._bypass_standalone = standalone
         return fn
     return decorator
 
@@ -26,9 +28,15 @@ class Skill:
         self.agent = None
         self._tool_map = {}  # tool_name → method_name
         self._bypass_handlers = {}
+        self._bypass_descriptions: dict[str, str] = {}  # command → description (internal)
+        self._bypass_standalone: set[str] = set()  # команды, работающие без параметров
         for name, fn in inspect.getmembers(type(self), predicate=inspect.isfunction):
             if getattr(fn, "_is_bypass", False):
                 self._bypass_handlers[fn._bypass_command] = fn
+                if fn._bypass_description:
+                    self._bypass_descriptions[fn._bypass_command] = fn._bypass_description
+                if fn._bypass_standalone:
+                    self._bypass_standalone.add(fn._bypass_command)
 
         def param_schema(hint, desc):
             _GEMINI_TYPES = { str: types.Type.STRING, int: types.Type.INTEGER, float: types.Type.NUMBER, bool: types.Type.BOOLEAN }
@@ -58,6 +66,17 @@ class Skill:
                 parameters=types.Schema(type=types.Type.OBJECT, properties=properties, required=required),
             ))
             self._tool_map[tool_name] = name
+
+    def get_bypass_commands(self, standalone_only: bool = False) -> dict[str, str]:
+        """Возвращает {команда: описание} для bypass-обработчиков с описанием.
+
+        standalone_only=True — только команды, работающие без параметров.
+        """
+        return {
+            cmd: desc
+            for cmd, desc in self._bypass_descriptions.items()
+            if not standalone_only or cmd in self._bypass_standalone
+        }
 
     def is_bypass_command(self, text: str) -> bool:
         cmd = text.strip().split()[0] if text.strip() else ""

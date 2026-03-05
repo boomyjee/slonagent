@@ -22,7 +22,7 @@ class ConfigSkill(Skill):
         if not os.path.exists(config_path):
             self._save({})
 
-    @bypass("config")
+    @bypass("config", "Управление конфигом <key>* <value>*", standalone=True)
     def config_command(self, args: str) -> str:
         parts = args.strip().split(None, 1)
         if not parts:
@@ -78,7 +78,7 @@ class ConfigSkill(Skill):
 
         return f"Неизвестная подкоманда.\n{HELP}"
 
-    @bypass("restart")
+    @bypass("restart", "Перезапустить бота", standalone=True)
     def restart_command(self, args: str) -> str:
         asyncio.get_event_loop().call_later(1, os.execv, sys.executable, [sys.executable] + sys.argv)
         return "Перезапускаюсь..."

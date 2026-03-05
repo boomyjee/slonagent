@@ -4,7 +4,7 @@ import io, os, re, asyncio, logging, json, mimetypes
 log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions
+from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, BotCommand
 from aiogram.client.session.aiohttp import AiohttpSession
 from agent import Skill, tool
 from google.genai import types
@@ -432,4 +432,12 @@ class TelegramTransport:
 
     async def start(self):
         logging.info("Starting TelegramTransport...")
+        commands = [
+            BotCommand(command=cmd, description=desc)
+            for skill in (self.agent.skills if self.agent else [])
+            for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
+        ]
+        if commands:
+            await self.bot.set_my_commands(commands)
+            logging.info("[telegram] registered %d commands", len(commands))
         await self.dp.start_polling(self.bot)
