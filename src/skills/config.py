@@ -44,7 +44,7 @@ class ConfigSkill(Skill):
     def config_command(self, args: str) -> str:
         parts = args.strip().split(None, 1)
         if not parts:
-            return f"```json\n{json.dumps(self._load(), ensure_ascii=False, indent=2)}\n```"
+            return f"```json\n{_format_json(self._load())}\n```"
 
         subcommand = parts[0].lower()
         rest = parts[1] if len(parts) > 1 else ""
@@ -55,8 +55,8 @@ class ConfigSkill(Skill):
                 value = self._get(cfg, rest.strip())
                 if value is None:
                     return f"Ключ не найден: {rest.strip()}"
-                return f"{rest.strip()} = {json.dumps(value, ensure_ascii=False, indent=2)}"
-            return f"```json\n{json.dumps(cfg, ensure_ascii=False, indent=2)}\n```"
+                return f"{rest.strip()} = {_format_json(value)}"
+            return f"```json\n{_format_json(cfg)}\n```"
 
         if subcommand == "write":
             if not rest:
