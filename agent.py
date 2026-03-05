@@ -342,6 +342,10 @@ class Agent:
 
                 if self._stop_event.is_set(): logging.info("[agent] stopped by user during iter %d, response not saved", iteration); return
 
+            if function_call_parts:
+                logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
+                await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
+
             await self.memory.add_turn({"role": "model", "parts": [{"text": text or ""}]})
 
         except Exception as e:
