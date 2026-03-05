@@ -58,6 +58,7 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Cascadia Code','Fira C
   <div class="tab" data-tab="agent">Agent</div>
   <div class="tab" data-tab="memory">Memory</div>
   <div class="tab" data-tab="transport">Transport</div>
+  <div class="tab" data-tab="recall">Recall</div>
 </div>
 <div class="content">
   <div class="pane active chat-wrap" id="pane-chat">
@@ -70,6 +71,13 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Cascadia Code','Fira C
   <div class="pane" id="pane-agent"></div>
   <div class="pane" id="pane-memory"></div>
   <div class="pane" id="pane-transport"></div>
+  <div class="pane chat-wrap" id="pane-recall">
+    <div class="chat-msgs" id="recall-msgs"></div>
+    <div class="chat-input">
+      <textarea id="recall-ta" placeholder="Поисковый запрос..." rows="1"></textarea>
+      <button id="recall-btn">Найти</button>
+    </div>
+  </div>
 </div>
 <script>
 const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -130,6 +138,8 @@ function addLog(cat, level, text, ts) {
 const st = document.getElementById('st');
 const ta = document.getElementById('chat-ta');
 const btn = document.getElementById('chat-btn');
+const rta = document.getElementById('recall-ta');
+const rbtn = document.getElementById('recall-btn');
 let ws;
 
 function sendMsg() {
@@ -140,14 +150,26 @@ function sendMsg() {
   btn.disabled = true;
 }
 
-ta.addEventListener('input', () => {
-  ta.style.height = '38px';
-  ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
-});
-ta.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
-});
+function sendRecall() {
+  const text = rta.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const p = document.getElementById('recall-msgs');
+  const d = document.createElement('div');
+  d.className = 'msg';
+  d.innerHTML = `<div class="msg-hdr user">→ запрос</div><div class="msg-body">${esc(text)}</div>`;
+  p.appendChild(d); p.scrollTop = p.scrollHeight;
+  ws.send(JSON.stringify({type: 'recall_query', text}));
+  rta.value = ''; rta.style.height = '38px';
+  rbtn.disabled = true;
+}
+
+ta.addEventListener('input', () => { ta.style.height = '38px'; ta.style.height = Math.min(ta.scrollHeight, 120) + 'px'; });
+ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
 btn.addEventListener('click', sendMsg);
+
+rta.addEventListener('input', () => { rta.style.height = '38px'; rta.style.height = Math.min(rta.scrollHeight, 120) + 'px'; });
+rta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRecall(); } });
+rbtn.addEventListener('click', sendRecall);
 
 function connect() {
   ws = new WebSocket('ws://' + location.host + '/ws');
@@ -159,6 +181,13 @@ function connect() {
     if (ev.type === 'chat') { addChat(ev.chat_id, ev.role, ev.text, ev.ts); if (ev.role === 'assistant') btn.disabled = false; }
     else if (ev.type === 'collapsible') addColl(ev.collapsible_id, ev.title, ev.text, ev.ts);
     else if (ev.type === 'log') addLog(ev.category, ev.level, ev.text, ev.ts);
+    else if (ev.type === 'recall_result') {
+      const p = document.getElementById('recall-msgs');
+      const d = document.createElement('div'); d.className = 'msg';
+      d.innerHTML = `<div class="msg-hdr assistant">${ev.ts} ← результат</div><div class="msg-body">${esc(ev.text)}</div>`;
+      p.appendChild(d); p.scrollTop = p.scrollHeight;
+      rbtn.disabled = false;
+    }
   };
 }
 connect();

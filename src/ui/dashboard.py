@@ -6,6 +6,8 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+from typing import Awaitable, Callable
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
@@ -21,6 +23,10 @@ class Dashboard:
         self._incoming: asyncio.Queue = asyncio.Queue()
         self._clients: set = set()
         self._buffer: deque = deque(maxlen=_BUFFER_SIZE)
+        self._recall_fn: Callable[[str], Awaitable[str]] | None = None
+
+    def set_recall_fn(self, fn: Callable[[str], Awaitable[str]]) -> None:
+        self._recall_fn = fn
 
     async def get_incoming(self) -> str:
         return await self._incoming.get()
@@ -88,6 +94,10 @@ class Dashboard:
                         msg = json.loads(data)
                         if msg.get("type") == "user_message" and msg.get("text", "").strip():
                             await self._incoming.put(msg["text"].strip())
+                        elif msg.get("type") == "recall_query" and msg.get("text", "").strip() and self._recall_fn:
+                            query = msg["text"].strip()
+                            result = await self._recall_fn(query)
+                            await websocket.send_text(json.dumps({"type": "recall_result", "query": query, "text": result or "Ничего не найдено.", "ts": datetime.now().strftime("%H:%M:%S")}, ensure_ascii=False))
                     except Exception:
                         pass
             except WebSocketDisconnect:

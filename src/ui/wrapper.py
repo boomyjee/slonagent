@@ -76,6 +76,11 @@ def UITransportWrapper(transport_class):
                 await self.inject_message(text)
 
         async def start(self):
+            from src.memory.providers.fact import FactProvider
+            for provider in getattr(getattr(self, "agent", None), "memory", None) and self.agent.memory.providers or []:
+                if isinstance(provider, FactProvider):
+                    self.dashboard.set_recall_fn(lambda q, p=provider: p._recall_text(q, query_label="$DASHBOARD"))
+                    break
             dashboard_task = asyncio.create_task(self.dashboard.run_async())
             transport_task = asyncio.create_task(super().start())
             web_chat_task = asyncio.create_task(self._web_chat_task())
