@@ -232,7 +232,7 @@ class FactProvider(BaseProvider):
     async def recall(
         self,
         query: Annotated[str, "Поисковый запрос — утверждение или вопрос, не набор ключевых слов"],
-        max_tokens: Annotated[int, "Мягкий лимит токенов в ответе (по умолчанию 2000)"] = 2_000,
+        max_tokens: Annotated[int, "Мягкий лимит токенов в ответе (по умолчанию 10000)"] = 10_000,
         budget: Annotated[str, "Глубина поиска: low / mid / high (по умолчанию mid)"] = "mid",
     ) -> dict:
         try:
