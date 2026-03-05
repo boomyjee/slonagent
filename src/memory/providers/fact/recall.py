@@ -480,13 +480,13 @@ def _temporal_proximity(
     best_date: Optional[datetime] = None
     try:
         if row["occurred_start"] and row["occurred_end"]:
-            s = datetime.fromisoformat(row["occurred_start"])
-            e = datetime.fromisoformat(row["occurred_end"])
+            s = datetime.fromisoformat(row["occurred_start"]).replace(tzinfo=None)
+            e = datetime.fromisoformat(row["occurred_end"]).replace(tzinfo=None)
             best_date = s + (e - s) / 2
         elif row["occurred_start"]:
-            best_date = datetime.fromisoformat(row["occurred_start"])
+            best_date = datetime.fromisoformat(row["occurred_start"]).replace(tzinfo=None)
         elif row["mentioned_at"]:
-            best_date = datetime.fromisoformat(row["mentioned_at"])
+            best_date = datetime.fromisoformat(row["mentioned_at"]).replace(tzinfo=None)
     except (ValueError, TypeError):
         pass
 

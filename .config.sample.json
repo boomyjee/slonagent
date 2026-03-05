@@ -68,7 +68,8 @@
         "skills": [
             {"__class__": "src.skills.config.ConfigSkill"},
             {"__class__": "src.skills.sandbox.SandboxSkill"},
-            {"__class__": "src.skills.skill_writer.SkillWriterSkill"}
+            {"__class__": "src.skills.skill_writer.SkillWriterSkill"},
+            {"__class__": "src.skills.nano_banana.NanoBananaSkill", "api_key": "$GEMINI_API_KEY"}
         ]
     }
 }
