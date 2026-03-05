@@ -1174,12 +1174,9 @@ async def _create_observations_impl(storage, client, model_name: str) -> int:
 
         for tag_key, group in groups.items():
             group_tags = list(tag_key)
-            group_context = group[0].get("context") or None
 
-            # recall существующих observations для каждого факта — параллельно, фильтр по тегам группы
-            per_fact_obs = await asyncio.gather(
-                *[_find_related_observations(r["fact"], storage, tags=group_tags) for r in group]
-            )
+            # recall существующих observations для каждого факта, фильтр по тегам группы
+            per_fact_obs = [await _find_related_observations(r["fact"], storage, tags=group_tags) for r in group]
 
             # Union observations (дедупликация) + per-fact mapping для security check
             seen_ids: set[str] = set()
@@ -1199,7 +1196,7 @@ async def _create_observations_impl(storage, client, model_name: str) -> int:
             for create in result.creates:
                 valid_sources = [fid for fid in create.source_fact_ids if fid in valid_fact_ids]
                 if valid_sources:
-                    await asyncio.to_thread(_store_new_observation, create.text, valid_sources, storage, group_tags, group_context)
+                    await asyncio.to_thread(_store_new_observation, create.text, valid_sources, storage, group_tags)
                     n_created += 1
 
             for update in result.updates:
@@ -1209,7 +1206,7 @@ async def _create_observations_impl(storage, client, model_name: str) -> int:
                 if not any(update.observation_id in per_fact_obs_ids.get(fid, set()) for fid in valid_sources):
                     log.debug("[consolidate] rejected update — obs %s not in recall for sources", update.observation_id)
                     continue
-                await asyncio.to_thread(_update_observation, update.observation_id, update.text, valid_sources, storage, group_tags, group_context)
+                await asyncio.to_thread(_update_observation, update.observation_id, update.text, valid_sources, storage, group_tags)
                 n_updated += 1
 
             for delete in result.deletes:
