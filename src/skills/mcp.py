@@ -69,7 +69,7 @@ class McpSkill(Skill):
                     for t in tools_result.tools:
                         gemini_name = f"{prefix}_{_sanitize(t.name)}"
                         self._tool_sessions[gemini_name] = (session, t.name)
-                        self.tools.append(types.FunctionDeclaration(
+                        self._tools.append(types.FunctionDeclaration(
                             name=gemini_name,
                             description=t.description or "",
                             parameters=_json_schema_to_gemini(

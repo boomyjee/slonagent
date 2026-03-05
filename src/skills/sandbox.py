@@ -26,7 +26,60 @@ class SandboxSkill(Skill):
             suffix = hashlib.md5(self.workspace_dir.encode()).hexdigest()[:8]
             container_name = f"slonagent_{suffix}"
         self.container_name = container_name
+        self.tools_dir = os.path.join(self.workspace_dir, "tools")
+        os.makedirs(self.tools_dir, exist_ok=True)
+        self._script_map: dict[str, tuple[str, str]] = {}  # tool_name → (script_path, ext)
         super().__init__()
+
+    def get_tools(self) -> list:
+        return self._tools + self._scan_script_tools()
+
+    def _scan_script_tools(self) -> list:
+        self._script_map = {}
+        result = []
+        for fname in sorted(os.listdir(self.tools_dir)):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in (".py", ".sh"): continue
+            name = os.path.splitext(fname)[0]
+            tool_name = f"script_{name}"
+            script_path = os.path.join(self.tools_dir, fname)
+            self._script_map[tool_name] = (script_path, ext)
+            result.append(types.FunctionDeclaration(
+                name=tool_name,
+                description=self._read_script_description(script_path) or f"Скрипт {fname}",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={"args": types.Schema(type=types.Type.STRING, description="Аргументы командной строки")},
+                    required=[],
+                ),
+            ))
+        return result
+
+    @staticmethod
+    def _read_script_description(path: str) -> str:
+        lines = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if s.startswith("#!"): continue
+                    if s.startswith("#"): lines.append(s.lstrip("#").strip())
+                    elif s:                 
+                        break
+        except Exception:
+            pass
+        return "\n".join(lines)
+
+    async def dispatch_tool_call(self, tool_call) -> dict:
+        if tool_call.name in self._script_map:
+            script_path, ext = self._script_map[tool_call.name]
+            fname = os.path.basename(script_path)
+            args = (tool_call.args or {}).get("args", "")
+            cmd = f"{'python' if ext == '.py' else 'bash'} /workspace/tools/{fname}"
+            if args:
+                cmd += f" {args}"
+            return await self.exec(command=cmd)
+        return await super().dispatch_tool_call(tool_call)
 
     def _mounts(self) -> dict[str, str]:
         from src.skills.config import ConfigSkill
@@ -65,6 +118,13 @@ class SandboxSkill(Skill):
         lines.append(
             "Чтобы примонтировать папку с хост-машины, попроси пользователя написать в чат команду (команда пойдет в обход тебя):\n"
             "  /config write sandbox.folders[] <абсолютный путь к папке>"
+        )
+        lines.append(
+            "Скрипты в /workspace/tools/ (.py, .sh) автоматически становятся инструментами (префикс script_).\n"
+            "Если уже есть подходящий script_* инструмент — используй его вместо исполнения кода напрямую.\n"
+            "При создании скрипта пиши в шапке комментарии с описанием и форматом аргументов:\n"
+            "  # Что делает скрипт\n"
+            "  # args: <arg1> <arg2> — описание аргументов"
         )
         return "\n".join(lines)
 

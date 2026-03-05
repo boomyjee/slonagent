@@ -46,7 +46,7 @@ class Skill:
             return types.Schema(type=_GEMINI_TYPES.get(hint, types.Type.STRING), description=desc)
 
         class_name = type(self).__name__.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider")
-        self.tools = []
+        self._tools = []
         for name, fn in inspect.getmembers(type(self), predicate=inspect.isfunction):
             if not getattr(fn, "_is_tool", False): continue
 
@@ -60,12 +60,16 @@ class Skill:
             }
             required = [k for k, p in params.items() if p.default is inspect.Parameter.empty]
             tool_name = f"{class_name}_{name}".lower()
-            self.tools.append(types.FunctionDeclaration(
+            self._tools.append(types.FunctionDeclaration(
                 name=tool_name,
                 description=fn._tool_description,
                 parameters=types.Schema(type=types.Type.OBJECT, properties=properties, required=required),
             ))
             self._tool_map[tool_name] = name
+
+    def get_tools(self) -> list:
+        """Возвращает список FunctionDeclaration для этого скилла. Переопределяй для динамических тулов."""
+        return self._tools
 
     def get_bypass_commands(self, standalone_only: bool = False) -> dict[str, str]:
         """Возвращает {команда: описание} для bypass-обработчиков с описанием.
@@ -271,9 +275,9 @@ class Agent:
         system_parts = []
         tools_info = []
         for skill in self.skills:
-            if skill.tools:
+            if skill.get_tools():
                 augmented = []
-                for decl in skill.tools:
+                for decl in skill.get_tools():
                     extra = await skill.get_tool_prompt(decl.name)
                     if extra:
                         augmented.append(types.FunctionDeclaration(

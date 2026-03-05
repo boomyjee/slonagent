@@ -33,7 +33,12 @@ class SkillWriterSkill(Skill):
                 logging.warning("[SkillWriterSkill] Не удалось загрузить %s: %s", name, result["error"])
         self._saved_code.clear()
 
-    @tool("""Предложить новый инструмент для добавления в агент.
+    @tool("""Предложить новый Python-скилл для добавления в агент (требует одобрения пользователя).
+
+Используй ТОЛЬКО когда нужен доступ к хост-машине, внутренностям агента: self.agent, другие скиллы, transport,
+или когда нужно состояние между вызовами. Для простых задач — создай скрипт в /workspace/tools/,
+он автоматически станет инструментом без одобрения.
+
 Код должен содержать класс-наследник Skill. Шаблон:
 
 from agent import Skill, tool
@@ -143,4 +148,4 @@ class MySkill(Skill):
         instance.register(self.agent)
         self.agent.skills.append(instance)
         self._active[name] = instance
-        return {"tools": [t.name for t in instance.tools]}
+        return {"tools": [t.name for t in instance.get_tools()]}
