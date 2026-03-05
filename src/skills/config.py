@@ -3,6 +3,25 @@ import os
 import sys
 from agent import Skill, tool, bypass
 
+
+def _format_json(obj, indent=4, level=0) -> str:
+    def is_simple(v) -> bool:
+        return isinstance(v, (str, int, float, bool)) or v is None
+
+    pad = " " * indent * level
+    child_pad = " " * indent * (level + 1)
+    if isinstance(obj, dict):
+        if len(obj) < 3 and all(is_simple(v) for v in obj.values()):
+            return json.dumps(obj, ensure_ascii=False)
+        items = [f"{child_pad}{json.dumps(k)}: {_format_json(v, indent, level + 1)}" for k, v in obj.items()]
+        return "{\n" + ",\n".join(items) + "\n" + pad + "}"
+    if isinstance(obj, list):
+        if len(obj) <= 1 and all(is_simple(v) for v in obj):
+            return json.dumps(obj, ensure_ascii=False)
+        items = [f"{child_pad}{_format_json(v, indent, level + 1)}" for v in obj]
+        return "[\n" + ",\n".join(items) + "\n" + pad + "]"
+    return json.dumps(obj, ensure_ascii=False)
+
 HELP = (
     "config read                 — показать весь конфиг\n"
     "config read <key>           — показать значение по ключу\n"
@@ -89,7 +108,7 @@ class ConfigSkill(Skill):
 
     def _save(self, cfg: dict):
         with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.write(_format_json(cfg) + "\n")
 
     @staticmethod
     def _parse_value(s: str):
