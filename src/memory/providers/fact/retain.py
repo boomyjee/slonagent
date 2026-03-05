@@ -948,11 +948,17 @@ class _BatchResponse:
     deletes: list[_DeleteAction] = field(default_factory=list)
 
 
-async def _find_related_observations(fact_text: str, storage) -> list:
-    """Async recall existing observations related to fact_text."""
+async def _find_related_observations(fact_text: str, storage, tags: list[str] | None = None) -> list:
+    """Async recall existing observations related to fact_text.
+    Фильтрует по тегам (all_strict) — наблюдения обновляются только в рамках того же tag-scope.
+    """
     from src.memory.providers.fact.recall import recall_async
     q_vec = await asyncio.to_thread(storage.encode_query, fact_text[:1000])
-    resp = await recall_async(fact_text, q_vec, storage, types=["observation"], max_tokens=512, budget="low")
+    resp = await recall_async(
+        fact_text, q_vec, storage,
+        types=["observation"], max_tokens=512, budget="low",
+        tags=tags or [], tags_match="all_strict" if tags else "any",
+    )
     return resp.results
 
 
@@ -1151,21 +1157,20 @@ async def create_observations(storage, client, model_name: str) -> int:
         if not batch:
             break
 
-        # Группируем по (context, tags) — факты с разными контекстами или тегами
-        # не смешиваем в одном наблюдении
+        # Группируем по тегам — 1:1 с Hindsight
         groups: dict[tuple, list] = {}
         for r in batch:
             tag_key = tuple(sorted(json.loads(r["tags"] or "[]")))
-            group_key = (r["context"] or "", tag_key)
-            groups.setdefault(group_key, []).append(r)
+            groups.setdefault(tag_key, []).append(r)
 
-        for (group_context, tag_key), group in groups.items():
+        for tag_key, group in groups.items():
             group_tags = list(tag_key)
+            group_context = group[0].get("context") or None
 
-            # recall существующих observations для каждого факта (последовательно — SQLite не thread-safe)
-            per_fact_obs = []
-            for r in group:
-                per_fact_obs.append(await _find_related_observations(r["fact"], storage))
+            # recall существующих observations для каждого факта — параллельно, фильтр по тегам группы
+            per_fact_obs = await asyncio.gather(
+                *[_find_related_observations(r["fact"], storage, tags=group_tags) for r in group]
+            )
 
             # Union observations (дедупликация) + per-fact mapping для security check
             seen_ids: set[str] = set()
