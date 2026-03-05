@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import sys
@@ -77,11 +76,6 @@ class ConfigSkill(Skill):
             return f"✓ {key_expr} = {json.dumps(self._parse_value(value_str), ensure_ascii=False)}"
 
         return f"Неизвестная подкоманда.\n{HELP}"
-
-    @bypass("restart", "Перезапустить бота", standalone=True)
-    def restart_command(self, args: str) -> str:
-        asyncio.get_event_loop().call_later(1, os.execv, sys.executable, [sys.executable] + sys.argv)
-        return "Перезапускаюсь..."
 
     def get(self, key: str, default=None):
         return self._get(self._load(), key, default)

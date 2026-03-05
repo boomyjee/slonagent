@@ -1,4 +1,4 @@
-import asyncio, os, inspect, logging, httpx
+import asyncio, os, sys, inspect, logging, httpx
 from typing import Annotated, get_type_hints, get_args, get_origin
 from google import genai
 from google.genai import types
@@ -119,13 +119,28 @@ class Skill:
             return {"error": str(e)}
 
 
+class AgentSkill(Skill):
+    """Встроенный скилл агента: базовые управляющие команды."""
+
+    @bypass("restart", "Перезапустить бота", standalone=True)
+    def restart_command(self, args: str) -> str:
+        asyncio.get_event_loop().call_later(1, os.execv, sys.executable, [sys.executable] + sys.argv)
+        return "Перезапускаюсь..."
+    
+    @bypass("stop", "Остановить текущий ответ", standalone=True)
+    def stop_command(self, args: str) -> str:
+        if self.agent:
+            self.agent.stop()
+        return ""
+
+
 class Agent:
     def __init__(self, model_name: str, api_key: str, memory_compressor, memory_providers: list = None, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
         self.model_name = model_name
         self.include_thoughts = include_thoughts
         self.transcription_model_name = transcription_model_name
         self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [])
-        self.skills = self.memory.providers + (skills or [])
+        self.skills = self.memory.providers + (skills or []) + [AgentSkill()]
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
@@ -139,6 +154,11 @@ class Agent:
         self.client = genai.Client(api_key=api_key, http_options=http_options)
         self._process_message_lock = asyncio.Lock()
         self._pending_messages: list = []
+        self._stop_event = asyncio.Event()
+
+    def stop(self):
+        """Прервать текущий ответ. Частичный ответ не сохраняется в историю."""
+        self._stop_event.set()
 
     @staticmethod
     def strip_contents_private(turns: list) -> list:
@@ -170,6 +190,7 @@ class Agent:
                 
                 last_chunk = None
                 async for chunk in stream:
+                    if self._stop_event.is_set(): break
                     parts = chunk.candidates[0].content.parts or [] if chunk.candidates else []
                     for p in parts:
                         if getattr(p, "thought", False) and getattr(p, "text", None):
@@ -210,6 +231,13 @@ class Agent:
         return resp.text
 
     async def process_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
+        for skill in self.skills:
+            if skill.is_bypass_command(user_query):
+                result = await skill.dispatch_bypass(user_query)
+                if result:
+                    await self.transport.send_message(result)
+                return
+
         if self._process_message_lock.locked():
             logging.info("[agent] message queued (will be batched)")
             self._pending_messages.append((message_parts, user_message_id, user_query))
@@ -227,14 +255,9 @@ class Agent:
                 await self._run_message(merged_parts, merged_id, merged_query)
 
     async def _run_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
-        text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
-        logging.info("[agent] incoming: %r", text)
+        logging.info("[agent] incoming: %r", user_query)
 
-        for skill in self.skills:
-            if skill.is_bypass_command(text):
-                await self.transport.send_message(await skill.dispatch_bypass(text))
-                return
-
+        self._stop_event.clear()
         await self.memory.add_turn({"role": "user", "parts": message_parts, "_user_message_id": user_message_id})
 
 
@@ -284,6 +307,8 @@ class Agent:
             function_call_parts, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), config)
             logging.info("[agent] ← LLM")
 
+            if self._stop_event.is_set(): logging.info("[agent] stopped by user, response not saved"); return
+
             iteration = 0
             while function_call_parts and iteration < self.max_iterations:
                 await self.memory.add_turn({"role": "model", "parts": function_call_parts})
@@ -314,6 +339,8 @@ class Agent:
                 logging.info("[agent] → LLM iteration %d", iteration)
                 function_call_parts, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), config, str(iteration))
                 logging.info("[agent] ← LLM iteration %d", iteration)
+
+                if self._stop_event.is_set(): logging.info("[agent] stopped by user during iter %d, response not saved", iteration); return
 
             await self.memory.add_turn({"role": "model", "parts": [{"text": text or ""}]})
 
