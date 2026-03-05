@@ -17,7 +17,7 @@
         "memory_compressor": {
             "__class__": "src.memory.compressors.log.LogCompressor",
             "api_key": "$GEMINI_API_KEY",
-            "model_name": "gemini-2.5-flash",
+            "model_name": "gemini-3-flash-preview",
             "recent_tokens": 8000,
             "compress_after_tokens": 30000,
             "reflect_after_tokens": 40000

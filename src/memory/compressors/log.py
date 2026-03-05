@@ -341,12 +341,14 @@ class LogCompressor:
     """
 
     def __init__(self, model_name: str, api_key: str,
-                 recent_tokens: int   = 6_000,
+                 recent_tokens: int        = 6_000,
+                 min_recent_turns: int     = 10,
                  compress_after_tokens: int = 30_000,
                  reflect_after_tokens: int  = 40_000):
         self._compress_after_tokens = compress_after_tokens
         self._reflect_after_tokens  = reflect_after_tokens
-        self._recent_tokens      = recent_tokens
+        self._recent_tokens         = recent_tokens
+        self._min_recent_turns      = min_recent_turns
         self._model_name = model_name
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
@@ -415,18 +417,41 @@ class LogCompressor:
             log.warning("[LogCompressor] write LOG.md failed: %s", e, exc_info=True)
 
     def _split_recent(self, turns: list) -> tuple[list, list]:
-        """Отделяет recent_turns (последние до recent_tokens) от turns для наблюдения."""
+        """Отделяет recent_turns (последние до recent_tokens) от turns для наблюдения.
+
+        Гарантирует не менее min_recent_turns шагов в recent, даже если они превышают бюджет токенов.
+        """
         recent_budget = self._recent_tokens
         recent, tokens = [], 0
         for turn in reversed(turns):
             t = Memory.count_tokens([turn])
-            if tokens + t > recent_budget:
+            if tokens + t > recent_budget and len(recent) >= self._min_recent_turns:
                 break
             recent.append(turn)
             tokens += t
         recent.reverse()
         to_observe = turns[:len(turns) - len(recent)]
         return to_observe, recent
+
+    async def _generate(self, label: str, config: types.GenerateContentConfig, user_prompt: str) -> str:
+        max_retries, delay = 5, 0.5
+        for attempt in range(max_retries):
+            try:
+                response = await asyncio.to_thread(
+                    self._client.models.generate_content,
+                    model=self._model_name,
+                    contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+                    config=config,
+                )
+                return response.text.strip()
+            except Exception as e:
+                e_str = str(e)
+                if attempt + 1 == max_retries or not any(s in e_str for s in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")):
+                    log.error("[LogCompressor] %s LLM failed: %s", label, e, exc_info=True)
+                    return ""
+                wait = delay * 2 ** attempt
+                log.warning("[LogCompressor] %s unavailable, retry %d/%d in %ds", label, attempt + 1, max_retries, wait)
+                await asyncio.sleep(wait)
 
     async def _run_observer(self, formatted_turns: str, existing_observations: str) -> str:
         user_prompt = ""
@@ -436,21 +461,12 @@ class LogCompressor:
         user_prompt += f"## New Messages to Observe\n\n{formatted_turns}\n\n---\n\n"
         user_prompt += "Extract observations from the new messages above."
 
-        try:
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=self._model_name,
-                contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
-                config=types.GenerateContentConfig(
-                    system_instruction=OBSERVER_SYSTEM_PROMPT,
-                    temperature=0.3,
-                    max_output_tokens=100_000,
-                ),
-            )
-            return _parse_observations(response.text.strip())
-        except Exception as e:
-            log.error("[LogCompressor] Observer LLM failed: %s", e, exc_info=True)
-            return ""
+        response = await self._generate(
+            "Observer",
+            types.GenerateContentConfig(system_instruction=OBSERVER_SYSTEM_PROMPT, temperature=0.3, max_output_tokens=100_000),
+            user_prompt,
+        )
+        return _parse_observations(response)
 
     async def _run_reflector(self, observations: str, compression_level: int = 0) -> str:
         user_prompt = (
@@ -461,21 +477,11 @@ class LogCompressor:
         if compression_level > 0:
             user_prompt += f"\n\n{_COMPRESSION_GUIDANCE[compression_level]}"
 
-        try:
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=self._model_name,
-                contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
-                config=types.GenerateContentConfig(
-                    system_instruction=REFLECTOR_SYSTEM_PROMPT,
-                    temperature=0.0,
-                    max_output_tokens=100_000,
-                ),
-            )
-            reflected = _parse_observations(response.text.strip())
-        except Exception as e:
-            log.error("[LogCompressor] Reflector LLM failed: %s", e, exc_info=True)
-            return ""
+        reflected = _parse_observations(await self._generate(
+            "Reflector",
+            types.GenerateContentConfig(system_instruction=REFLECTOR_SYSTEM_PROMPT, temperature=0.0, max_output_tokens=100_000),
+            user_prompt,
+        ))
 
         if not reflected:
             log.warning("[LogCompressor] Reflector returned empty")

@@ -439,7 +439,8 @@ async def _extract_from_chunk(
     mentioned_at = effective_date.isoformat()
     system_prompt = _build_extraction_prompt(retain_mission, custom_instructions)
 
-    for attempt in range(3):
+    max_retries, delay = 5, 1.0
+    for attempt in range(max_retries):
         try:
             from google.genai import types as genai_types
             response = await asyncio.to_thread(
@@ -472,7 +473,7 @@ async def _extract_from_chunk(
             data, _ = json.JSONDecoder().raw_decode(raw, m.start())
             facts, has_malformed = _parse_facts_from_json(data, effective_date, mentioned_at)
             raw_count = len(data.get("facts", []))
-            if has_malformed and raw_count > 0 and len(facts) < raw_count * 0.8 and attempt < 2:
+            if has_malformed and raw_count > 0 and len(facts) < raw_count * 0.8 and attempt < max_retries - 1:
                 log.warning(
                     "[retain] chunk %d: %d/%d facts valid on attempt %d, retrying...",
                     chunk_index, len(facts), raw_count, attempt + 1,
@@ -484,7 +485,12 @@ async def _extract_from_chunk(
         except _OutputTooLongError:
             raise  # пробрасываем наверх для auto-split
         except Exception as e:
-            log.warning("[retain] chunk %d extraction attempt %d failed: %s", chunk_index, attempt + 1, e)
+            if attempt + 1 == max_retries:
+                log.warning("[retain] chunk %d extraction failed after %d attempts: %s", chunk_index, max_retries, e)
+            else:
+                wait = delay * 2 ** attempt
+                log.warning("[retain] chunk %d extraction attempt %d/%d in %.0fs: %s", chunk_index, attempt + 1, max_retries, wait, e)
+                await asyncio.sleep(wait)
 
     return []
 
@@ -555,10 +561,16 @@ async def extract_facts(
     """
     Извлекает факты из списка items, все чанки всех items обрабатываются параллельно.
     Возвращает (facts, chunk_meta) где chunk_meta: [(document_id, chunk_index, chunk_text), ...]
-    только для items с document_id.
+    для всех items — как у Hindsight. Для items без document_id генерируется UUID.
     """
     if not items:
         return [], []
+
+    # Как в Hindsight: каждый item получает document_id (явный или сгенерированный UUID)
+    item_doc_ids = [
+        item.document_id if item.document_id else str(uuid.uuid4())
+        for item in items
+    ]
 
     tasks = []
     task_meta = []  # (item_idx, chunk_idx, chunk_text)
@@ -585,14 +597,12 @@ async def extract_facts(
 
     for (item_idx, chunk_idx, chunk_text_str), chunk_facts in zip(task_meta, results):
         item = items[item_idx]
-        doc_id = item.document_id
+        doc_id = item_doc_ids[item_idx]
 
-        # Трекинг чанков для документов
-        if doc_id:
-            chunk_meta_out.append((doc_id, chunk_idx, chunk_text_str))
+        # Все чанки сохраняем — как в Hindsight
+        chunk_meta_out.append((doc_id, chunk_idx, chunk_text_str))
 
-        # Chunk_id для фактов из документов
-        chunk_id = f"{doc_id}_{chunk_idx}" if doc_id else None
+        chunk_id = f"{doc_id}_{chunk_idx}"
 
         # Резолвим causal: local index → fact_id внутри этого чанка
         for local_pos, fact in enumerate(chunk_facts):
@@ -673,8 +683,8 @@ def _is_dedup(fact: "Fact", top: dict, storage) -> bool:
     """
     Определяет, является ли новый факт дублем существующего top-результата.
 
-    Факт из документа → дубль без учёта времени (пересказ документа через неделю тоже дубль).
-    Факт из разговора → дубль только в пределах DEDUP_TIME_WINDOW_HOURS.
+    Явный документ (один и тот же document_id) → дубль без учёта времени.
+    Разные документы или один из них без document_id → дубль только в пределах DEDUP_TIME_WINDOW_HOURS.
     """
     row = storage.conn.execute(
         "SELECT occurred_start, document_id FROM facts WHERE fact_id = ?", (top["fact_id"],)
@@ -703,6 +713,10 @@ def _is_within_time_window(iso_a: Optional[str], iso_b: Optional[str], hours: in
     try:
         a = datetime.fromisoformat(iso_a)
         b = datetime.fromisoformat(iso_b)
+        if a.tzinfo is None and b.tzinfo is not None:
+            a = a.replace(tzinfo=timezone.utc)
+        elif a.tzinfo is not None and b.tzinfo is None:
+            b = b.replace(tzinfo=timezone.utc)
         return abs((a - b).total_seconds()) <= hours * 3600
     except ValueError:
         return True
@@ -985,7 +999,8 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
     observations_text = json.dumps(obs_list, ensure_ascii=False, indent=2)
     prompt = _CONSOLIDATION_PROMPT.format(facts_text=facts_text, observations_text=observations_text)
 
-    for attempt in range(3):
+    max_retries, delay = 5, 1.0
+    for attempt in range(max_retries):
         try:
             response = await client.aio.models.generate_content(
                 model=model_name,
@@ -1015,7 +1030,12 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
             )
             return result
         except Exception as e:
-            log.warning("[consolidate] LLM call failed (attempt %d/3): %s", attempt + 1, e)
+            if attempt + 1 == max_retries:
+                log.warning("[consolidate] LLM call failed after %d attempts: %s", max_retries, e)
+            else:
+                wait = delay * 2 ** attempt
+                log.warning("[consolidate] LLM call attempt %d/%d in %.0fs: %s", attempt + 1, max_retries, wait, e)
+                await asyncio.sleep(wait)
     return _BatchResponse()
 
 
