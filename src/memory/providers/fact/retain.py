@@ -1138,12 +1138,21 @@ def _delete_observation(observation_id: str, storage) -> None:
         log.warning("[consolidate] LanceDB delete failed for %s: %s", observation_id, e, exc_info=True)
 
 
+_observations_lock = asyncio.Lock()
 async def create_observations(storage, client, model_name: str) -> int:
     """Consolidation loop: обрабатывает все неконсолидированные факты батчами по CONSOLIDATION_LLM_BATCH_SIZE.
 
     1:1 с Hindsight: для каждого батча делает recall существующих observations,
     затем один LLM-вызов, который возвращает creates/updates/deletes.
     """
+    if _observations_lock.locked():
+        log.debug("[consolidate] skip: already running")
+        return 0
+    async with _observations_lock:
+        return await _create_observations_impl(storage, client, model_name)
+
+
+async def _create_observations_impl(storage, client, model_name: str) -> int:
     total = await asyncio.to_thread(storage.get_pending_consolidation_count)
     if total == 0:
         log.debug("[consolidate] skip: no unconsolidated facts")

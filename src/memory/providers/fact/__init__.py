@@ -22,7 +22,7 @@ from typing import Annotated
 import httpx
 from google import genai
 
-from agent import tool
+from agent import tool, bypass
 from src.memory.memory import Memory
 from src.memory.providers.base import BaseProvider
 from src.memory.providers.fact.retain import RetainItem, retain
@@ -264,6 +264,14 @@ class FactProvider(BaseProvider):
         except Exception as e:
             log.warning("[FactProvider] get_document failed: %s", e, exc_info=True)
             return {"error": str(e)}
+
+    @bypass("create_observations", "Синтезировать наблюдения из накопленных фактов", standalone=True)
+    async def create_observations(self, args: str = "") -> str:
+        from src.memory.providers.fact.retain import create_observations as _create_obs, _observations_lock
+        if _observations_lock.locked():
+            return "Синтез наблюдений уже запущен."
+        asyncio.create_task(_create_obs(self.storage, self._llm, self._model_name))
+        return "Запущен синтез наблюдений в фоне."
 
     @tool(
         "Глубокий анализ памяти с рассуждением через агентный цикл поиска. "
