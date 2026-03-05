@@ -21,7 +21,7 @@ class ConfigSkill(Skill):
         if not os.path.exists(config_path):
             self._save({})
 
-    @bypass("config", "Управление конфигом <key>* <value>*", standalone=True)
+    @bypass("config", "Конфиг read/write", standalone=True)
     def config_command(self, args: str) -> str:
         parts = args.strip().split(None, 1)
         if not parts:
