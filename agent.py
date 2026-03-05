@@ -119,6 +119,7 @@ class Agent:
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self.client = genai.Client(api_key=api_key, http_options=http_options)
         self._process_message_lock = asyncio.Lock()
+        self._pending_messages: list = []
 
     @staticmethod
     def strip_contents_private(turns: list) -> list:
@@ -191,9 +192,20 @@ class Agent:
 
     async def process_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
         if self._process_message_lock.locked():
-            logging.info("[agent] message queued, waiting for lock")
+            logging.info("[agent] message queued (will be batched)")
+            self._pending_messages.append((message_parts, user_message_id, user_query))
+            return
+
         async with self._process_message_lock:
             await self._run_message(message_parts, user_message_id, user_query)
+            while self._pending_messages:
+                batch = self._pending_messages[:]
+                self._pending_messages.clear()
+                logging.info("[agent] processing batch of %d queued messages", len(batch))
+                merged_parts = [p for parts, _, _ in batch for p in parts]
+                merged_query = "\n".join(q for _, _, q in batch if q)
+                merged_id = next((mid for _, mid, _ in batch if mid is not None), None)
+                await self._run_message(merged_parts, merged_id, merged_query)
 
     async def _run_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
         text = next((p["text"] for p in message_parts if isinstance(p, dict) and "text" in p), "")
