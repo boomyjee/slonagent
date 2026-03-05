@@ -202,7 +202,7 @@ class Agent:
                 batch = self._pending_messages[:]
                 self._pending_messages.clear()
                 logging.info("[agent] processing batch of %d queued messages", len(batch))
-                merged_parts = [p for parts, _, _ in batch for p in parts]
+                merged_parts = [p for i, (parts, _, _) in enumerate(batch) for p in ([{"text": "\n"}] if i > 0 else []) + list(parts)]
                 merged_query = "\n".join(q for _, _, q in batch if q)
                 merged_id = next((mid for _, mid, _ in batch if mid is not None), None)
                 await self._run_message(merged_parts, merged_id, merged_query)
