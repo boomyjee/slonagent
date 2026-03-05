@@ -47,7 +47,7 @@ class FactProvider(BaseProvider):
         api_key: str,
         consolidate_tokens: int = 3_000,
         recall_max_tokens: int = 2_000,
-        auto_recall: bool = True,
+        auto_recall: bool = False,
         auto_consolidate: bool = True,
         retain_mission: str = "",
         custom_instructions: str = "",
@@ -205,7 +205,13 @@ class FactProvider(BaseProvider):
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         """Автоматический recall по тексту пользователя → системный промпт."""
-        if not self._auto_recall or not user_text:
+        if not self._auto_recall:
+            return (
+                "Если для ответа нужны конкретные факты о пользователе, его жизни, "
+                "предпочтениях, людях или событиях — сделай fact_recall перед ответом. "
+                "Не угадывай то, что можно найти в памяти."
+            )
+        if not user_text:
             return ""
         try:
             return await self._recall_text(user_text[:1500], query_label="$LAST_USER_MESSAGE")
