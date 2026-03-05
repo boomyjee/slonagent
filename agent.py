@@ -297,7 +297,7 @@ class Agent:
                         augmented.append(decl)
                 for f in augmented: tool_to_skill[f.name] = skill
                 tools.append(types.Tool(function_declarations=augmented))
-                tools_info.extend(f"{f.name}: {truncate(f.description, 100)}" for f in augmented)
+                tools_info.extend(f"{f.name}: {truncate((f.description or '').splitlines()[0], 100)}" for f in augmented)
 
             skill_context = await skill.get_context_prompt(user_query)
             if skill_context:
