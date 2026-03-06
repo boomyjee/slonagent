@@ -7,7 +7,6 @@
   entity_cooccurrences — счётчики совместной встречаемости сущностей
   fact_entities        — M:N связь факт ↔ сущность
   fact_links           — рёбра графа (temporal / semantic / causal / entity)
-  observation_evidence — ссылки observation → source_facts с цитатами
   mental_models        — user-created/auto curated summaries (highest priority)
   chunks               — raw text chunks документов
 """
@@ -91,15 +90,6 @@ CREATE TABLE IF NOT EXISTS fact_links (
 );
 CREATE INDEX IF NOT EXISTS idx_fact_links_source ON fact_links(source_id);
 CREATE INDEX IF NOT EXISTS idx_fact_links_target ON fact_links(target_id);
-
-CREATE TABLE IF NOT EXISTS observation_evidence (
-    observation_id TEXT NOT NULL REFERENCES facts(fact_id) ON DELETE CASCADE,
-    source_fact_id TEXT NOT NULL REFERENCES facts(fact_id) ON DELETE CASCADE,
-    quote          TEXT NOT NULL,
-    relevance      TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (observation_id, source_fact_id)
-);
-CREATE INDEX IF NOT EXISTS idx_obs_evidence_source ON observation_evidence(source_fact_id);
 
 CREATE TABLE IF NOT EXISTS mental_models (
     model_id        TEXT PRIMARY KEY,
@@ -402,17 +392,6 @@ class Storage:
             """,
             (window_start, window_end, exclude_fact_id, limit),
         ).fetchall()
-
-    def insert_observation_evidence(self, observation_id: str, evidence: list[dict]) -> None:
-        self.conn.executemany(
-            """
-            INSERT OR IGNORE INTO observation_evidence
-                (observation_id, source_fact_id, quote, relevance)
-            VALUES (?, ?, ?, ?)
-            """,
-            [(observation_id, e["fact_id"], e["quote"], e.get("relevance", "")) for e in evidence],
-        )
-        self.conn.commit()
 
     # ── Entities ─────────────────────────────────────────────────────────────────
 
