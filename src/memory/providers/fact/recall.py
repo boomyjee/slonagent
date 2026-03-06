@@ -230,7 +230,7 @@ def _bm25_search(
         ).fetchall()
         return [r["fact_id"] for r in rows]
     except Exception as e:
-        log.warning("[recall] FTS5 failed: %s", e)
+        log.warning("[recall] FTS5 failed: %s", e, exc_info=True)
         return []
 
 

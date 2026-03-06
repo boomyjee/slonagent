@@ -487,10 +487,10 @@ async def _extract_from_chunk(
             raise  # пробрасываем наверх для auto-split
         except Exception as e:
             if attempt + 1 == max_retries:
-                log.warning("[retain] chunk %d extraction failed after %d attempts: %s", chunk_index, max_retries, e)
+                log.warning("[retain] chunk %d extraction failed after %d attempts: %s", chunk_index, max_retries, e, exc_info=True)
             else:
                 wait = delay * 2 ** attempt
-                log.warning("[retain] chunk %d extraction attempt %d/%d in %.0fs: %s", chunk_index, attempt + 1, max_retries, wait, e)
+                log.warning("[retain] chunk %d extraction attempt %d/%d in %.0fs: %s", chunk_index, attempt + 1, max_retries, wait, e, exc_info=True)
                 await asyncio.sleep(wait)
 
     return []
@@ -1039,10 +1039,10 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
             return result
         except Exception as e:
             if attempt + 1 == max_retries:
-                log.warning("[consolidate] LLM call failed after %d attempts: %s", max_retries, e)
+                log.warning("[consolidate] LLM call failed after %d attempts: %s", max_retries, e, exc_info=True)
             else:
                 wait = delay * 2 ** attempt
-                log.warning("[consolidate] LLM call attempt %d/%d in %.0fs: %s", attempt + 1, max_retries, wait, e)
+                log.warning("[consolidate] LLM call attempt %d/%d in %.0fs: %s", attempt + 1, max_retries, wait, e, exc_info=True)
                 await asyncio.sleep(wait)
     return _BatchResponse()
 

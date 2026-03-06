@@ -334,6 +334,6 @@ class SmartCompressor:
                     os.unlink(fpath)
                     removed += 1
                 except Exception as e:
-                    log.warning("[compress] cleanup failed for %s: %s", fpath, e)
+                    log.warning("[compress] cleanup failed for %s: %s", fpath, e, exc_info=True)
         if removed:
             log.info("[compress] cleaned up %d files older than %d days", removed, max_age_days)
