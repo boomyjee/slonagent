@@ -233,7 +233,7 @@ class FactProvider(BaseProvider):
         self,
         query: Annotated[str, "Поисковый запрос — утверждение или вопрос, не набор ключевых слов"],
         max_tokens: Annotated[int, "Мягкий лимит токенов в ответе (по умолчанию 10000)"] = 10_000,
-        budget: Annotated[str, "Глубина поиска: low / mid / high (по умолчанию mid)"] = "mid",
+        budget: Annotated[str, "Глубина поиска: low — один конкретный факт; mid — стандартный вопрос; high — нужно много фактов (история персонажа, сравнение, анализ). По умолчанию mid"] = "mid",
     ) -> dict:
         try:
             body = await self._recall_text(query[:1500], query_label="$TOOL_QUERY", max_tokens=max_tokens, budget=budget)

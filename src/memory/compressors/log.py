@@ -20,6 +20,7 @@ import httpx
 from google import genai
 from google.genai import types
 
+from agent import Agent
 from src.memory.memory import Memory
 
 log = logging.getLogger(__name__)
@@ -289,32 +290,6 @@ def _parse_observations(text: str) -> str:
     return "\n".join(lines).strip() or text.strip()
 
 
-def _format_turns(pending: list) -> str:
-    """Форматирует turns для Observer: Role (timestamp): content."""
-    lines = []
-    for turn in pending:
-        if not isinstance(turn, dict):
-            continue
-        role = turn.get("role", "unknown")
-        label = "User" if role == "user" else "Assistant"
-        ts_raw = turn.get("_timestamp")
-        if ts_raw:
-            try:
-                dt = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else ts_raw
-                ts_str = dt.strftime("%b %d, %Y %H:%M")
-            except Exception:
-                ts_str = str(ts_raw)
-        else:
-            ts_str = datetime.now(timezone.utc).strftime("%b %d, %Y %H:%M")
-
-        parts_text = " ".join(
-            p.get("text", "") for p in turn.get("parts", [])
-            if isinstance(p, dict) and "text" in p
-        ).strip()
-        if parts_text:
-            lines.append(f"**{label} ({ts_str}):**\n{parts_text}")
-
-    return "\n\n---\n\n".join(lines)
 
 
 def _optimize_for_context(observations: str) -> str:
@@ -381,8 +356,7 @@ class LogCompressor:
         if not to_observe:
             return turns
 
-        formatted = _format_turns(to_observe)
-        new_obs = await self._run_observer(formatted, existing_observations)
+        new_obs = await self._run_observer(to_observe, existing_observations)
         if not new_obs:
             log.warning("[LogCompressor] Observer returned empty")
             return turns
@@ -433,14 +407,14 @@ class LogCompressor:
         to_observe = turns[:len(turns) - len(recent)]
         return to_observe, recent
 
-    async def _generate(self, label: str, config: types.GenerateContentConfig, user_prompt: str) -> str:
+    async def _generate(self, label: str, config: types.GenerateContentConfig, contents: list) -> str:
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
                 response = await asyncio.to_thread(
                     self._client.models.generate_content,
                     model=self._model_name,
-                    contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+                    contents=contents,
                     config=config,
                 )
                 return response.text.strip()
@@ -453,18 +427,18 @@ class LogCompressor:
                 log.warning("[LogCompressor] %s unavailable, retry %d/%d in %ds", label, attempt + 1, max_retries, wait)
                 await asyncio.sleep(wait)
 
-    async def _run_observer(self, formatted_turns: str, existing_observations: str) -> str:
-        user_prompt = ""
+    async def _run_observer(self, turns: list, existing_observations: str) -> str:
+        contents = []
         if existing_observations:
-            user_prompt += f"## Previous Observations\n\n{existing_observations}\n\n"
-            user_prompt += "Do not repeat existing observations. Append new ones only.\n\n---\n\n"
-        user_prompt += f"## New Messages to Observe\n\n{formatted_turns}\n\n---\n\n"
-        user_prompt += "Extract observations from the new messages above."
+            contents.append({"role": "user", "parts": [{"text": f"## Previous Observations\n\n{existing_observations}\n\nDo not repeat existing observations. Append new ones only."}]})
+            contents.append({"role": "model", "parts": [{"text": "Understood. I will only append new observations."}]})
+        contents.extend(Agent.strip_contents_private(turns))
+        contents.append({"role": "user", "parts": [{"text": "Extract observations from the conversation above."}]})
 
         response = await self._generate(
             "Observer",
             types.GenerateContentConfig(system_instruction=OBSERVER_SYSTEM_PROMPT, temperature=0.3, max_output_tokens=100_000),
-            user_prompt,
+            contents,
         )
         return _parse_observations(response)
 
@@ -480,7 +454,7 @@ class LogCompressor:
         reflected = _parse_observations(await self._generate(
             "Reflector",
             types.GenerateContentConfig(system_instruction=REFLECTOR_SYSTEM_PROMPT, temperature=0.0, max_output_tokens=100_000),
-            user_prompt,
+            [{"role": "user", "parts": [{"text": user_prompt}]}],
         ))
 
         if not reflected:
