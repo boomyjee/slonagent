@@ -168,7 +168,7 @@ class FactProvider(BaseProvider):
         obs_lines: list[str] = []
         doc_by_id: dict[str, list[str]] = {}
         for r in response.results:
-            if r.document_id:
+            if r.is_real_document:
                 doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}")
             elif r.fact_type == "observation":
                 obs_lines.append(f"- {r.fact}")

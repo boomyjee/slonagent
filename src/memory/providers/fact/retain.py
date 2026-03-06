@@ -218,6 +218,7 @@ class Fact:
     chunk_id: Optional[str] = None
     context: str = ""
     tags: list[str] = field(default_factory=list)
+    is_real_document: bool = False
     # causal_relations: [(target_fact_id, strength), ...] — заполняется после gather
     causal_relations: list[tuple[str, float]] = field(default_factory=list)
 
@@ -610,6 +611,7 @@ async def extract_facts(
             fact.chunk_id = chunk_id
             fact.context = item.context
             fact.tags = list(item.tags)
+            fact.is_real_document = bool(item.document_id)
             # Мёрдж user-provided entities (R6)
             if item.entities:
                 existing = set(fact.entities)

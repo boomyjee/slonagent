@@ -63,6 +63,7 @@ class RecallResult:
     score: float = 0.0
     temporal_score: float = 0.0
     sources: list[str] = field(default_factory=list)
+    is_real_document: bool = False
 
 
 @dataclass
@@ -105,6 +106,7 @@ def _row_to_result(row: sqlite3.Row, score: float = 0.0, source: str = "") -> Re
         tags=tags,
         score=score,
         sources=[source] if source else [],
+        is_real_document=bool(row["is_real_document"]),
     )
 
 

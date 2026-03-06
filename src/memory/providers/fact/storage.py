@@ -45,8 +45,9 @@ CREATE TABLE IF NOT EXISTS facts (
     chunk_id        TEXT REFERENCES chunks(chunk_id) ON DELETE SET NULL,
     source_fact_ids TEXT,
     context         TEXT,
-    consolidated    INTEGER NOT NULL DEFAULT 0,
-    tags            TEXT NOT NULL DEFAULT '[]'
+    consolidated     INTEGER NOT NULL DEFAULT 0,
+    is_real_document INTEGER NOT NULL DEFAULT 0,
+    tags             TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_facts_mentioned_at   ON facts(mentioned_at);
 CREATE INDEX IF NOT EXISTS idx_facts_occurred_start ON facts(occurred_start);
@@ -322,8 +323,8 @@ class Storage:
             """
             INSERT OR IGNORE INTO facts
                 (fact_id, fact, fact_type, occurred_start, occurred_end, mentioned_at,
-                 document_id, chunk_id, source_fact_ids, context, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 document_id, chunk_id, source_fact_ids, context, tags, is_real_document)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (f.fact_id, f.fact, f.fact_type,
@@ -331,7 +332,8 @@ class Storage:
                  getattr(f, "chunk_id", None),
                  json.dumps(getattr(f, "source_fact_ids", None) or None),
                  getattr(f, "context", None) or None,
-                 json.dumps(getattr(f, "tags", None) or []))
+                 json.dumps(getattr(f, "tags", None) or []),
+                 int(getattr(f, "is_real_document", False)))
                 for f in facts
             ],
         )
