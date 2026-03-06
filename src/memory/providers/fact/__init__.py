@@ -46,7 +46,7 @@ class FactProvider(BaseProvider):
         model_name: str,
         api_key: str,
         consolidate_tokens: int = 3_000,
-        recall_max_tokens: int = 2_000,
+        recall_max_tokens: int = 12_000,
         auto_recall: bool = False,
         auto_consolidate: bool = True,
         retain_mission: str = "",
@@ -153,27 +153,41 @@ class FactProvider(BaseProvider):
                with_observations=self._auto_consolidate)
 
     async def _recall_text(self, query: str, query_label: str, max_tokens: int | None = None, budget: str = "mid") -> str:
-        """Recall + форматирование результатов в читаемый текст для агента."""
+        """Три параллельных recall (observations / documents / conversations) + форматирование."""
+        total_tokens = max_tokens or self._recall_max_tokens
         q_vec = await asyncio.to_thread(self.storage.encode_query, query)
-        response = await recall_async(
-            query, q_vec, self.storage,
-            max_tokens=max_tokens or self._recall_max_tokens,
-            budget=budget,
-            rerank_model=self._rerank_model,
-        )
-        if not response.results:
-            return ""
 
-        conv_lines: list[str] = []
-        obs_lines: list[str] = []
+        obs_resp, doc_resp, conv_resp = await asyncio.gather(
+            recall_async(
+                query, q_vec, self.storage,
+                types=["observation"],
+                max_tokens=total_tokens // 3,
+                budget=budget,
+                rerank_model=self._rerank_model,
+            ),
+            recall_async(
+                query, q_vec, self.storage,
+                types=["world", "experience"],
+                is_real_document=True,
+                max_tokens=total_tokens // 3,
+                budget=budget,
+                rerank_model=self._rerank_model,
+            ),
+            recall_async(
+                query, q_vec, self.storage,
+                types=["world", "experience"],
+                is_real_document=False,
+                max_tokens=total_tokens // 3,
+                budget=budget,
+                rerank_model=self._rerank_model,
+            ),
+        )
+
+        obs_lines = [f"- {r.fact}" for r in obs_resp.results]
         doc_by_id: dict[str, list[str]] = {}
-        for r in response.results:
-            if r.is_real_document:
-                doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}")
-            elif r.fact_type == "observation":
-                obs_lines.append(f"- {r.fact}")
-            else:
-                conv_lines.append(f"- {r.fact}")
+        for r in doc_resp.results:
+            doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}")
+        conv_lines = [f"- {r.fact}" for r in conv_resp.results]
 
         parts = []
         if conv_lines:
@@ -189,10 +203,11 @@ class FactProvider(BaseProvider):
         if not parts:
             return ""
 
-        if response.is_stale:
+        pending = max(obs_resp.pending_consolidation, doc_resp.pending_consolidation, conv_resp.pending_consolidation)
+        if pending > 0:
             parts.append(
                 f"⚠ Память не до конца обработана "
-                f"({response.pending_consolidation} необработанных фактов — наблюдения ещё синтезируются)."
+                f"({pending} необработанных фактов — наблюдения ещё синтезируются)."
             )
 
         body = "\n\n".join(parts)
@@ -265,7 +280,7 @@ class FactProvider(BaseProvider):
             log.warning("[FactProvider] get_document failed: %s", e, exc_info=True)
             return {"error": str(e)}
 
-    @bypass("create_observations", "Синтезировать наблюдения из накопленных фактов", standalone=True)
+    @bypass("create_observations", "Синтезировать наблюдения из накопленных фактов", standalone=False)
     async def create_observations(self, args: str = "") -> str:
         from src.memory.providers.fact.retain import create_observations as _create_obs, _observations_lock
         if _observations_lock.locked():

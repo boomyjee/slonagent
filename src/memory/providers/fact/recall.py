@@ -168,6 +168,12 @@ def _fact_types_where(types: Optional[list[str]]) -> tuple[str, list]:
     return f"AND fact_type IN ({placeholders})", list(types)
 
 
+def _is_real_document_where(is_real_document: Optional[bool]) -> tuple[str, list]:
+    if is_real_document is None:
+        return "", []
+    return "AND is_real_document = ?", [int(is_real_document)]
+
+
 def _count_tokens(text: str) -> int:
     """Оценка числа токенов (tiktoken cl100k_base если доступен, иначе len//4)."""
     try:
@@ -200,6 +206,7 @@ def _bm25_search(
     tags: Optional[list[str]] = None,
     tags_match: str = "any",
     types: Optional[list[str]] = None,
+    is_real_document: Optional[bool] = None,
 ) -> list[str]:
     """SQLite FTS5 + опциональный post-filter по тегам и fact_type."""
     tokens = [t for t in re.sub(r"[^\w\s]", " ", query.lower()).split() if t]
@@ -209,16 +216,17 @@ def _bm25_search(
     try:
         tags_clause, tags_params = _tags_where(tags, tags_match)
         ft_clause,   ft_params   = _fact_types_where(types)
+        rd_clause,   rd_params   = _is_real_document_where(is_real_document)
         rows = storage.conn.execute(
             f"""
             SELECT fts.fact_id FROM facts_fts fts
             JOIN facts f ON f.fact_id = fts.fact_id
             WHERE facts_fts MATCH ?
-              {tags_clause} {ft_clause}
+              {tags_clause} {ft_clause} {rd_clause}
             ORDER BY rank
             LIMIT ?
             """,
-            [fts_query, *tags_params, *ft_params, limit],
+            [fts_query, *tags_params, *ft_params, *rd_params, limit],
         ).fetchall()
         return [r["fact_id"] for r in rows]
     except Exception as e:
@@ -506,6 +514,7 @@ def _temporal_search(
     tags: Optional[list[str]] = None,
     tags_match: str = "any",
     types: Optional[list[str]] = None,
+    is_real_document: Optional[bool] = None,
 ) -> list[tuple[str, float]]:
     """
     Факты в временном диапазоне + опциональные фильтры.
@@ -516,6 +525,7 @@ def _temporal_search(
 
     tags_clause, tags_params = _tags_where(tags, tags_match)
     ft_clause,   ft_params   = _fact_types_where(types)
+    rd_clause,   rd_params   = _is_real_document_where(is_real_document)
     rows = storage.conn.execute(
         f"""
         SELECT fact_id, occurred_start, occurred_end, mentioned_at FROM facts f
@@ -524,7 +534,7 @@ def _temporal_search(
             OR (mentioned_at IS NOT NULL AND mentioned_at BETWEEN ? AND ?)
             OR (occurred_start IS NOT NULL AND occurred_start BETWEEN ? AND ?)
         )
-        {tags_clause} {ft_clause}
+        {tags_clause} {ft_clause} {rd_clause}
         ORDER BY COALESCE(occurred_start, mentioned_at) DESC
         LIMIT ?
         """,
@@ -532,7 +542,7 @@ def _temporal_search(
             end.isoformat(), start.isoformat(),
             start.isoformat(), end.isoformat(),
             start.isoformat(), end.isoformat(),
-            *tags_params, *ft_params,
+            *tags_params, *ft_params, *rd_params,
             limit,
         ),
     ).fetchall()
@@ -703,6 +713,7 @@ def recall(
     tags: Optional[list[str]] = None,
     tags_match: Literal["any", "all", "any_strict", "all_strict"] = "any",
     rerank_model: str = "",
+    is_real_document: Optional[bool] = None,
 ) -> RecallResponse:
     """
     4-way поиск + RRF + cross-encoder reranking.
@@ -740,7 +751,8 @@ def recall(
 
     # 2. BM25
     bm25_ids = _bm25_search(
-        query, storage, limit * 2, tags=tags, tags_match=tags_match, types=types
+        query, storage, limit * 2, tags=tags, tags_match=tags_match, types=types,
+        is_real_document=is_real_document,
     )
 
     # 3. Graph — LinkExpansion от semantic seeds (граф не фильтруем по тегам — это постфильтр)
@@ -756,6 +768,7 @@ def recall(
         entry_hits = _temporal_search(
             t_start, t_end, storage, limit,
             tags=tags, tags_match=tags_match, types=types,
+            is_real_document=is_real_document,
         )
         entry_scores = {fid: score for fid, score in entry_hits}
         spread_scores = _temporal_spread(entry_scores, t_start, t_end, storage, budget=limit * 2)
@@ -777,13 +790,14 @@ def recall(
     rrf_scores = {fid: score for fid, score, _ in merged}
     rrf_sources = {fid: srcs for fid, _, srcs in merged}
 
-    # Post-фильтр по tags и types для semantic/graph результатов
+    # Post-фильтр по tags, types и is_real_document для semantic/graph результатов
     tags_clause, tags_params = _tags_where(tags, tags_match)
     ft_clause,   ft_params   = _fact_types_where(types)
+    rd_clause,   rd_params   = _is_real_document_where(is_real_document)
     placeholders = ",".join("?" * len(merged_ids))
     rows = storage.conn.execute(
-        f"SELECT * FROM facts f WHERE fact_id IN ({placeholders}) {tags_clause} {ft_clause}",
-        [*merged_ids, *tags_params, *ft_params],
+        f"SELECT * FROM facts f WHERE fact_id IN ({placeholders}) {tags_clause} {ft_clause} {rd_clause}",
+        [*merged_ids, *tags_params, *ft_params, *rd_params],
     ).fetchall()
     row_map = {r["fact_id"]: r for r in rows}
 
@@ -822,8 +836,10 @@ async def recall_async(
     tags: Optional[list[str]] = None,
     tags_match: Literal["any", "all", "any_strict", "all_strict"] = "any",
     rerank_model: str = "",
+    is_real_document: Optional[bool] = None,
 ) -> RecallResponse:
     return await asyncio.to_thread(
         recall, query, query_vec, storage,
         types, max_tokens, budget, query_timestamp, tags, tags_match, rerank_model,
+        is_real_document,
     )
