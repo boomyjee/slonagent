@@ -17,7 +17,7 @@ class NanoBananaSkill(Skill):
         prompt: Annotated[str, "Подробное описание того, что должно быть на картинке."],
         filename: Annotated[str, "Имя файла или путь внутри контейнера (например, '/workspace/art.png')."] = "generated_art.png",
         model: Annotated[Literal["nano_banana", "nano_banana_2", "nano_banana_pro"], "Выбор модели: nano_banana (2.5 Flash - быстро), nano_banana_2 (3.1 Flash - качественно), nano_banana_pro (3 Pro - текст и логика)."] = "nano_banana",
-        images: Annotated[list[str] | None, "Список путей к входным изображениям внутри контейнера (например, ['/workspace/photo.jpg']). Используется для редактирования или стилизации существующих картинок."] = None,
+        images: Annotated[list[str], "Список путей к входным изображениям внутри контейнера (например, ['/workspace/photo.jpg']). Используется для редактирования или стилизации существующих картинок."] = None,
     ) -> dict:
         """Генерация изображений через официальный API Google Gemini (семейство Nano Banana)."""
 
