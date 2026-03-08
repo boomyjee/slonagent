@@ -16,7 +16,8 @@ class NanoBananaSkill(Skill):
         self,
         prompt: Annotated[str, "Подробное описание того, что должно быть на картинке."],
         filename: Annotated[str, "Имя файла или путь внутри контейнера (например, '/workspace/art.png')."] = "generated_art.png",
-        model: Annotated[Literal["nano_banana", "nano_banana_2", "nano_banana_pro"], "Выбор модели: nano_banana (2.5 Flash - быстро), nano_banana_2 (3.1 Flash - качественно), nano_banana_pro (3 Pro - текст и логика)."] = "nano_banana"
+        model: Annotated[Literal["nano_banana", "nano_banana_2", "nano_banana_pro"], "Выбор модели: nano_banana (2.5 Flash - быстро), nano_banana_2 (3.1 Flash - качественно), nano_banana_pro (3 Pro - текст и логика)."] = "nano_banana",
+        images: Annotated[list[str] | None, "Список путей к входным изображениям внутри контейнера (например, ['/workspace/photo.jpg']). Используется для редактирования или стилизации существующих картинок."] = None,
     ) -> dict:
         """Генерация изображений через официальный API Google Gemini (семейство Nano Banana)."""
 
@@ -39,8 +40,25 @@ class NanoBananaSkill(Skill):
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
 
+        parts: list[dict] = []
+        if images:
+            for img_container_path in images:
+                img_container_path = img_container_path if img_container_path.startswith('/') else f"/workspace/{img_container_path}"
+                img_host_path = sandbox.resolve_path(img_container_path) if sandbox else None
+                if img_host_path is None:
+                    return {"error": f"Доступ запрещён к входному изображению: {img_container_path}"}
+                if not os.path.exists(img_host_path):
+                    return {"error": f"Входное изображение не найдено: {img_container_path}"}
+                ext = os.path.splitext(img_host_path)[1].lower()
+                mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
+                mime_type = mime_map.get(ext, "image/png")
+                with open(img_host_path, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode("utf-8")
+                parts.append({"inline_data": {"mime_type": mime_type, "data": encoded}})
+        parts.append({"text": prompt})
+
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={self.api_key}"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        payload = {"contents": [{"parts": parts}]}
         proxies = {"http": proxy, "https": proxy} if proxy else None
 
         try:
