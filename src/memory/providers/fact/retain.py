@@ -490,7 +490,7 @@ async def _extract_from_chunk(
                 log.warning("[retain] chunk %d extraction failed after %d attempts: %s", chunk_index, max_retries, e, exc_info=True)
             else:
                 wait = delay * 2 ** attempt
-                log.warning("[retain] chunk %d extraction attempt %d/%d in %.0fs: %s", chunk_index, attempt + 1, max_retries, wait, e, exc_info=True)
+                log.warning("[retain] chunk %d extraction attempt %d/%d in %.0fs: %s", chunk_index, attempt + 1, max_retries, wait, e)
                 await asyncio.sleep(wait)
 
     return []
@@ -1010,7 +1010,8 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
     max_retries, delay = 5, 1.0
     for attempt in range(max_retries):
         try:
-            response = await client.aio.models.generate_content(
+            response = await asyncio.to_thread(
+                client.models.generate_content,
                 model=model_name,
                 contents=[{"role": "user", "parts": [{"text": prompt}]}],
                 config={"response_mime_type": "application/json"},
