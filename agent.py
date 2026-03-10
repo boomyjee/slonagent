@@ -1,4 +1,4 @@
-import asyncio, os, sys, inspect, logging, httpx
+import asyncio, os, sys, inspect, logging
 from typing import Annotated, get_type_hints, get_args, get_origin
 from google import genai
 from google.genai import types
@@ -153,8 +153,10 @@ class Agent:
             transport.set_agent(self)
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
+        http_options: dict = {"api_version": "v1alpha"}
+        if proxy_url:
+            http_options["client_args"] = {"proxy": proxy_url}
+            http_options["async_client_args"] = {"proxy": proxy_url}
         self.client = genai.Client(api_key=api_key, http_options=http_options)
         self._process_message_lock = asyncio.Lock()
         self._pending_messages: list = []
@@ -227,8 +229,7 @@ class Agent:
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
-                resp = await asyncio.to_thread(
-                    self.client.models.generate_content,
+                resp = await self.client.aio.models.generate_content(
                     model=self.transcription_model_name,
                     contents=types.Content(role="user", parts=[
                         types.Part.from_bytes(data=data, mime_type=mime_type),
