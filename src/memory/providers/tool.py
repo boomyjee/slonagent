@@ -127,16 +127,24 @@ class ToolProvider(BaseProvider):
             tool_name=tool_name,
             previous_content=entry.get("content") or "(none)",
         )
-        try:
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=self.model_name,
-                contents=[*contents, {"role": "user", "parts": [{"text": instruction}]}],
-            )
-            entry["content"] = (response.text or "").strip()
-            log.info("[ToolProvider] summarized %s", tool_name)
-        except Exception as e:
-            log.warning("[ToolProvider] summarize failed for %s: %s", tool_name, e, exc_info=True)
+        max_retries, delay = 5, 1.0
+        for attempt in range(max_retries):
+            try:
+                response = await asyncio.to_thread(
+                    self._client.models.generate_content,
+                    model=self.model_name,
+                    contents=[*contents, {"role": "user", "parts": [{"text": instruction}]}],
+                )
+                entry["content"] = (response.text or "").strip()
+                log.info("[ToolProvider] summarized %s", tool_name)
+                return
+            except Exception as e:
+                if attempt + 1 == max_retries:
+                    log.warning("[ToolProvider] summarize failed for %s after %d attempts: %s", tool_name, max_retries, e, exc_info=True)
+                else:
+                    wait = delay * 2 ** attempt
+                    log.warning("[ToolProvider] summarize attempt %d/%d for %s in %.0fs: %s", attempt + 1, max_retries, tool_name, wait, e)
+                    await asyncio.sleep(wait)
 
     async def get_tool_prompt(self, tool_name: str) -> str:
         entry = self._tool_stats.get(tool_name)
