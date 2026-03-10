@@ -4,7 +4,7 @@ import io, os, re, asyncio, logging, json, mimetypes
 log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, BotCommand
+from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, BotCommand, MessageOriginUser
 from aiogram.client.session.aiohttp import AiohttpSession
 from agent import Skill, tool
 from google.genai import types
@@ -361,10 +361,25 @@ class TelegramTransport:
         message_parts = []
         user_texts = []
 
+        user_id = first.from_user.id if first.from_user else None
+
         for message in messages:
             text = message.text or message.caption
             if text:
-                message_parts.append({"text": text})
+                origin = message.forward_origin
+                if origin:
+                    if isinstance(origin, MessageOriginUser) and origin.sender_user.id == user_id:
+                        sender = "myself"
+                    elif isinstance(origin, MessageOriginUser):
+                        u = origin.sender_user
+                        sender = " ".join(filter(None, [u.first_name, u.last_name])) or u.username or str(u.id)
+                    else:
+                        sender = getattr(origin, "sender_user_name", None) \
+                            or getattr(getattr(origin, "chat", None), "title", None) \
+                            or "unknown"
+                    message_parts.append({"text": f"<forwarded_message from=\"{sender}\">\n{text}\n</forwarded_message>"})
+                else:
+                    message_parts.append({"text": text})
                 user_texts.append(text)
 
             if message.photo:
