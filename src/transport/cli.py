@@ -33,6 +33,13 @@ class CliTransport:
     async def on_tool_result(self, name: str, result):
         print(f"[{name}] -> {result}")
 
+    async def inject_message(self, text: str):
+        print(f"\n[→] {text}")
+        await self.agent.process_message(
+            message_parts=[{"text": text}],
+            user_query=text,
+        )
+
     async def start(self):
         print("CLI режим. Введите сообщение (Ctrl+C для выхода).")
         while True:
