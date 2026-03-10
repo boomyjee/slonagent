@@ -1,4 +1,5 @@
 import asyncio, os, sys, inspect, logging
+from datetime import datetime
 from typing import Annotated, get_type_hints, get_args, get_origin
 from google import genai
 from google.genai import types
@@ -173,12 +174,21 @@ class Agent:
             if not isinstance(t, dict):
                 result.append(t)
                 continue
+            ts = ""
+            ts_raw = t.get("_timestamp") or ""
+            if ts_raw:
+                try:
+                    ts = datetime.fromisoformat(ts_raw).astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+                except ValueError:
+                    logging.warning("[agent] invalid _timestamp: %r", ts_raw)
             turn = {k: v for k, v in t.items() if not k.startswith("_")}
             if "parts" in turn:
                 turn["parts"] = [
                     {k: v for k, v in p.items() if not k.startswith("_")} if isinstance(p, dict) else p
                     for p in turn["parts"]
                 ]
+                if ts:
+                    turn["parts"] = [{"text": f"[{ts}]"}] + turn["parts"]
             result.append(turn)
         return result
 
