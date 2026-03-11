@@ -292,6 +292,62 @@ def _parse_observations(text: str) -> str:
 
 
 
+def _format_relative_time(date: datetime, now: datetime) -> str:
+    diff_days = (now.date() - date.date()).days
+    if diff_days == 0: return "today"
+    if diff_days == 1: return "yesterday"
+    if diff_days < 0: return f"in {-diff_days} day{'s' if -diff_days > 1 else ''}"
+    if diff_days < 7: return f"{diff_days} days ago"
+    if diff_days < 14: return "1 week ago"
+    if diff_days < 30: return f"{diff_days // 7} weeks ago"
+    if diff_days < 60: return "1 month ago"
+    if diff_days < 365: return f"{diff_days // 30} months ago"
+    years = diff_days // 365
+    return f"{years} year{'s' if years > 1 else ''} ago"
+
+
+def _format_gap(prev: datetime, curr: datetime) -> str | None:
+    diff_days = (curr.date() - prev.date()).days
+    if diff_days <= 1: return None
+    if diff_days < 7: return f"[{diff_days} days later]"
+    if diff_days < 14: return "[1 week later]"
+    if diff_days < 30: return f"[{diff_days // 7} weeks later]"
+    if diff_days < 60: return "[1 month later]"
+    return f"[{diff_days // 30} months later]"
+
+
+def _add_relative_time(observations: str, now: datetime) -> str:
+    """Добавляет относительные метки времени к датам в наблюдениях (порт Mastra addRelativeTimeToObservations)."""
+    date_header_re = re.compile(r"^(Date:\s*)([A-Z][a-z]+ \d{1,2},? \d{4})$", re.MULTILINE)
+
+    dates = []
+    for m in date_header_re.finditer(observations):
+        try:
+            date_str = m.group(2).replace(",", "")
+            parsed = datetime.strptime(date_str, "%b %d %Y")
+            dates.append({"index": m.start(), "end": m.end(), "date": parsed,
+                          "prefix": m.group(1), "date_str": m.group(2)})
+        except ValueError:
+            pass
+
+    if not dates:
+        return observations
+
+    result = ""
+    last_index = 0
+    for i, curr in enumerate(dates):
+        result += observations[last_index:curr["index"]]
+        if i > 0:
+            gap = _format_gap(dates[i - 1]["date"], curr["date"])
+            if gap:
+                result += f"\n{gap}\n\n"
+        relative = _format_relative_time(curr["date"], now)
+        result += f"{curr['prefix']}{curr['date_str']} ({relative})"
+        last_index = curr["end"]
+    result += observations[last_index:]
+    return result
+
+
 def _optimize_for_context(observations: str) -> str:
     """Убирает 🟡/🟢, -> и лишние пробелы для передачи агенту (аналог Mastra optimizeObservationsForContext)."""
     obs = re.sub(r"🟡\s*", "", observations)
@@ -369,7 +425,7 @@ class LogCompressor:
 
         obs_text = (
             "The following observations block contains your memory of past conversations with this user.\n\n"
-            f"<observations>\n{_optimize_for_context(updated)}\n</observations>\n\n"
+            f"<observations>\n{_optimize_for_context(_add_relative_time(updated, datetime.now()))}\n</observations>\n\n"
             "IMPORTANT: When responding, reference specific details from these observations. "
             "Do not give generic advice — personalize your response based on what you know about this user. "
             "For conflicting information, prefer the MOST RECENT observation (check dates)."
