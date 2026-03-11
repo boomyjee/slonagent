@@ -227,6 +227,8 @@ class Agent:
                             stream_id = await self.transport.send_message(text, stream_id)
                         elif getattr(p, "thought_signature", None):
                             logging.info("[stream] thought_signature: %d bytes", len(p.thought_signature))
+                        elif p.model_fields_set <= {"text"}:
+                            logging.info("[stream] empty padding part")
                         else:
                             logging.warning("[stream] unknown part: %r", p)
                     last_chunk = chunk
