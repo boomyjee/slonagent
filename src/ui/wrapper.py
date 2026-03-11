@@ -34,8 +34,8 @@ def UITransportWrapper(transport_class):
             self.dashboard.call_later(self.dashboard.add_chat, "assistant", text, chat_id)
             return stream_id
 
-        async def send_thinking(self, text: str, stream_id=None):
-            stream_id = await super().send_thinking(text, stream_id)
+        async def send_thinking(self, text: str, stream_id=None, final: bool = False):
+            stream_id = await super().send_thinking(text, stream_id, final=final)
             thinking_id = None if stream_id is None else id(stream_id)
             self.dashboard.call_later(self.dashboard.add_collapsible, "[think]", text, thinking_id)
             return stream_id

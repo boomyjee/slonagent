@@ -225,30 +225,29 @@ class TelegramTransport:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
     # throttle
-    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = "", max_chunks = None):
+    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, collapsed: bool = True, prefix: str = "", max_chunks = None):
         if messages is None: 
             messages = []
-            await self._do_answer(text, messages, expandable, prefix, max_chunks)
+            await self._do_answer(text, messages, expandable, collapsed, prefix, max_chunks)
             return messages
 
         key = id(messages)
-        if self._pending_answer.get(key):
-            self._pending_answer[key] = text
+        pending = self._pending_answer.get(key)
+        self._pending_answer[key] = (text, collapsed)
+        if pending:
             return messages
-        self._pending_answer[key] = text
 
         THROTLE_DELAY = 1.0
         async def _do():
             await asyncio.sleep(THROTLE_DELAY)
-            recent_text = self._pending_answer[key]
+            recent_text, recent_collapsed = self._pending_answer[key]
             self._pending_answer[key] = None
-            await self._do_answer(recent_text,messages,expandable,prefix, max_chunks)
+            await self._do_answer(recent_text, messages, expandable, recent_collapsed, prefix, max_chunks)
         
         asyncio.create_task(_do())
         return messages
-
-    async def _do_answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = "", max_chunks = None):
-
+    
+    async def _do_answer(self, text: str, messages: list | None = None, expandable: bool = False, collapsed: bool = True, prefix: str = "", max_chunks = None):
         if expandable:
             escaped_prefix = html.escape(prefix)
             overhead = len(escaped_prefix) + 36  # <blockquote expandable>…</blockquote>
@@ -266,7 +265,8 @@ class TelegramTransport:
                 raw_chunks[max_chunks-1] += "..."
 
         if expandable:
-            bodies = [f"<blockquote expandable>{escaped_prefix}{c}</blockquote>" for c in raw_chunks]
+            tag = "blockquote expandable" if collapsed else "blockquote"
+            bodies = [f"<{tag}>{escaped_prefix}{c}</blockquote>" for c in raw_chunks]
         else:
             bodies = raw_chunks
 
@@ -307,8 +307,8 @@ class TelegramTransport:
         if not self.verbose: return
         await self._answer(text, expandable=True, prefix="🔧 ", max_chunks=1)
 
-    async def send_thinking(self, text: str, stream_id=None):
-        return await self._answer(text, expandable=True, prefix="🧠 ", messages=stream_id)
+    async def send_thinking(self, text: str, stream_id=None, final: bool = False):
+        return await self._answer(text, expandable=True, collapsed=final, prefix="🧠 ", messages=stream_id)
 
     async def send_code(self, lang: str, code: str):
         await self._answer(f"```{lang}\n{code}\n```")

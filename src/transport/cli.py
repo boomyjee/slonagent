@@ -24,7 +24,7 @@ class CliTransport:
     async def send_system_prompt(self, text: str):
         print(f"[system]\n{text}\n")
 
-    async def send_thinking(self, text: str, stream_id=None):
+    async def send_thinking(self, text: str, stream_id=None, final: bool = False):
         return self._stream_print(text, stream_id, "[думает...]\n")
 
     async def on_tool_call(self, name: str, args: dict):

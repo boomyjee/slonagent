@@ -202,6 +202,7 @@ class Agent:
                 )
                 text, thinking_text = "", ""
                 stream_id, thinking_id = None, None
+                thinking_finalized = False
                 function_call_parts = []
                 
                 last_chunk = None
@@ -210,14 +211,27 @@ class Agent:
                     parts = chunk.candidates[0].content.parts or [] if chunk.candidates else []
                     for p in parts:
                         if getattr(p, "thought", False) and getattr(p, "text", None):
+                            logging.info("[stream] thought: %r", p.text[:80])
                             thinking_text += p.text
-                            thinking_id = await self.transport.send_thinking(thinking_text, thinking_id)
+                            if not thinking_finalized:
+                                thinking_id = await self.transport.send_thinking(thinking_text, thinking_id, final=False)
                         elif getattr(p, "function_call", None):
+                            logging.info("[stream] function_call: %s", p.function_call.name)
                             function_call_parts.append(p)
                         elif getattr(p, "text", None) and not getattr(p, "function_call", None):
+                            logging.info("[stream] text: %r", p.text[:80])
+                            if thinking_id and not thinking_finalized:
+                                await self.transport.send_thinking(thinking_text, thinking_id, final=True)
+                                thinking_finalized = True
                             text += p.text
                             stream_id = await self.transport.send_message(text, stream_id)
+                        elif getattr(p, "thought_signature", None):
+                            logging.info("[stream] thought_signature: %d bytes", len(p.thought_signature))
+                        else:
+                            logging.warning("[stream] unknown part: %r", p)
                     last_chunk = chunk
+                if thinking_id and not thinking_finalized:
+                    await self.transport.send_thinking(thinking_text, thinking_id, final=True)
                 if last_chunk and (u := last_chunk.usage_metadata):
                     logging.info("[agent] tokens: in=%s out=%s total=%s %s",
                         u.prompt_token_count, u.candidates_token_count, u.total_token_count,
