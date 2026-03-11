@@ -187,7 +187,7 @@ class Agent:
                     {k: v for k, v in p.items() if not k.startswith("_")} if isinstance(p, dict) else p
                     for p in turn["parts"]
                 ]
-                if ts:
+                if ts and turn.get("role") == "user" and any("text" in p for p in turn["parts"] if isinstance(p, dict)):
                     turn["parts"] = [{"text": f"[{ts}]"}] + turn["parts"]
             result.append(turn)
         return result
