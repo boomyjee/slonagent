@@ -185,8 +185,8 @@ class TelegramTransport:
 
         self.verbose = verbose
         self._current_message: Message | None = None
-        self._media_groups: dict[str, list[Message]] = {}
-        self._media_group_tasks: dict[str, asyncio.Task] = {}
+        self._pending_messages: list[Message] = []
+        self._flush_task: asyncio.Task | None = None
         self._pending_answer = {}
 
     def set_agent(self, agent):
@@ -316,22 +316,18 @@ class TelegramTransport:
         if message.from_user.id not in self.allowed_user_ids:
             return
 
-        if message.media_group_id:
-            group_id = message.media_group_id
-            self._media_groups.setdefault(group_id, []).append(message)
-            if group_id in self._media_group_tasks:
-                self._media_group_tasks[group_id].cancel()
-            self._media_group_tasks[group_id] = asyncio.create_task(
-                self._flush_media_group(group_id)
-            )
-        else:
-            await self._process_messages([message])
+        self._pending_messages.append(message)
+        if self._flush_task:
+            self._flush_task.cancel()
 
-    async def _flush_media_group(self, group_id: str):
-        await asyncio.sleep(0.1)
-        messages = self._media_groups.pop(group_id, [])
-        self._media_group_tasks.pop(group_id, None)
-        await self._process_messages(messages)
+        async def flush():
+            await asyncio.sleep(0.1)
+            messages = self._pending_messages[:]
+            self._pending_messages.clear()
+            self._flush_task = None
+            await self._process_messages(messages)
+
+        self._flush_task = asyncio.create_task(flush())
 
     async def _download_file(self, file_id: str) -> bytes:
         buf = io.BytesIO()
