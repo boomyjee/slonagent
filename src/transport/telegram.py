@@ -208,7 +208,6 @@ class TelegramTransport:
         )
 
     async def on_tool_result(self, name: str, result):
-        if not self.verbose: return
         if isinstance(result, dict):
             parts = [f"<b>[{html.escape(k)}]</b>\n{html.escape(str(v))}" for k, v in result.items() if v not in (None, "", [], {})]
             result_text = "\n".join(parts) if parts else "(пусто)"
