@@ -30,12 +30,9 @@ HELP = (
 )
 
 class ConfigSkill(Skill):
-    def __init__(self, config_path: str = None):
-        super().__init__()
-        if config_path is None:
-            config_path = os.path.join(os.getcwd(), ".config.json")
-        self.config_path = config_path
-        if not os.path.exists(config_path):
+    async def start(self):
+        self.config_path = os.path.join(self.agent.agent_dir, "config.json")
+        if not os.path.exists(self.config_path):
             self._save({})
 
     @bypass("config", "Конфиг read/write", standalone=True)

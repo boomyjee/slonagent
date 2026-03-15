@@ -27,24 +27,23 @@ import asyncio, importlib, json, logging, os, sys
 with open(".config.json", encoding="utf-8") as f: config = json.load(f)
 os.environ.update(config.get("env", {}))
 
-def resolve(v):
+def resolve(v, instantiate=True):
     if isinstance(v, str) and v.startswith("$"):
         obj = config
-        path = v[1:].split(".")
         try:
-            for part in path:
+            for part in v[1:].split("."):
                 obj = obj[part]
         except (KeyError, TypeError):
             raise KeyError(f"Не найдена ссылка в конфиге: {v}")
-        return resolve(obj)
+        return obj
     if isinstance(v, dict):
-        if '__class__' in v: return instantiate(v)
-        return {k: resolve(val) for k, val in v.items()}
+        if instantiate and '__class__' in v: return _instantiate(v)
+        return {k: resolve(val, instantiate) for k, val in v.items()}
     if isinstance(v, list):
-        return [resolve(i) for i in v]
+        return [resolve(i, instantiate) for i in v]
     return v
 
-def instantiate(cfg: dict, cls=None):
+def _instantiate(cfg: dict, cls=None):
     if cls is None:
         module_path, cls_name = cfg["__class__"].rsplit(".", 1)
         cls = getattr(importlib.import_module(module_path), cls_name)
@@ -72,7 +71,7 @@ _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 async def run_cli():
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
     transport = CliTransport()
-    agent = Agent(**resolve(config["agent"]), transport=transport)
+    agent = Agent(**resolve(config["agent"]), agent_dir=os.getcwd(), transport=transport)
     await agent.start()
 
     print("CLI режим. Введите сообщение (Ctrl+C для выхода).")
@@ -98,12 +97,22 @@ async def run_telegram():
         if agent_id in agents: return agents[agent_id]
 
         agent_dir = os.getcwd() if is_main_agent else os.path.join(os.getcwd(), "forks", agent_id)
-        memory_dir = os.path.join(agent_dir, "memory")
         if not force_create and not os.path.exists(agent_dir): return None
 
-        agent_cfg = config["agent"] if is_main_agent else {**config["agent"], **config.get("fork_agent", {})}
+        config_path = os.path.join(agent_dir, "config.json")
+        if is_main_agent:
+            agent_cfg = config["agent"]
+        else:
+            if not os.path.exists(config_path):
+                os.makedirs(agent_dir, exist_ok=True)
+                with open(config_path, "w", encoding="utf-8") as f:
+                    merged = {**config["agent"], **resolve(config.get("fork_agent", {}), instantiate=False)}
+                    json.dump({"agent": merged}, f, ensure_ascii=False, indent=4)
+            with open(config_path, encoding="utf-8") as f:
+                agent_cfg = json.load(f)["agent"]
+
         transport = WrappedTG(**config["telegram"]["transport"], bot=bot, chat_id=chat_id, thread_id=thread_id, agent_id=agent_id)
-        agent = Agent(**resolve(agent_cfg), memory_dir=memory_dir, transport=transport)
+        agent = Agent(**resolve(agent_cfg), agent_dir=agent_dir, transport=transport)
         await agent.start()
         agents[agent_id] = agent
         return agent

@@ -140,12 +140,13 @@ class AgentSkill(Skill):
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, memory_compressor, memory_dir: str = None, memory_providers: list | dict = None, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
+    def __init__(self, model_name: str, api_key: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
         self.model_name = model_name
-        self.include_thoughts = include_thoughts
         self.transcription_model_name = transcription_model_name
+        self.agent_dir = agent_dir
         if isinstance(memory_providers, dict):
             memory_providers = list(memory_providers.values())
+        memory_dir = os.path.join(agent_dir, "memory")
         self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [], memory_dir=memory_dir)
         self.skills = [memory_compressor] + self.memory.providers + (skills or []) + [AgentSkill()]
         self.max_iterations = max_iterations
@@ -340,7 +341,7 @@ class Agent:
                 system_instruction="\n\n".join(system_parts),
                 temperature=1.0,
                 tools=tools,
-                thinking_config=types.ThinkingConfig(include_thoughts=self.include_thoughts),
+                thinking_config=types.ThinkingConfig(include_thoughts=True),
             )
             logging.info("[agent] → LLM %s", self.model_name)
             function_call_parts, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), config)
