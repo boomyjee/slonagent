@@ -1,89 +1,62 @@
 from __future__ import annotations
 
-import asyncio
-import logging
-
-from src.ui.dashboard import Dashboard, UILogHandler
-
-_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+from src.ui.dashboard import Dashboard, agent_context
 
 
-def UITransportWrapper(transport_class):
-    """Returns a subclass of transport_class with TUI dashboard mixed in."""
+def UITransportWrapper(transport_class, dashboard: Dashboard):
+    """Returns a subclass of transport_class that mirrors all events to dashboard."""
 
     class Wrapped(transport_class):
-        def __init__(self, *args, dashboard_port: int = 8765, **kwargs):
-            self.dashboard = Dashboard(port=dashboard_port)
-            root_logger = logging.getLogger()
-            root_logger.setLevel(logging.INFO)
-            fmt = logging.Formatter(_LOG_FORMAT)
-            console = logging.StreamHandler()
-            console.setFormatter(fmt)
-            root_logger.addHandler(console)
-            web = UILogHandler(self.dashboard)
-            web.setFormatter(fmt)
-            root_logger.addHandler(web)
+        def __init__(self, *args, agent_id: str = "main", **kwargs):
+            self.dashboard = dashboard
+            self.agent_id = agent_id
             super().__init__(*args, **kwargs)
+            dashboard.register_transport(agent_id, self)
 
         async def on_user_message(self, text: str) -> None:
-            self.dashboard.call_later(self.dashboard.add_chat, "user", text)
+            self.dashboard.add_chat("user", text, agent_id=self.agent_id)
 
         async def send_message(self, text: str, stream_id=None):
             stream_id = await super().send_message(text, stream_id)
-            chat_id = None if stream_id is None else id(stream_id)
-            self.dashboard.call_later(self.dashboard.add_chat, "assistant", text, chat_id)
+            chat_id = id(stream_id) if stream_id is not None else None
+            self.dashboard.add_chat("assistant", text, chat_id, agent_id=self.agent_id)
             return stream_id
 
         async def send_thinking(self, text: str, stream_id=None, final: bool = False):
             stream_id = await super().send_thinking(text, stream_id, final=final)
-            thinking_id = None if stream_id is None else id(stream_id)
-            self.dashboard.call_later(self.dashboard.add_collapsible, "[think]", text, thinking_id)
+            thinking_id = id(stream_id) if stream_id is not None else None
+            self.dashboard.add_collapsible("[think]", text, thinking_id, agent_id=self.agent_id)
             return stream_id
 
         async def send_system_prompt(self, text: str):
             label = text.split("\n")[0].strip("[] ")[:40]
-            self.dashboard.call_later(self.dashboard.add_collapsible, f"[sys] {label}", text)
+            self.dashboard.add_collapsible(f"[sys] {label}", text, agent_id=self.agent_id)
             return await super().send_system_prompt(text)
 
         async def on_tool_call(self, name: str, args: dict):
             lines = "\n".join(f"  {k}: {v}" for k, v in args.items())
             text = f"[{name}]\n{lines}" if lines else f"[{name}]"
-            self.dashboard.call_later(self.dashboard.add_collapsible, f"[>] {name}", text)
+            self.dashboard.add_collapsible(f"[>] {name}", text, agent_id=self.agent_id)
             return await super().on_tool_call(name, args)
 
         async def on_tool_result(self, name: str, result):
             if isinstance(result, dict):
-                parts = []
-                for k, v in result.items():
-                    if v in (None, "", [], {}):
-                        continue
-                    if isinstance(v, (bytes, bytearray)):
-                        parts.append(f"[{k}]\n<binary {len(v)} bytes>")
-                    else:
-                        parts.append(f"[{k}]\n{v}")
+                parts = [
+                    f"<binary {len(v)} bytes>" if isinstance(v, (bytes, bytearray)) else f"[{k}]\n{v}"
+                    for k, v in result.items() if v not in (None, "", [], {})
+                ]
                 text = "\n".join(parts) if parts else "(пусто)"
             elif isinstance(result, (bytes, bytearray)):
                 text = f"<binary {len(result)} bytes>"
             else:
                 text = str(result)
-            self.dashboard.call_later(self.dashboard.add_collapsible, f"[<] {name}", text)
+            self.dashboard.add_collapsible(f"[<] {name}", text, agent_id=self.agent_id)
             return await super().on_tool_result(name, result)
 
-        async def _web_chat_task(self):
-            while True:
-                text = await self.dashboard.get_incoming()
-                self.dashboard.call_later(self.dashboard.add_chat, "user", text)
-                await self.inject_message(text)
+        async def handle_message(self, message):
+            agent_context.set(self.agent_id)
+            return await super().handle_message(message)
 
-        async def start(self):
-            from src.memory.providers.fact import FactProvider
-            for provider in getattr(getattr(self, "agent", None), "memory", None) and self.agent.memory.providers or []:
-                if isinstance(provider, FactProvider):
-                    self.dashboard.set_recall_fn(lambda q, p=provider: p._recall_text(q, query_label="$DASHBOARD"))
-                    break
-            await super().start()
-            asyncio.create_task(self.dashboard.run_async())
-            asyncio.create_task(self._web_chat_task())
 
     Wrapped.__name__ = f"UI{transport_class.__name__}"
     return Wrapped

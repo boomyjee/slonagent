@@ -3,16 +3,40 @@ import json
 import logging
 import webbrowser
 from collections import deque
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-
-from typing import Awaitable, Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
+agent_context: ContextVar[str] = ContextVar("agent_id", default="main")
+
 _HTML = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
 _BUFFER_SIZE = 500
+_LOG_FORMAT = "%(asctime)s [%(agent_id)s] %(name)s - %(levelname)s - %(message)s"
+
+
+class UILogHandler(logging.Handler):
+    def __init__(self, dashboard, level: int = logging.DEBUG) -> None:
+        super().__init__(level)
+        self._dashboard = dashboard
+
+    def _category(self, name: str) -> str:
+        if name.startswith("src.memory") or name.startswith("memory"):
+            return "memory"
+        if name.startswith("aiogram") or name.startswith("src.transport") or name.startswith("httpx") or name.startswith("uvicorn") or name.startswith("google_genai") or name.startswith("sentence_transformers") or name.startswith("huggingface_hub"):
+            return "transport"
+        return "agent"
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            category = self._category(record.name)
+            record.agent_id = agent_context.get()
+            text = self.format(record)
+            self._dashboard.add_log(category, record.levelname, text, agent_id=record.agent_id)
+        except Exception:
+            self.handleError(record)
 
 
 class Dashboard:
@@ -23,16 +47,37 @@ class Dashboard:
         self._incoming: asyncio.Queue = asyncio.Queue()
         self._clients: set = set()
         self._buffer: deque = deque(maxlen=_BUFFER_SIZE)
-        self._recall_fn: Callable[[str], Awaitable[str]] | None = None
+        self._transports: dict[str, object] = {}
 
-    def set_recall_fn(self, fn: Callable[[str], Awaitable[str]]) -> None:
-        self._recall_fn = fn
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        ui_handler = UILogHandler(self)
+        ui_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+        root.addHandler(ui_handler)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        root.addHandler(console_handler)
 
-    async def get_incoming(self) -> str:
-        return await self._incoming.get()
+    async def start(self) -> None:
+        asyncio.create_task(self.run_async())
 
-    def call_later(self, fn, *args):
-        fn(*args)
+    def wrap(self, transport_class):
+        from src.ui.wrapper import UITransportWrapper
+        return UITransportWrapper(transport_class, self)
+
+
+    def register_transport(self, agent_id: str, transport) -> None:
+        self._transports[agent_id] = transport
+
+    async def _dispatch_web_chat(self) -> None:
+        while True:
+            item = await self._incoming.get()
+            agent_id, text = item["agent_id"], item["text"]
+            transport = self._transports.get(agent_id)
+            if transport:
+                self.add_chat("user", text, agent_id=agent_id)
+                await transport.inject_message(text)
 
     def _emit(self, event: dict) -> None:
         event["ts"] = datetime.now().strftime("%H:%M:%S")
@@ -40,19 +85,18 @@ class Dashboard:
         if self._queue is None or self._loop is None:
             return
         try:
-            # call_soon_threadsafe безопасен из любого потока
             self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
         except RuntimeError:
             pass
 
-    def add_chat(self, role: str, text: str, chat_id=None) -> None:
-        self._emit({"type": "chat", "role": role, "text": text, "chat_id": chat_id})
+    def add_chat(self, role: str, text: str, chat_id=None, agent_id: str = "main") -> None:
+        self._emit({"type": "chat", "role": role, "text": text, "chat_id": chat_id, "agent_id": agent_id})
 
-    def add_collapsible(self, title: str, text: str, collapsible_id=None) -> None:
-        self._emit({"type": "collapsible", "title": title, "text": text, "collapsible_id": collapsible_id})
+    def add_collapsible(self, title: str, text: str, collapsible_id=None, agent_id: str = "main") -> None:
+        self._emit({"type": "collapsible", "title": title, "text": text, "collapsible_id": collapsible_id, "agent_id": agent_id})
 
-    def add_log(self, category: str, level: str, text: str) -> None:
-        self._emit({"type": "log", "category": category, "level": level, "text": text})
+    def add_log(self, category: str, level: str, text: str, agent_id: str = "main") -> None:
+        self._emit({"type": "log", "category": category, "level": level, "text": text, "agent_id": agent_id})
 
     async def _broadcaster(self) -> None:
         while True:
@@ -74,6 +118,7 @@ class Dashboard:
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue(maxsize=2000)
         asyncio.create_task(self._broadcaster())
+        asyncio.create_task(self._dispatch_web_chat())
 
         app = FastAPI()
 
@@ -93,11 +138,19 @@ class Dashboard:
                     try:
                         msg = json.loads(data)
                         if msg.get("type") == "user_message" and msg.get("text", "").strip():
-                            await self._incoming.put(msg["text"].strip())
-                        elif msg.get("type") == "recall_query" and msg.get("text", "").strip() and self._recall_fn:
+                            await self._incoming.put({"agent_id": msg.get("agent_id", "main"), "text": msg["text"].strip()})
+                        elif msg.get("type") == "recall_query" and msg.get("text", "").strip():
                             query = msg["text"].strip()
-                            result = await self._recall_fn(query)
-                            await websocket.send_text(json.dumps({"type": "recall_result", "query": query, "text": result or "Ничего не найдено.", "ts": datetime.now().strftime("%H:%M:%S")}, ensure_ascii=False))
+                            agent_id = msg.get("agent_id", "main")
+                            try:
+                                from src.memory.providers.fact import FactProvider
+                                transport = self._transports.get(agent_id)
+                                provider = next((p for p in transport.agent.memory.providers if isinstance(p, FactProvider)), None) if transport and transport.agent else None
+                                result = (await provider._recall_text(query, query_label="$DASHBOARD")) if provider else "Провайдер памяти не найден."
+                            except Exception as e:
+                                logging.warning("[recall] ошибка при выполнении запроса %r", query, exc_info=True)
+                                result = f"Ошибка: {e}"
+                            await websocket.send_text(json.dumps({"type": "recall_result", "query": query, "text": result or "Ничего не найдено.", "ts": datetime.now().strftime("%H:%M:%S"), "agent_id": agent_id}, ensure_ascii=False))
                     except Exception:
                         pass
             except WebSocketDisconnect:
@@ -120,24 +173,3 @@ class Dashboard:
         )
         server = uvicorn.Server(config)
         await server.serve()
-
-
-class UILogHandler(logging.Handler):
-    def __init__(self, dashboard: Dashboard, level: int = logging.DEBUG) -> None:
-        super().__init__(level)
-        self._dashboard = dashboard
-
-    def _category(self, name: str) -> str:
-        if name.startswith("src.memory") or name.startswith("memory"):
-            return "memory"
-        if name.startswith("aiogram") or name.startswith("src.transport") or name.startswith("httpx") or name.startswith("uvicorn") or name.startswith("google_genai") or name.startswith("sentence_transformers") or name.startswith("huggingface_hub"):
-            return "transport"
-        return "agent"
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            category = self._category(record.name)
-            text = self.format(record)
-            self._dashboard.add_log(category, record.levelname, text)
-        except Exception:
-            self.handleError(record)

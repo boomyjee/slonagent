@@ -1,13 +1,13 @@
 import warnings
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message
+from aiogram.types import Message, BotCommand
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from agent import Agent
 from src.transport.cli import CliTransport
 from src.transport.telegram import TelegramTransport
-from src.ui.wrapper import UITransportWrapper
+from src.ui.dashboard import Dashboard
 
 # Перехват warnings — единственный способ перекрыть то, что другие модули
 # (в т.ч. зависимости) меняют формат логов и включают предупреждения внутри себя.
@@ -23,8 +23,6 @@ def _warn(msg, category=UserWarning, stacklevel=1, source=None, **kw):
 warnings.warn = _warn
 
 import asyncio, importlib, json, logging, os, sys
-
-_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 def resolve(v):
     if isinstance(v, str) and v.startswith("$"):
@@ -66,7 +64,10 @@ def release_pid_lock():
 with open(".config.json", encoding="utf-8") as f: config = json.load(f)
 os.environ.update(config.get("env", {}))
 
+_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
 async def run_cli():
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
     transport = CliTransport()
     agent = Agent(**resolve(config["agent"]), transport=transport)
     await agent.start()
@@ -80,22 +81,32 @@ async def run_cli():
 
 async def run_telegram():
     tg_cfg = config["telegram_transport"]
-    allowed_user_ids = set(tg_cfg["allowed_user_ids"])
+
+    dashboard = Dashboard(port=tg_cfg.get("dashboard_port", 8765))
+    WrappedTG = dashboard.wrap(TelegramTransport)
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
     bot = Bot(token=tg_cfg["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
     dp = Dispatcher()
 
+    async def make_agent(chat_id: int, thread_id: int | None, agent_id: str, memory_dir: str = None):
+        transport = WrappedTG(bot=bot, chat_id=chat_id, thread_id=thread_id, verbose=tg_cfg.get("verbose", True), agent_id=agent_id)
+        agent = Agent(**resolve(config["agent"]), memory_dir=memory_dir, transport=transport)
+        await agent.start()
+        return agent
+
+    allowed_user_ids = set(tg_cfg["allowed_user_ids"])
     main_chat_id = tg_cfg["allowed_user_ids"][0]
-    main_transport = UITransportWrapper(TelegramTransport)(
-        bot=bot,
-        chat_id=main_chat_id,
-        verbose=tg_cfg.get("verbose", True),
-        dashboard_port=tg_cfg.get("dashboard_port", 8765),
-    )
-    main_agent = Agent(**resolve(config["agent"]), transport=main_transport)
-    await main_agent.start()
-    await main_transport.start()
+    main_agent = await make_agent(main_chat_id, None, "main")
+    commands = [
+        BotCommand(command=cmd, description=desc)
+        for skill in main_agent.skills
+        for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
+    ]
+    await bot.set_my_commands(commands)
+    logging.info("[telegram] registered %d commands", len(commands))
+
+    await dashboard.start()
 
     agents: dict[tuple, Agent] = {(main_chat_id, None): main_agent}
 
@@ -107,11 +118,9 @@ async def run_telegram():
         key = (message.chat.id, thread_id)
 
         if key not in agents:
-            memory_dir = os.path.join(os.getcwd(), "memory", f"thread_{message.chat.id}_{thread_id}")
-            transport = TelegramTransport(bot=bot, chat_id=message.chat.id, thread_id=thread_id, verbose=tg_cfg.get("verbose", True))
-            agent = Agent(**resolve(config["agent"]), memory_dir=memory_dir, transport=transport)
-            await agent.start()
-            agents[key] = agent
+            agent_id = f"thread_{message.chat.id}_{thread_id}"
+            memory_dir = os.path.join(os.getcwd(), "memory", agent_id)
+            agents[key] = await make_agent(message.chat.id, thread_id, agent_id, memory_dir)
 
         await agents[key].transport.handle_message(message)
 

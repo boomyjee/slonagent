@@ -4,7 +4,7 @@ import io, os, re, asyncio, logging, json, mimetypes
 log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot
-from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, BotCommand, MessageOriginUser
+from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser
 from agent import Skill, tool
 from google.genai import types
 
@@ -321,7 +321,7 @@ class TelegramTransport:
     async def _typing_loop(self, chat_id: int) -> None:
         try:
             while True:
-                await self.bot.send_chat_action(chat_id=chat_id, action="typing")
+                await self.bot.send_chat_action(chat_id=chat_id, action="typing", message_thread_id=self.thread_id)
                 await asyncio.sleep(4)
         except asyncio.CancelledError:
             pass
@@ -427,12 +427,3 @@ class TelegramTransport:
         finally:
             typing_task.cancel()
 
-    async def start(self):
-        commands = [
-            BotCommand(command=cmd, description=desc)
-            for skill in (self.agent.skills if self.agent else [])
-            for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
-        ]
-        if commands:
-            await self.bot.set_my_commands(commands)
-            logging.info("[telegram] registered %d commands", len(commands))

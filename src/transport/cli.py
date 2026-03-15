@@ -39,16 +39,3 @@ class CliTransport:
             message_parts=[{"text": text}],
             user_query=text,
         )
-
-    async def start(self):
-        print("CLI режим. Введите сообщение (Ctrl+C для выхода).")
-        while True:
-            try:
-                text = await asyncio.get_event_loop().run_in_executor(None, input, "Вы: ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if text.strip():
-                await self.agent.process_message(
-                    message_parts=[{"text": text}],
-                )
-                print()
