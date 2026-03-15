@@ -107,7 +107,11 @@ async def run_telegram():
                 os.makedirs(agent_dir, exist_ok=True)
                 with open(config_path, "w", encoding="utf-8") as f:
                     merged = {**config["agent"], **resolve(config.get("fork_agent", {}), instantiate=False)}
-                    json.dump({"agent": merged}, f, ensure_ascii=False, indent=4)
+                    fork_config = {}
+                    if "sandbox" in config:
+                        fork_config["sandbox"] = config["sandbox"]
+                    fork_config["agent"] = merged
+                    json.dump(fork_config, f, ensure_ascii=False, indent=4)
             with open(config_path, encoding="utf-8") as f:
                 agent_cfg = json.load(f)["agent"]
 
