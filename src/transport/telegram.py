@@ -3,9 +3,8 @@ import io, os, re, asyncio, logging, json, mimetypes
 
 log = logging.getLogger(__name__)
 from typing import Annotated
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, BotCommand, MessageOriginUser
-from aiogram.client.session.aiohttp import AiohttpSession
 from agent import Skill, tool
 from google.genai import types
 
@@ -104,13 +103,9 @@ def _split_message_to_html(content: str, converter, max_len: int = 4096) -> list
 
 
 class TelegramSkill(Skill):
-    def __init__(self, bot: Bot):
-        self.bot = bot
-        self._message = None
+    def __init__(self, transport: "TelegramTransport"):
+        self.transport = transport
         super().__init__()
-
-    def set_message(self, message):
-        self._message = message
 
     def _resolve_paths(self, paths: list[str]) -> list[str] | dict:
         from src.skills.sandbox import SandboxSkill
@@ -132,10 +127,10 @@ class TelegramSkill(Skill):
             return host_paths
         logging.info("[skill] send_files: %s", host_paths)
         if len(host_paths) == 1:
-            await self._message.answer_document(FSInputFile(host_paths[0]))
+            await self.transport.bot.send_document(self.transport.chat_id, FSInputFile(host_paths[0]), message_thread_id=self.transport.thread_id)
         else:
             media = [InputMediaDocument(media=FSInputFile(p)) for p in host_paths]
-            await self._message.answer_media_group(media)
+            await self.transport.bot.send_media_group(self.transport.chat_id, media, message_thread_id=self.transport.thread_id)
         return {"status": "ok"}
 
     @tool("Отправить одно или несколько изображений как альбом (до 10). Один вызов = один альбом. Для нескольких альбомов — вызови несколько раз.")
@@ -145,10 +140,10 @@ class TelegramSkill(Skill):
             return host_paths
         logging.info("[skill] send_images: %s", host_paths)
         if len(host_paths) == 1:
-            await self._message.answer_photo(FSInputFile(host_paths[0]))
+            await self.transport.bot.send_photo(self.transport.chat_id, FSInputFile(host_paths[0]), message_thread_id=self.transport.thread_id)
         else:
             media = [InputMediaPhoto(media=FSInputFile(p)) for p in host_paths]
-            await self._message.answer_media_group(media)
+            await self.transport.bot.send_media_group(self.transport.chat_id, media, message_thread_id=self.transport.thread_id)
         return {"status": "ok"}
 
     @tool("Скачать файл, отправленный пользователем, в рабочую директорию. Путь назначения должен быть внутри /workspace/.")
@@ -164,30 +159,30 @@ class TelegramSkill(Skill):
         if host_dest is None:
             return {"error": f"Путь запрещён или недоступен: {dest_path}"}
 
-        tg_file = await self.bot.get_file(tg_file_id)
+        tg_file = await self.transport.bot.get_file(tg_file_id)
         os.makedirs(os.path.dirname(host_dest), exist_ok=True)
-        await self.bot.download_file(tg_file.file_path, host_dest)
+        await self.transport.bot.download_file(tg_file.file_path, host_dest)
         logging.info("[skill] download_file: %s → %s", tg_file_id, host_dest)
         return {"status": "ok", "saved_to": dest_path}
 
 
 class TelegramTransport:
-    def __init__(self, bot_token: str, allowed_user_ids: set[int], verbose: bool = True):
-        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        self.bot = Bot(token=bot_token, session=AiohttpSession(proxy=proxy) if proxy else None)
+    def __init__(self, bot: Bot, chat_id: int, thread_id: int | None = None, verbose: bool = True):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.thread_id = thread_id
         self.agent = None
-        self.allowed_user_ids = allowed_user_ids
         self._no_link_preview = LinkPreviewOptions(is_disabled=True)
-        self.dp = Dispatcher()
-        self.dp.message()(self._handle_message)
-
-        self._skill = TelegramSkill(self.bot)
-
+        self._skill = TelegramSkill(self)
         self.verbose = verbose
-        self._current_message: Message | None = None
+        self._tool_msg = None
+        self._tool_call_text = ""
         self._pending_messages: list[Message] = []
         self._flush_task: asyncio.Task | None = None
         self._pending_answer = {}
+
+    async def _send(self, text: str, **kwargs) -> Message:
+        return await self.bot.send_message(self.chat_id, text, message_thread_id=self.thread_id, link_preview_options=self._no_link_preview, **kwargs)
 
     def set_agent(self, agent):
         self.agent = agent
@@ -201,11 +196,7 @@ class TelegramTransport:
         lines = "\n".join(f"  {html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
         call_text = f"<b>[{html.escape(name)}]</b>\n{lines}" if lines else f"<b>[{html.escape(name)}]</b>"
         self._tool_call_text = call_text[:2000]
-        self._tool_msg = await self._current_message.answer(
-            f"<blockquote expandable>{self._tool_call_text}</blockquote>",
-            parse_mode="HTML",
-            link_preview_options=self._no_link_preview,
-        )
+        self._tool_msg = await self._send(f"<blockquote expandable>{self._tool_call_text}</blockquote>", parse_mode="HTML")
 
     async def on_tool_result(self, name: str, result):
         if isinstance(result, dict):
@@ -277,7 +268,7 @@ class TelegramTransport:
                     if "message is not modified" not in str(e):
                         raise
             else:
-                messages.append(await self._current_message.answer(body, parse_mode="HTML", link_preview_options=self._no_link_preview))
+                messages.append(await self._send(body, parse_mode="HTML"))
         for msg in messages[len(bodies):]:
             try:
                 await msg.delete()
@@ -289,18 +280,14 @@ class TelegramTransport:
         return await self._answer((text or "").strip() or "[…]", messages=stream_id)
 
     async def inject_message(self, text: str):
-        for chat_id in self.allowed_user_ids:
-            sent = await self.bot.send_message(chat_id, "[→]" + text, link_preview_options=self._no_link_preview)
-            self._current_message = sent
-            self._tool_msg = None
-            self._tool_call_text = ""
-            self._skill.set_message(sent)
-            await self.agent.process_message(
-                message_parts=[{"text": text}],
-                user_message_id=sent.message_id,
-                user_query=text,
-            )
-            break
+        sent = await self._send("[→]" + text)
+        self._tool_msg = None
+        self._tool_call_text = ""
+        await self.agent.process_message(
+            message_parts=[{"text": text}],
+            user_message_id=sent.message_id,
+            user_query=text,
+        )
 
     async def send_system_prompt(self, text: str):
         if not self.verbose: return
@@ -312,10 +299,7 @@ class TelegramTransport:
     async def send_code(self, lang: str, code: str):
         await self._answer(f"```{lang}\n{code}\n```")
 
-    async def _handle_message(self, message: Message):
-        if message.from_user.id not in self.allowed_user_ids:
-            return
-
+    async def handle_message(self, message: Message):
         self._pending_messages.append(message)
         if self._flush_task:
             self._flush_task.cancel()
@@ -346,12 +330,9 @@ class TelegramTransport:
 
     async def _process_messages(self, messages: list[Message]):
         first = messages[0]
-        self._current_message = first
         self._tool_msg = None
         self._tool_call_text = ""
-
-        self._skill.set_message(first)
-        typing_task = asyncio.create_task(self._typing_loop(first.chat.id))
+        typing_task = asyncio.create_task(self._typing_loop(self.chat_id))
 
         message_parts = []
         user_texts = []
@@ -360,6 +341,8 @@ class TelegramTransport:
 
         for message in messages:
             text = message.text or message.caption
+            if text and text.startswith("/"):
+                text = text.split("@")[0] + (text[text.index(" "):] if " " in text else "")
             if text:
                 origin = message.forward_origin
                 if origin:
@@ -425,6 +408,10 @@ class TelegramTransport:
             else:
                 message_parts.append({"text": f"<attached_file {attrs} />"})
 
+        if not message_parts:
+            typing_task.cancel()
+            return
+
         if user_texts:
             await self.on_user_message(" ".join(user_texts).strip())
 
@@ -436,12 +423,11 @@ class TelegramTransport:
             )
         except Exception as e:
             logging.exception("Error processing message")
-            await first.answer(f"Произошла ошибка при обработке: {e}", link_preview_options=self._no_link_preview)
+            await self._send(f"Произошла ошибка при обработке: {e}")
         finally:
             typing_task.cancel()
 
     async def start(self):
-        logging.info("Starting TelegramTransport...")
         commands = [
             BotCommand(command=cmd, description=desc)
             for skill in (self.agent.skills if self.agent else [])
@@ -450,4 +436,3 @@ class TelegramTransport:
         if commands:
             await self.bot.set_my_commands(commands)
             logging.info("[telegram] registered %d commands", len(commands))
-        await self.dp.start_polling(self.bot)

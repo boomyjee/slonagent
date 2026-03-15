@@ -248,8 +248,6 @@ class Agent:
     async def start(self):
         for skill in self.skills:
             await skill.start()
-        if self.transport:
-            await self.transport.start()
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
         max_retries, delay = 5, 0.5

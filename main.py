@@ -1,4 +1,14 @@
 import warnings
+
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from aiogram.client.session.aiohttp import AiohttpSession
+
+from agent import Agent
+from src.transport.cli import CliTransport
+from src.transport.telegram import TelegramTransport
+from src.ui.wrapper import UITransportWrapper
+
 # Перехват warnings — единственный способ перекрыть то, что другие модули
 # (в т.ч. зависимости) меняют формат логов и включают предупреждения внутри себя.
 _original_warn = warnings.warn
@@ -12,7 +22,7 @@ def _warn(msg, category=UserWarning, stacklevel=1, source=None, **kw):
     return _original_warn(msg, category, stacklevel, source, **kw)
 warnings.warn = _warn
 
-import asyncio, importlib, json, logging, os, shutil, sys
+import asyncio, importlib, json, logging, os, sys
 
 _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
@@ -36,8 +46,6 @@ def instantiate(cfg: dict, cls=None):
         cls = getattr(importlib.import_module(module_path), cls_name)
     return cls(**{k: resolve(v) for k, v in cfg.items() if k != "__class__"})
 
-_CONFIG_PATH = ".config.json"
-_LAST_GOOD_PATH = ".config.last_good.json"
 _PID_PATH = ".agent.pid"
 
 def acquire_pid_lock():
@@ -55,43 +63,68 @@ def release_pid_lock():
     try: os.unlink(_PID_PATH)
     except FileNotFoundError: pass
 
-async def run():
-    from agent import Agent
-    from src.transport.cli import CliTransport
-    from src.transport.telegram import TelegramTransport
-    from src.ui.wrapper import UITransportWrapper
+with open(".config.json", encoding="utf-8") as f: config = json.load(f)
+os.environ.update(config.get("env", {}))
 
+async def run_cli():
+    transport = CliTransport()
+    agent = Agent(**resolve(config["agent"]), transport=transport)
+    await agent.start()
 
-    try:
-        with open(_CONFIG_PATH, encoding="utf-8") as f: config = json.load(f)
-        os.environ.update(config.get("env", {}))
+    print("CLI режим. Введите сообщение (Ctrl+C для выхода).")
+    while True:
+        text = await asyncio.get_event_loop().run_in_executor(None, input, "Вы: ")
+        if text.strip():
+            await agent.process_message(message_parts=[{"text": text}])
+            print()
 
-        if  "--cli" in sys.argv:
-            logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
-            transport = CliTransport()
-        else:
-            transport = UITransportWrapper(TelegramTransport)(**resolve(config["telegram_transport"]))
+async def run_telegram():
+    tg_cfg = config["telegram_transport"]
+    allowed_user_ids = set(tg_cfg["allowed_user_ids"])
 
-        agent = Agent(**resolve(config["agent"]),transport=transport)
-            
-    except Exception as e:
-        logging.error("Ошибка при запуске: %s", e)
-        if os.path.exists(_LAST_GOOD_PATH):
-            shutil.move(_LAST_GOOD_PATH, _CONFIG_PATH)
-            logging.info("Конфиг откатился до последнего рабочего, перезапуск...")
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        raise
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    bot = Bot(token=tg_cfg["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
+    dp = Dispatcher()
 
-    # shutil.copy(_CONFIG_PATH, _LAST_GOOD_PATH)
-    try:
-        await agent.start()
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        release_pid_lock()
+    main_chat_id = tg_cfg["allowed_user_ids"][0]
+    main_transport = UITransportWrapper(TelegramTransport)(
+        bot=bot,
+        chat_id=main_chat_id,
+        verbose=tg_cfg.get("verbose", True),
+        dashboard_port=tg_cfg.get("dashboard_port", 8765),
+    )
+    main_agent = Agent(**resolve(config["agent"]), transport=main_transport)
+    await main_agent.start()
+    await main_transport.start()
+
+    agents: dict[tuple, Agent] = {(main_chat_id, None): main_agent}
+
+    async def on_message(message: Message):
+        if not message.from_user or message.from_user.id not in allowed_user_ids:
+            return
+
+        thread_id = message.message_thread_id
+        key = (message.chat.id, thread_id)
+
+        if key not in agents:
+            memory_dir = os.path.join(os.getcwd(), "memory", f"thread_{message.chat.id}_{thread_id}")
+            transport = TelegramTransport(bot=bot, chat_id=message.chat.id, thread_id=thread_id, verbose=tg_cfg.get("verbose", True))
+            agent = Agent(**resolve(config["agent"]), memory_dir=memory_dir, transport=transport)
+            await agent.start()
+            agents[key] = agent
+
+        await agents[key].transport.handle_message(message)
+
+    dp.message()(on_message)
+    await dp.start_polling(bot)
 
 acquire_pid_lock()
 try:
-    asyncio.run(run())
+    if "--cli" in sys.argv:
+        asyncio.run(run_cli())
+    else:
+        asyncio.run(run_telegram())
 except (KeyboardInterrupt, asyncio.CancelledError):
     pass
+finally:
+    release_pid_lock()

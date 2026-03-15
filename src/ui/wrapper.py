@@ -81,16 +81,9 @@ def UITransportWrapper(transport_class):
                 if isinstance(provider, FactProvider):
                     self.dashboard.set_recall_fn(lambda q, p=provider: p._recall_text(q, query_label="$DASHBOARD"))
                     break
-            dashboard_task = asyncio.create_task(self.dashboard.run_async())
-            transport_task = asyncio.create_task(super().start())
-            web_chat_task = asyncio.create_task(self._web_chat_task())
-            try:
-                await asyncio.wait([dashboard_task, transport_task, web_chat_task], return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                dashboard_task.cancel()
-                transport_task.cancel()
-                web_chat_task.cancel()
-                await asyncio.gather(dashboard_task, transport_task, web_chat_task, return_exceptions=True)
+            await super().start()
+            asyncio.create_task(self.dashboard.run_async())
+            asyncio.create_task(self._web_chat_task())
 
     Wrapped.__name__ = f"UI{transport_class.__name__}"
     return Wrapped
