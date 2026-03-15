@@ -1,7 +1,7 @@
 import warnings
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, BotCommand
+from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from agent import Agent
@@ -24,19 +24,25 @@ warnings.warn = _warn
 
 import asyncio, importlib, json, logging, os, sys
 
+with open(".config.json", encoding="utf-8") as f: config = json.load(f)
+os.environ.update(config.get("env", {}))
+
 def resolve(v):
     if isinstance(v, str) and v.startswith("$"):
-        key = v[1:]
-        if key not in os.environ:
-            raise KeyError(f"Переменная окружения ${key} не задана (проверь .config.json → env)")
-        return os.environ[key]
+        obj = config
+        path = v[1:].split(".")
+        try:
+            for part in path:
+                obj = obj[part]
+        except (KeyError, TypeError):
+            raise KeyError(f"Не найдена ссылка в конфиге: {v}")
+        return resolve(obj)
     if isinstance(v, dict):
         if '__class__' in v: return instantiate(v)
         return {k: resolve(val) for k, val in v.items()}
     if isinstance(v, list):
         return [resolve(i) for i in v]
     return v
-
 
 def instantiate(cfg: dict, cls=None):
     if cls is None:
@@ -61,9 +67,6 @@ def release_pid_lock():
     try: os.unlink(_PID_PATH)
     except FileNotFoundError: pass
 
-with open(".config.json", encoding="utf-8") as f: config = json.load(f)
-os.environ.update(config.get("env", {}))
-
 _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 async def run_cli():
@@ -80,24 +83,34 @@ async def run_cli():
             print()
 
 async def run_telegram():
-    tg_cfg = config["telegram_transport"]
-
-    dashboard = Dashboard(port=tg_cfg.get("dashboard_port", 8765))
+    dashboard = Dashboard(port=config.get("dashboard", {}).get("port", 8765))
+    await dashboard.start()
     WrappedTG = dashboard.wrap(TelegramTransport)
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-    bot = Bot(token=tg_cfg["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
+    bot = Bot(token=config["telegram"]["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
     dp = Dispatcher()
 
-    async def make_agent(chat_id: int, thread_id: int | None, agent_id: str, memory_dir: str = None):
-        transport = WrappedTG(bot=bot, chat_id=chat_id, thread_id=thread_id, verbose=tg_cfg.get("verbose", True), agent_id=agent_id)
-        agent = Agent(**resolve(config["agent"]), memory_dir=memory_dir, transport=transport)
+    agents: dict[str, Agent] = {}
+
+    async def make_agent(chat_id: int, thread_id: int, force_create: bool, is_main_agent: bool = False):
+        agent_id = f"{chat_id}_{thread_id}"
+        if agent_id in agents: return agents[agent_id]
+
+        agent_dir = os.getcwd() if is_main_agent else os.path.join(os.getcwd(), "forks", agent_id)
+        memory_dir = os.path.join(agent_dir, "memory")
+        if not force_create and not os.path.exists(agent_dir): return None
+
+        agent_cfg = config["agent"] if is_main_agent else {**config["agent"], **config.get("fork_agent", {})}
+        transport = WrappedTG(**config["telegram"]["transport"], bot=bot, chat_id=chat_id, thread_id=thread_id, agent_id=agent_id)
+        agent = Agent(**resolve(agent_cfg), memory_dir=memory_dir, transport=transport)
         await agent.start()
+        agents[agent_id] = agent
         return agent
 
-    allowed_user_ids = set(tg_cfg["allowed_user_ids"])
-    main_chat_id = tg_cfg["allowed_user_ids"][0]
-    main_agent = await make_agent(main_chat_id, None, "main")
+    allowed_user_ids = config["telegram"]["allowed_user_ids"]
+    main_agent = await make_agent(allowed_user_ids[0], None, force_create=True, is_main_agent=True)
+
     commands = [
         BotCommand(command=cmd, description=desc)
         for skill in main_agent.skills
@@ -106,25 +119,30 @@ async def run_telegram():
     await bot.set_my_commands(commands)
     logging.info("[telegram] registered %d commands", len(commands))
 
-    await dashboard.start()
-
-    agents: dict[tuple, Agent] = {(main_chat_id, None): main_agent}
-
     async def on_message(message: Message):
         if not message.from_user or message.from_user.id not in allowed_user_ids:
             return
 
-        thread_id = message.message_thread_id
-        key = (message.chat.id, thread_id)
+        agent = await make_agent(message.chat.id, message.message_thread_id, force_create=False)
+        if not agent:
+            if message.text:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Создать агента", callback_data="new_agent")
+                ]])
+                await message.reply("Агента для этого топика нет. Создать?", reply_markup=kb)
+            return
 
-        if key not in agents:
-            agent_id = f"thread_{message.chat.id}_{thread_id}"
-            memory_dir = os.path.join(os.getcwd(), "memory", agent_id)
-            agents[key] = await make_agent(message.chat.id, thread_id, agent_id, memory_dir)
+        await agent.transport.handle_message(message)
 
-        await agents[key].transport.handle_message(message)
+    async def on_callback_query(callback: CallbackQuery):
+        if callback.data != "new_agent": return
+        if not callback.from_user or callback.from_user.id not in allowed_user_ids: return
+        await make_agent(callback.message.chat.id, callback.message.message_thread_id, force_create=True)
+        await callback.answer("Агент создан")
+        await callback.message.edit_text("Агент создан ✓")
 
     dp.message()(on_message)
+    dp.callback_query()(on_callback_query)
     await dp.start_polling(bot)
 
 acquire_pid_lock()
