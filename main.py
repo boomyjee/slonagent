@@ -92,7 +92,7 @@ async def run_telegram():
 
     agents: dict[str, Agent] = {}
 
-    async def make_agent(chat_id: int, thread_id: int, force_create: bool, is_main_agent: bool = False):
+    async def make_agent(chat_id: int, thread_id: int, force_create: bool, is_main_agent: bool = False, copy_memory_from=None):
         agent_id = f"{chat_id}_{thread_id}"
         if agent_id in agents: return agents[agent_id]
 
@@ -113,6 +113,8 @@ async def run_telegram():
 
         transport = WrappedTG(**config["telegram"]["transport"], bot=bot, chat_id=chat_id, thread_id=thread_id, agent_id=agent_id)
         agent = Agent(**resolve(agent_cfg), agent_dir=agent_dir, transport=transport)
+        if copy_memory_from:
+            agent.memory.copy_from(copy_memory_from.memory)
         await agent.start()
         agents[agent_id] = agent
         return agent
@@ -136,19 +138,36 @@ async def run_telegram():
         if not agent:
             if message.text:
                 kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="Создать агента", callback_data="new_agent")
+                    InlineKeyboardButton(text="🗒 Чистый агент", callback_data="new_agent_clean"),
+                    InlineKeyboardButton(text="🧠 Клон с памятью", callback_data="new_agent_clone"),
                 ]])
-                await message.reply("Агента для этого топика нет. Создать?", reply_markup=kb)
+                await message.answer(
+                    "В этом топике ещё нет агента.\n\n"
+                    "• <b>🗒 Чистый агент</b> — начнёт с нуля, без памяти\n"
+                    "• <b>🧠 Клон с памятью</b> — скопирует личность и инструменты из основного агента",
+                    reply_markup=kb,
+                    parse_mode="HTML",
+                )
             return
 
         await agent.transport.handle_message(message)
 
     async def on_callback_query(callback: CallbackQuery):
-        if callback.data != "new_agent": return
+        if callback.data not in ("new_agent_clean", "new_agent_clone"): return
         if not callback.from_user or callback.from_user.id not in allowed_user_ids: return
-        await make_agent(callback.message.chat.id, callback.message.message_thread_id, force_create=True)
-        await callback.answer("Агент создан")
-        await callback.message.edit_text("Агент создан ✓")
+
+        chat_id = callback.message.chat.id
+        thread_id = callback.message.message_thread_id
+
+        await callback.answer()
+        await callback.message.edit_reply_markup(reply_markup=None)
+        status = await callback.message.answer("⏳ Создаю агента...")
+
+        copy_from = main_agent if callback.data == "new_agent_clone" else None
+        await make_agent(chat_id, thread_id, force_create=True, copy_memory_from=copy_from)
+
+        label = "✅ Клон создан" if callback.data == "new_agent_clone" else "✅ Агент создан"
+        await status.edit_text(label)
 
     dp.message()(on_message)
     dp.callback_query()(on_callback_query)

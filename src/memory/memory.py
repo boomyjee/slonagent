@@ -67,6 +67,14 @@ class Memory:
         self._state_file = os.path.join(self.memory_dir, "CONTEXT.json")
         self._turns = load_turns_json(self._state_file)
 
+    def copy_from(self, src: "Memory"):
+        import shutil
+        if os.path.exists(src._state_file):
+            shutil.copy2(src._state_file, self._state_file)
+            self._turns = load_turns_json(self._state_file)
+        for provider in self.providers:
+            provider.copy_from(src.memory_dir)
+
     @staticmethod
     def count_tokens(turns: list) -> int:
         total = 0

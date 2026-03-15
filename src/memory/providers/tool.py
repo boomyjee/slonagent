@@ -51,9 +51,8 @@ class ToolProvider(BaseProvider):
 
     async def start(self):
         await super().start()
-        data_dir = os.path.join(self.agent.memory.memory_dir, "tool")
-        os.makedirs(data_dir, exist_ok=True)
-        self._tool_stats_file = os.path.join(data_dir, "tool_memory.json")
+        os.makedirs(self.provider_dir, exist_ok=True)
+        self._tool_stats_file = os.path.join(self.provider_dir, "tool_memory.json")
         self._tool_stats = self._load()
 
     def _load(self) -> dict:

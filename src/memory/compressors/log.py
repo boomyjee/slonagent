@@ -402,11 +402,7 @@ class LogCompressor(Skill):
             else:
                 rest.append(t)
 
-        log_path = os.path.join(self.agent.memory.memory_dir, "log", "LOG.md")
-        existing_observations = ""
-        if om_turn and os.path.exists(log_path):
-            with open(log_path, encoding="utf-8") as f:
-                existing_observations = f.read()
+        existing_observations = om_turn.get("_raw_observations", "") if om_turn else ""
 
         # Решаем что наблюдать: оставляем хвост recent_turns нетронутым
         to_observe, recent = self._split_recent(rest)
@@ -431,16 +427,34 @@ class LogCompressor(Skill):
             "Do not give generic advice — personalize your response based on what you know about this user. "
             "For conflicting information, prefer the MOST RECENT observation (check dates)."
         )
-        new_om = {"role": "user", "parts": [{"text": obs_text}], "_observation_message": True}
-        self._write_log(updated)
+        new_om = {"role": "user", "parts": [{"text": obs_text}], "_observation_message": True, "_raw_observations": updated}
+        self._write_log(updated)  # debug only
         log.info("[LogCompressor] %d → 1 OM + %d recent turns", len(to_observe), len(recent))
         return [new_om] + recent
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    async def start(self):
+        self._migrate_v1_log_file()
+
+    def _migrate_v1_log_file(self):
+        """v1 → v2: observations хранились в memory/log/LOG.md, теперь — в CONTEXT.json как _raw_observations."""
+        old_log = os.path.join(self.agent.memory.memory_dir, "log", "LOG.md")
+        if not os.path.exists(old_log):
+            return
+        for turn in self.agent.memory._turns:
+            if isinstance(turn, dict) and turn.get("_observation_message") and not turn.get("_raw_observations"):
+                with open(old_log, encoding="utf-8") as f:
+                    turn["_raw_observations"] = f.read()
+                from src.memory.memory import save_turns_json
+                save_turns_json(self.agent.memory._state_file, self.agent.memory._turns)
+                log.info("[LogCompressor] migrated LOG.md → _raw_observations")
+                break
+        import shutil
+        shutil.rmtree(os.path.dirname(old_log), ignore_errors=True)
+
     def _write_log(self, observations: str):
-        path = os.path.join(self.agent.memory.memory_dir, "log", "LOG.md")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        path = os.path.join(self.agent.memory.memory_dir, "LOG.md")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(observations)

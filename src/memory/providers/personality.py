@@ -19,22 +19,20 @@ class PersonalityProvider(BaseProvider):
 
     def __init__(self):
         super().__init__(consolidate_tokens=0)
-        self._dir: str = ""
         self._active_file: str = ""
         self._active: list[str] = []
 
     async def start(self):
         await super().start()
-        self._dir = os.path.join(self.agent.memory.memory_dir, "personalities")
-        os.makedirs(self._dir, exist_ok=True)
-        self._active_file = os.path.join(self._dir, ".active.json")
+        os.makedirs(self.provider_dir, exist_ok=True)
+        self._active_file = os.path.join(self.provider_dir, ".active.json")
         try:
             self._active = json.loads(open(self._active_file, encoding="utf-8").read())
         except (FileNotFoundError, json.JSONDecodeError):
             self._active = []
 
     def _path(self, name: str) -> str:
-        return os.path.join(self._dir, f"{name}.md")
+        return os.path.join(self.provider_dir, f"{name}.md")
 
     def _read(self, name: str) -> tuple[str, str]:
         path = self._path(name)
@@ -58,7 +56,7 @@ class PersonalityProvider(BaseProvider):
             self.load(self._active + [self.COMMON_NAME])
 
     def _list(self) -> list[str]:
-        return sorted(f[:-3] for f in os.listdir(self._dir) if f.endswith(".md"))
+        return sorted(f[:-3] for f in os.listdir(self.provider_dir) if f.endswith(".md"))
 
     async def get_context_prompt(self, user_text: str = "") -> str:
 
