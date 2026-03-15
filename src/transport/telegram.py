@@ -105,7 +105,29 @@ def _split_message_to_html(content: str, converter, max_len: int = 4096) -> list
 class TelegramSkill(Skill):
     def __init__(self, transport: "TelegramTransport"):
         self.transport = transport
+        self._chat_title: str = ""
+        self._is_private: bool = False
         super().__init__()
+
+    async def start(self):
+        t = self.transport
+        try:
+            chat = await t.bot.get_chat(t.chat_id)
+            self._chat_title = chat.title or chat.full_name or str(t.chat_id)
+            self._is_private = chat.type == "private"
+        except Exception as e:
+            logging.warning("[TelegramSkill] не удалось получить инфо о чате: %s", e)
+
+    async def get_context_prompt(self, user_text: str = "") -> str:
+        if not self._chat_title:
+            return ""
+        t = self.transport
+        if self._is_private:
+            return f"Ты работаешь в личном чате с {self._chat_title}."
+        if t.thread_id:
+            topic = t.thread_name or f"#{t.thread_id}"
+            return f"Ты работаешь в группе «{self._chat_title}», топик «{topic}»."
+        return f"Ты работаешь в группе «{self._chat_title}»."
 
     def _resolve_paths(self, paths: list[str]) -> list[str] | dict:
         from src.skills.sandbox import SandboxSkill
@@ -171,6 +193,7 @@ class TelegramTransport:
         self.bot = bot
         self.chat_id = chat_id
         self.thread_id = thread_id
+        self.thread_name: str | None = None
         self.agent = None
         self._no_link_preview = LinkPreviewOptions(is_disabled=True)
         self._skill = TelegramSkill(self)
@@ -300,6 +323,10 @@ class TelegramTransport:
         await self._answer(f"```{lang}\n{code}\n```")
 
     async def handle_message(self, message: Message):
+        if self.thread_id and not self.thread_name:
+            topic = getattr(getattr(message.reply_to_message, "forum_topic_created", None), "name", None)
+            if topic:
+                self.thread_name = topic
         self._pending_messages.append(message)
         if self._flush_task:
             self._flush_task.cancel()
