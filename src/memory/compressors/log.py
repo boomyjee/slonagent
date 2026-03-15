@@ -20,7 +20,7 @@ import httpx
 from google import genai
 from google.genai import types
 
-from agent import Agent
+from agent import Agent, Skill
 from src.memory.memory import Memory
 
 log = logging.getLogger(__name__)
@@ -360,7 +360,7 @@ def _optimize_for_context(observations: str) -> str:
 
 # ── Provider ──────────────────────────────────────────────────────────────────
 
-class LogCompressor:
+class LogCompressor(Skill):
     """
     Компрессор истории на основе Mastra Observational Memory.
 
@@ -376,6 +376,7 @@ class LogCompressor:
                  min_recent_turns: int     = 10,
                  compress_after_tokens: int = 30_000,
                  reflect_after_tokens: int  = 40_000):
+        super().__init__()
         self._compress_after_tokens = compress_after_tokens
         self._reflect_after_tokens  = reflect_after_tokens
         self._recent_tokens         = recent_tokens
@@ -401,7 +402,7 @@ class LogCompressor:
             else:
                 rest.append(t)
 
-        log_path = os.path.join(Memory.memory_dir, "log", "LOG.md")
+        log_path = os.path.join(self.agent.memory.memory_dir, "log", "LOG.md")
         existing_observations = ""
         if om_turn and os.path.exists(log_path):
             with open(log_path, encoding="utf-8") as f:
@@ -438,7 +439,7 @@ class LogCompressor:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _write_log(self, observations: str):
-        path = os.path.join(Memory.memory_dir, "log", "LOG.md")
+        path = os.path.join(self.agent.memory.memory_dir, "log", "LOG.md")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
             with open(path, "w", encoding="utf-8") as f:

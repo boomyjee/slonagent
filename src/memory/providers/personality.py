@@ -19,13 +19,19 @@ class PersonalityProvider(BaseProvider):
 
     def __init__(self):
         super().__init__(consolidate_tokens=0)
-        self._dir = os.path.join(Memory.memory_dir, "personalities")
+        self._dir: str = ""
+        self._active_file: str = ""
+        self._active: list[str] = []
+
+    async def start(self):
+        await super().start()
+        self._dir = os.path.join(self.agent.memory.memory_dir, "personalities")
         os.makedirs(self._dir, exist_ok=True)
         self._active_file = os.path.join(self._dir, ".active.json")
         try:
-            self._active: list[str] = json.loads(open(self._active_file, encoding="utf-8").read())
+            self._active = json.loads(open(self._active_file, encoding="utf-8").read())
         except (FileNotFoundError, json.JSONDecodeError):
-            self._active: list[str] = []
+            self._active = []
 
     def _path(self, name: str) -> str:
         return os.path.join(self._dir, f"{name}.md")

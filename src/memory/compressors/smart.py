@@ -21,6 +21,7 @@ from uuid import uuid4
 import httpx
 from google import genai
 
+from agent import Skill
 from src.memory.memory import Memory
 
 log = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ First think in a private <scratchpad>. Then generate the <state_snapshot>.
 """
 
 
-class SmartCompressor:
+class SmartCompressor(Skill):
     """Сжатие контекста разговора по мотивам ReMe (Alibaba).
 
     Три режима (WorkingMemoryMode):
@@ -103,12 +104,14 @@ class SmartCompressor:
         group_token_threshold: int | None = None,
         cleanup_max_age_days: int = 7,
     ):
+        super().__init__()
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
         self.model_name = model_name
-        self.store_dir = os.path.join(Memory.memory_dir, "compressed")
+        self._cleanup_max_age_days = cleanup_max_age_days
+        self.store_dir = None
         self.mode = mode
         self.max_total_tokens = max_total_tokens
         self.max_tool_message_tokens = max_tool_message_tokens
@@ -117,8 +120,10 @@ class SmartCompressor:
         self.compact_ratio_threshold = compact_ratio_threshold
         self.group_token_threshold = group_token_threshold
 
-        if cleanup_max_age_days > 0:
-            self._cleanup_old_files(cleanup_max_age_days)
+    async def start(self):
+        self.store_dir = os.path.join(self.agent.memory.memory_dir, "compressed")
+        if self._cleanup_max_age_days > 0:
+            self._cleanup_old_files(self._cleanup_max_age_days)
 
     # ------------------------------------------------------------------
     # Публичный интерфейс

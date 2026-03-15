@@ -16,11 +16,17 @@ from simplemem import SimpleMemSystem, Dialogue
 class SimpleMemProvider(BaseProvider):
     def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 1_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
+        self._api_key = api_key
+        self._model_name = model_name
+        self._simplemem = None
+
+    async def start(self):
+        await super().start()
         self._simplemem = SimpleMemSystem(
-            api_key=api_key,
-            model=model_name,
+            api_key=self._api_key,
+            model=self._model_name,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            db_path=os.path.join(Memory.memory_dir, "simplemem", "lancedb"),
+            db_path=os.path.join(self.agent.memory.memory_dir, "simplemem", "lancedb"),
         )
 
     async def get_context_prompt(self, user_text: str = "") -> str:

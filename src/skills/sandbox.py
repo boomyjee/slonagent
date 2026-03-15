@@ -1,4 +1,4 @@
-import asyncio, os, sys, hashlib, logging, subprocess
+import asyncio, os, hashlib, logging, subprocess
 from typing import Annotated
 from agent import Skill, tool
 from google.genai import types
@@ -13,23 +13,21 @@ class SandboxSkill(Skill):
         runtime: str = "podman",
         container_name: str = None,
     ):
-        if workspace_dir is None:
-            root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
-            workspace_dir = os.path.join(root, "memory", "workspace")
+        super().__init__()
         self.workspace_dir = workspace_dir
-        os.makedirs(self.workspace_dir, exist_ok=True)
-
+        self.container_name = container_name
+        self.tools_dir: str = ""
         self.image = image
         self.default_timeout = default_timeout
         self.runtime = runtime
-        if container_name is None:
-            suffix = hashlib.md5(self.workspace_dir.encode()).hexdigest()[:8]
-            container_name = f"slonagent_{suffix}"
-        self.container_name = container_name
+        self._script_map: dict[str, tuple[str, str]] = {}
+
+    async def start(self):
+        self.workspace_dir = self.workspace_dir or os.path.join(self.agent.memory.memory_dir, "workspace")
+        os.makedirs(self.workspace_dir, exist_ok=True)
+        self.container_name = self.container_name or f"slonagent_{hashlib.md5(self.workspace_dir.encode()).hexdigest()[:8]}"
         self.tools_dir = os.path.join(self.workspace_dir, "tools")
         os.makedirs(self.tools_dir, exist_ok=True)
-        self._script_map: dict[str, tuple[str, str]] = {}  # tool_name → (script_path, ext)
-        super().__init__()
 
     def get_tools(self) -> list:
         return self._tools + self._scan_script_tools()

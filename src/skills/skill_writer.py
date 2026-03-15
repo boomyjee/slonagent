@@ -9,29 +9,21 @@ from agent import Skill, tool, bypass
 class SkillWriterSkill(Skill):
     def __init__(self, skills_dir: str = None):
         super().__init__()
-        if skills_dir is None:
-            root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
-            skills_dir = os.path.join(root, "memory", "skills")
         self._skills_dir = skills_dir
-        os.makedirs(self._skills_dir, exist_ok=True)
-
         self._pending: dict[str, str] = {}
         self._active: dict[str, Skill] = {}
-        self._saved_code: dict[str, str] = {}  # загружено с диска, ждёт register
 
+    async def start(self):
+        self._skills_dir = self._skills_dir or os.path.join(self.agent.memory.memory_dir, "skills")
+        os.makedirs(self._skills_dir, exist_ok=True)
         for fname in os.listdir(self._skills_dir):
             if not fname.endswith(".py"): continue
             name = fname[:-3]
             with open(os.path.join(self._skills_dir, fname), encoding="utf-8") as f:
-                self._saved_code[name] = f.read()
-
-    def register(self, agent):
-        super().register(agent)
-        for name, code in self._saved_code.items():
+                code = f.read()
             result = self._instantiate(name, code)
             if "error" in result:
                 logging.warning("[SkillWriterSkill] Не удалось загрузить %s: %s", name, result["error"])
-        self._saved_code.clear()
 
     @tool("""Предложить новый Python-скилл для добавления в агент (требует одобрения пользователя).
 

@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
 from agent import Skill, bypass, tool
-from src.memory.memory import Memory
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +19,7 @@ class CronSkill(Skill):
 
     @property
     def _tasks_path(self) -> str:
-        return os.path.join(Memory.memory_dir, "CRON.json")
+        return os.path.join(self.agent.memory.memory_dir, "CRON.json")
 
     def _load_tasks(self) -> list[dict]:
         if not os.path.exists(self._tasks_path):

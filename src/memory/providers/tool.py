@@ -41,16 +41,20 @@ class ToolProvider(BaseProvider):
     def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 3_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
         self.model_name = model_name
-
-        data_dir = os.path.join(Memory.memory_dir, "tool")
-        os.makedirs(data_dir, exist_ok=True)
-        self._tool_stats_file = os.path.join(data_dir, "tool_memory.json")
-        self._tool_stats = self._load()
+        self._tool_stats_file: str = ""
+        self._tool_stats: dict = {}
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
+
+    async def start(self):
+        await super().start()
+        data_dir = os.path.join(self.agent.memory.memory_dir, "tool")
+        os.makedirs(data_dir, exist_ok=True)
+        self._tool_stats_file = os.path.join(data_dir, "tool_memory.json")
+        self._tool_stats = self._load()
 
     def _load(self) -> dict:
         try:

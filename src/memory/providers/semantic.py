@@ -121,18 +121,22 @@ class SemanticProvider(BaseProvider):
                  auto_recall: bool = True):
         super().__init__(consolidate_tokens=consolidate_tokens)
         self.model_name = model_name
+        self._api_key = api_key
         self._auto_recall = auto_recall
+        self._db = None
+        self._table = None
+        self._embed = None
 
-        db_path = os.path.join(Memory.memory_dir, "semantic", "lancedb")
+    async def start(self):
+        await super().start()
+        db_path = os.path.join(self.agent.memory.memory_dir, "semantic", "lancedb")
         os.makedirs(db_path, exist_ok=True)
         self._db = lancedb.connect(db_path)
-        self._table = None  # lazy: initialized on first write/read
-        self._embed = None  # lazy: loaded on first use
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
-        self._client = genai.Client(api_key=api_key, http_options=http_options)
+        self._client = genai.Client(api_key=self._api_key, http_options=http_options)
 
     # ── embedding ──────────────────────────────────────────────────────────────
 
@@ -301,7 +305,7 @@ class SemanticProvider(BaseProvider):
     # ── consolidation & context ────────────────────────────────────────────────
 
     def _save_last_entries(self, entries: list[MemoryEntry]):
-        path = os.path.join(Memory.memory_dir, "semantic", "last_entries.json")
+        path = os.path.join(self.agent.memory.memory_dir, "semantic", "last_entries.json")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump([asdict(e) for e in entries], f, ensure_ascii=False, indent=2)

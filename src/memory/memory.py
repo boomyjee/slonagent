@@ -1,4 +1,4 @@
-import json, logging, os, sys, tempfile
+import json, logging, os, tempfile
 
 log = logging.getLogger(__name__)
 from datetime import datetime, timezone
@@ -57,13 +57,14 @@ def load_turns_json(path):
 
 
 class Memory:
-    memory_dir = os.path.join(os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__)), "memory")
-
-    def __init__(self, compressor, providers: list = None):
+    def __init__(self, compressor, providers: list = None, memory_dir: str = None):
         self.providers = providers or []
         self.compressor = compressor
-        os.makedirs(Memory.memory_dir, exist_ok=True)
-        self._state_file = os.path.join(Memory.memory_dir, "CONTEXT.json")
+        if memory_dir is None:
+            memory_dir = os.path.join(os.getcwd(), "memory")
+        self.memory_dir = memory_dir
+        os.makedirs(self.memory_dir, exist_ok=True)
+        self._state_file = os.path.join(self.memory_dir, "CONTEXT.json")
         self._turns = load_turns_json(self._state_file)
 
     @staticmethod

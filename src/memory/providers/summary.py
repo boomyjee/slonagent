@@ -20,16 +20,20 @@ from src.memory.providers.base import BaseProvider
 class SummaryProvider(BaseProvider):
     def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 1_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
-        from src.memory.memory import Memory
-        file_dir = os.path.join(Memory.memory_dir, "summary")
-        os.makedirs(file_dir, exist_ok=True)
-        self.memory_file = os.path.join(file_dir, "MEMORY.md")
-        self.history_file = os.path.join(file_dir, "HISTORY.md")
+        self.memory_file: str = ""
+        self.history_file: str = ""
         self.model_name = model_name
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
         http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
         self._client = genai.Client(api_key=api_key, http_options=http_options)
+
+    async def start(self):
+        await super().start()
+        file_dir = os.path.join(self.agent.memory.memory_dir, "summary")
+        os.makedirs(file_dir, exist_ok=True)
+        self.memory_file = os.path.join(file_dir, "MEMORY.md")
+        self.history_file = os.path.join(file_dir, "HISTORY.md")
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         memory = ""

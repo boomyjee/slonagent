@@ -12,8 +12,8 @@ def UITransportWrapper(transport_class):
     """Returns a subclass of transport_class with TUI dashboard mixed in."""
 
     class Wrapped(transport_class):
-        def __init__(self, *args, **kwargs):
-            self.dashboard = Dashboard()
+        def __init__(self, *args, dashboard_port: int = 8765, **kwargs):
+            self.dashboard = Dashboard(port=dashboard_port)
             root_logger = logging.getLogger()
             root_logger.setLevel(logging.INFO)
             fmt = logging.Formatter(_LOG_FORMAT)

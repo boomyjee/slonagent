@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 from agent import Skill, tool, bypass
 
 
@@ -34,8 +33,7 @@ class ConfigSkill(Skill):
     def __init__(self, config_path: str = None):
         super().__init__()
         if config_path is None:
-            root = os.path.dirname(os.path.abspath(sys.modules["__main__"].__file__))
-            config_path = os.path.join(root, ".config.json")
+            config_path = os.path.join(os.getcwd(), ".config.json")
         self.config_path = config_path
         if not os.path.exists(config_path):
             self._save({})

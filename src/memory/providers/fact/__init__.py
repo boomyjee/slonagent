@@ -85,9 +85,14 @@ class FactProvider(BaseProvider):
         )
         self._llm = genai.Client(api_key=api_key, http_options=http_options)
 
-        sqlite_path  = os.path.join(Memory.memory_dir, "fact", "facts.db")
-        lancedb_path = os.path.join(Memory.memory_dir, "fact", "lancedb")
-        self.storage = Storage(sqlite_path, lancedb_path, embedding_model)
+        self._embedding_model = embedding_model
+        self.storage: Storage | None = None
+
+    async def start(self):
+        await super().start()
+        sqlite_path  = os.path.join(self.agent.memory.memory_dir, "fact", "facts.db")
+        lancedb_path = os.path.join(self.agent.memory.memory_dir, "fact", "lancedb")
+        self.storage = Storage(sqlite_path, lancedb_path, self._embedding_model)
         log.info("[FactProvider] Storage initialized")
 
     # ── Consolidate (retain pipeline) ────────────────────────────────────────────

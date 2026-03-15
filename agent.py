@@ -140,12 +140,12 @@ class AgentSkill(Skill):
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, memory_compressor, memory_providers: list = None, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
+    def __init__(self, model_name: str, api_key: str, memory_compressor, memory_dir: str = None, memory_providers: list = None, skills: list = None, include_thoughts: bool = False, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
         self.model_name = model_name
         self.include_thoughts = include_thoughts
         self.transcription_model_name = transcription_model_name
-        self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [])
-        self.skills = self.memory.providers + (skills or []) + [AgentSkill()]
+        self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [], memory_dir=memory_dir)
+        self.skills = [memory_compressor] + self.memory.providers + (skills or []) + [AgentSkill()]
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
