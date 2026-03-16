@@ -1,4 +1,4 @@
-import asyncio, os, sys, inspect, logging
+import asyncio, io, os, sys, inspect, logging
 from datetime import datetime
 from typing import Annotated, get_type_hints, get_args, get_origin
 from google import genai
@@ -272,22 +272,45 @@ class Agent:
                 await asyncio.sleep(wait)
 
     async def describe_video(self, data: bytes, mime_type: str) -> str:
-        max_retries, delay = 5, 0.5
-        for attempt in range(max_retries):
-            try:
-                resp = await self.client.aio.models.generate_content(
-                    model=self.transcription_model_name,
-                    contents=types.Content(role="user", parts=[
-                        types.Part.from_bytes(data=data, mime_type=mime_type),
-                        types.Part.from_text(text="Describe the key events in this video, providing both audio and visual details. Include timestamps for salient moments."),
-                    ]),
-                )
-                return resp.text
-            except Exception as e:
-                if attempt + 1 == max_retries: raise
-                wait = delay * 2 ** attempt
-                logging.warning("[agent] describe_video retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, e)
-                await asyncio.sleep(wait)
+        uploaded = None
+        if len(data) > 10 * 1024 * 1024:
+            logging.info("[agent] uploading video via Files API (%d bytes)", len(data))
+            uploaded = await self.client.aio.files.upload(
+                file=io.BytesIO(data),
+                config=types.UploadFileConfig(mime_type=mime_type, display_name="video"),
+            )
+            while uploaded.state == types.FileState.PROCESSING:
+                await asyncio.sleep(2)
+                uploaded = await self.client.aio.files.get(name=uploaded.name)
+            if uploaded.state == types.FileState.FAILED:
+                raise RuntimeError(f"Files API processing failed: {uploaded.error}")
+            video_part = types.Part.from_uri(file_uri=uploaded.uri, mime_type=mime_type)
+        else:
+            video_part = types.Part.from_bytes(data=data, mime_type=mime_type)
+
+        try:
+            max_retries, delay = 5, 0.5
+            for attempt in range(max_retries):
+                try:
+                    resp = await self.client.aio.models.generate_content(
+                        model=self.transcription_model_name,
+                        contents=types.Content(role="user", parts=[
+                            video_part,
+                            types.Part.from_text(text="Describe the key events in this video, providing both audio and visual details. Include timestamps for salient moments."),
+                        ]),
+                    )
+                    return resp.text
+                except Exception as e:
+                    if attempt + 1 == max_retries: raise
+                    wait = delay * 2 ** attempt
+                    logging.warning("[agent] describe_video retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, e)
+                    await asyncio.sleep(wait)
+        finally:
+            if uploaded:
+                try:
+                    await self.client.aio.files.delete(name=uploaded.name)
+                except Exception:
+                    logging.warning("[agent] failed to delete uploaded file %s", uploaded.name)
 
     async def process_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
         for skill in self.skills:
