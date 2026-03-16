@@ -271,6 +271,24 @@ class Agent:
                 logging.warning("[agent] transcribe_audio retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, e)
                 await asyncio.sleep(wait)
 
+    async def describe_video(self, data: bytes, mime_type: str) -> str:
+        max_retries, delay = 5, 0.5
+        for attempt in range(max_retries):
+            try:
+                resp = await self.client.aio.models.generate_content(
+                    model=self.transcription_model_name,
+                    contents=types.Content(role="user", parts=[
+                        types.Part.from_bytes(data=data, mime_type=mime_type),
+                        types.Part.from_text(text="Describe the key events in this video, providing both audio and visual details. Include timestamps for salient moments."),
+                    ]),
+                )
+                return resp.text
+            except Exception as e:
+                if attempt + 1 == max_retries: raise
+                wait = delay * 2 ** attempt
+                logging.warning("[agent] describe_video retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, e)
+                await asyncio.sleep(wait)
+
     async def process_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
         for skill in self.skills:
             if skill.is_bypass_command(user_query):

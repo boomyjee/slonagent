@@ -405,6 +405,7 @@ class TelegramTransport(BaseTransport):
             elif message.audio: attachment, field = message.audio, "audio"
             elif message.video: attachment, field = message.video, "video"
             elif message.voice: attachment, field = message.voice, "voice"
+            elif message.video_note: attachment, field = message.video_note, "video_note"
             elif message.document: attachment, field = message.document, "document"
             else: continue
 
@@ -433,6 +434,13 @@ class TelegramTransport(BaseTransport):
                     content = await self.agent.transcribe_audio(await self._download_file(attachment.file_id), "audio/ogg")
                 except Exception:
                     logging.exception("[transport] Не удалось транскрибировать голосовое %s", attachment.file_id)
+
+            if field in ("video", "video_note"):
+                try:
+                    video_mime = getattr(attachment, "mime_type", None) or "video/mp4"
+                    content = await self.agent.describe_video(await self._download_file(attachment.file_id), video_mime)
+                except Exception:
+                    logging.exception("[transport] Не удалось распознать видео %s", attachment.file_id)
 
             attrs = " ".join(f'{k}="{v}"' for k, v in file_meta.items())
             if content:
