@@ -100,7 +100,7 @@ async def run_telegram():
         agent_dir = os.getcwd() if is_main_agent else os.path.join(os.getcwd(), "forks", agent_id)
         if not force_create and not os.path.exists(agent_dir): return None
 
-        config_path = os.path.join(agent_dir, "config.json")
+        config_path = os.path.join(agent_dir, ".config.json")
         if is_main_agent:
             agent_cfg = config["agent"]
         else:
