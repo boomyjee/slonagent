@@ -1,13 +1,8 @@
 import asyncio
 
+from src.transport.base import BaseTransport
 
-class CliTransport:
-    def __init__(self):
-        self.agent = None
-
-    def set_agent(self, agent):
-        self.agent = agent
-
+class CliTransport(BaseTransport):
     def _stream_print(self, text: str, stream_id, prefix: str):
         if stream_id is None:
             print(f"\n{prefix}", end="", flush=True)

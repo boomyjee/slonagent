@@ -23,6 +23,7 @@ def _warn(msg, category=UserWarning, stacklevel=1, source=None, **kw):
 warnings.warn = _warn
 
 import asyncio, importlib, json, logging, os, sys
+from src.skills.config import _format_json
 
 with open(".config.json", encoding="utf-8") as f: config = json.load(f)
 os.environ.update(config.get("env", {}))
@@ -111,7 +112,7 @@ async def run_telegram():
                     if "sandbox" in config:
                         fork_config["sandbox"] = config["sandbox"]
                     fork_config["agent"] = merged
-                    json.dump(fork_config, f, ensure_ascii=False, indent=4)
+                    f.write(_format_json(fork_config))
             with open(config_path, encoding="utf-8") as f:
                 agent_cfg = json.load(f)["agent"]
 

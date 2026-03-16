@@ -142,6 +142,7 @@ class AgentSkill(Skill):
 class Agent:
     def __init__(self, model_name: str, api_key: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
         self.model_name = model_name
+        self.api_key = api_key
         self.transcription_model_name = transcription_model_name
         self.agent_dir = agent_dir
         if isinstance(memory_providers, dict):

@@ -7,9 +7,7 @@ from aiogram import Bot
 from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser
 from agent import Skill, tool
 from google.genai import types
-
-
-
+from src.transport.base import BaseTransport
 
 def _markdown_to_html(text: str) -> str:
     """Convert normal markdown to Telegram-safe HTML."""
@@ -188,7 +186,7 @@ class TelegramSkill(Skill):
         return {"status": "ok", "saved_to": dest_path}
 
 
-class TelegramTransport:
+class TelegramTransport(BaseTransport):
     def __init__(self, bot: Bot, chat_id: int, thread_id: int | None = None, verbose: bool = True):
         self.bot = bot
         self.chat_id = chat_id
