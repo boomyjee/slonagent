@@ -31,7 +31,7 @@ HELP = (
 
 class ConfigSkill(Skill):
     async def start(self):
-        self.config_path = os.path.join(self.agent.agent_dir, "config.json")
+        self.config_path = os.path.join(self.agent.agent_dir, ".config.json")
         if not os.path.exists(self.config_path):
             self._save({})
 
