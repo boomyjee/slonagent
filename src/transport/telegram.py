@@ -390,6 +390,16 @@ class TelegramTransport(BaseTransport):
                     types.Part.from_bytes(data=await self._download_file(message.photo[-1].file_id), mime_type="image/jpeg")
                 )
 
+            if message.sticker:
+                sticker = message.sticker
+                if not sticker.is_animated and not sticker.is_video:
+                    message_parts.append(
+                        types.Part.from_bytes(data=await self._download_file(sticker.file_id), mime_type="image/webp")
+                    )
+                hint = f"[стикер {sticker.emoji}]" if sticker.emoji else "[стикер]"
+                message_parts.append({"text": hint})
+                user_texts.append(hint)
+
             attachment, field = None, None
             if message.photo: attachment, field = message.photo[-1], "photo"
             elif message.audio: attachment, field = message.audio, "audio"
