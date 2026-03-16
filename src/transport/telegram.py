@@ -365,22 +365,26 @@ class TelegramTransport(BaseTransport):
         user_id = first.from_user.id if first.from_user else None
 
         for message in messages:
+            origin = message.forward_origin
+            if origin:
+                if isinstance(origin, MessageOriginUser) and origin.sender_user.id == user_id:
+                    forward_sender = "myself"
+                elif isinstance(origin, MessageOriginUser):
+                    u = origin.sender_user
+                    forward_sender = " ".join(filter(None, [u.first_name, u.last_name])) or u.username or str(u.id)
+                else:
+                    forward_sender = getattr(origin, "sender_user_name", None) \
+                        or getattr(getattr(origin, "chat", None), "title", None) \
+                        or "unknown"
+            else:
+                forward_sender = None
+
             text = message.text or message.caption
             if text and text.startswith("/"):
                 text = text.split("@")[0] + (text[text.index(" "):] if " " in text else "")
             if text:
-                origin = message.forward_origin
-                if origin:
-                    if isinstance(origin, MessageOriginUser) and origin.sender_user.id == user_id:
-                        sender = "myself"
-                    elif isinstance(origin, MessageOriginUser):
-                        u = origin.sender_user
-                        sender = " ".join(filter(None, [u.first_name, u.last_name])) or u.username or str(u.id)
-                    else:
-                        sender = getattr(origin, "sender_user_name", None) \
-                            or getattr(getattr(origin, "chat", None), "title", None) \
-                            or "unknown"
-                    message_parts.append({"text": f"<forwarded_message from=\"{sender}\">\n{text}\n</forwarded_message>"})
+                if forward_sender:
+                    message_parts.append({"text": f"<forwarded_message from=\"{forward_sender}\">\n{text}\n</forwarded_message>"})
                 else:
                     message_parts.append({"text": text})
                 user_texts.append(text)
@@ -417,6 +421,8 @@ class TelegramTransport(BaseTransport):
                 "mime_type": mimetypes.guess_type(filename or "")[0] or "application/octet-stream",
                 "size_bytes": attachment.file_size,
             }
+            if forward_sender:
+                file_meta["forwarded_from"] = forward_sender
 
             text_extensions = {
                 ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".xml",
