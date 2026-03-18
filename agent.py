@@ -319,6 +319,9 @@ class Agent:
                     if unexpected:
                         logging.warning("[stream] unknown delta fields: %s", unexpected)
 
+                if thinking_id is not None:
+                    await self.transport.send_thinking(thinking_text, thinking_id, final=True)
+
                 tool_calls = []
                 for idx in sorted(accumulated_calls):
                     call = accumulated_calls[idx]
