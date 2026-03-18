@@ -154,11 +154,10 @@ class AgentSkill(Skill):
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, base_url: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None, reasoning_effort: str = None):
+    def __init__(self, model_name: str, api_key: str, base_url: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
         self.model_name = model_name
         self.api_key = api_key
         self.transcription_model_name = transcription_model_name
-        self.reasoning_effort = reasoning_effort
         self.agent_dir = agent_dir
         if isinstance(memory_providers, dict):
             memory_providers = list(memory_providers.values())
@@ -257,8 +256,7 @@ class Agent:
                 kwargs: dict = {"model": self.model_name, "messages": messages, "stream": True, "temperature": 1.0}
                 if tools:
                     kwargs["tools"] = tools
-                if self.reasoning_effort:
-                    kwargs["reasoning_effort"] = self.reasoning_effort
+                kwargs["extra_body"] = {"extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
 
                 stream = await self.client.chat.completions.create(**kwargs)
                 text = ""
@@ -295,21 +293,26 @@ class Agent:
                             if sig:
                                 entry["thought_signature"] = sig
 
-                    # Мысли могут приходить как reasoning_content (OpenAI o1-стиль)
-                    # или через model_extra (Gemini-специфичный путь)
                     delta_extra = getattr(delta, "model_extra", None) or {}
-                    thought_chunk = (
-                        delta_extra.get("reasoning_content")
-                        or delta_extra.get("thinking")
-                        or (delta_extra.get("extra_content", {}).get("google", {}).get("thinking"))
-                    )
-                    if thought_chunk:
-                        thinking_text += thought_chunk
-                        thinking_id = await self.transport.send_thinking(thinking_text, thinking_id)
-
+                    # Gemini: мысли приходят в delta.content с флагом extra_content.google.thought=True
+                    # OpenAI o1: мысли в delta.model_extra.reasoning_content
+                    # Gemini: thinking chunks помечены флагом extra_content.google.thought=True
+                    # и приходят в delta.content
+                    is_thought = delta_extra.get("extra_content", {}).get("google", {}).get("thought")
                     if delta.content:
-                        text += delta.content
-                        stream_id = await self.transport.send_message(text, stream_id)
+                        if is_thought:
+                            thinking_text += delta.content.removeprefix("<thought>")
+                            thinking_id = await self.transport.send_thinking(thinking_text, thinking_id)
+                        else:
+                            content = delta.content.removeprefix("</thought>")
+                            if content:
+                                text += content
+                                stream_id = await self.transport.send_message(text, stream_id)
+                    # OpenAI o1: reasoning_content, OpenRouter: reasoning
+                    thought_extra = delta_extra.get("reasoning_content") or delta_extra.get("reasoning")
+                    if thought_extra and isinstance(thought_extra, str):
+                        thinking_text += thought_extra
+                        thinking_id = await self.transport.send_thinking(thinking_text, thinking_id)
 
                     known = {"content", "tool_calls", "role", "refusal"}
                     unexpected = (delta.model_fields_set or set()) - known

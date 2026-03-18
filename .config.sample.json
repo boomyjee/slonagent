@@ -8,7 +8,8 @@
         "gemini": "YOUR_GEMINI_API_KEY",
         "llm": "YOUR_LLM_API_KEY",
         "llm_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "brave": "YOUR_BRAVE_API_KEY"
+        "brave": "YOUR_BRAVE_API_KEY",
+        "openrouter": "YOUR_OPENROUTER_API_KEY"
     },
     "telegram": {
         "bot_token": "YOUR_BOT_TOKEN",
@@ -30,7 +31,6 @@
         "transcription_model_name": "gemini-3-flash-preview",
         "transcription_api_key": "$keys.llm",
         "transcription_base_url": "$keys.llm_url",
-        "reasoning_effort": "medium",
         "api_key": "$keys.llm",
         "base_url": "$keys.llm_url",
         "memory_compressor": {

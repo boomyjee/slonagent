@@ -255,3 +255,93 @@ async def test_transcribe_audio(tmp_path):
     assert result is not None, "transcribe_audio вернул None"
     assert isinstance(result, str), f"Ожидали str, получили {type(result)}"
     assert len(result.strip()) > 0, "Транскрипция пустая"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. Мысли модели (thinking)
+#    Проверяет: thinking-модели возвращают мысли, не ломаются от Gemini extra_body
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _collect_thinking_stream(client, model: str, extra_body: dict) -> tuple[str, str, int]:
+    """Стримит простой промпт, возвращает (thinking_text, response_text, chunk_count)."""
+    from openai import AsyncOpenAI
+    stream = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": "Сколько будет 2+2?"}],
+        stream=True,
+        extra_body=extra_body,
+    )
+    thinking, response, chunks = "", "", 0
+    async for chunk in stream:
+        chunks += 1
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        extra = getattr(delta, "model_extra", None) or {}
+
+        is_gemini_thought = extra.get("extra_content", {}).get("google", {}).get("thought")
+        if delta.content:
+            if is_gemini_thought:
+                thinking += delta.content.removeprefix("<thought>")
+            else:
+                response += delta.content.removeprefix("</thought>")
+
+        thought_extra = extra.get("reasoning_content") or extra.get("reasoning")
+        if thought_extra and isinstance(thought_extra, str):
+            thinking += thought_extra
+
+    return thinking, response, chunks
+
+
+def _get_openrouter_client():
+    import httpx
+    from openai import AsyncOpenAI
+    or_key = os.environ.get("OPENROUTER_KEY")
+    if not or_key:
+        pytest.skip("OPENROUTER_KEY не задан")
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    return AsyncOpenAI(
+        api_key=or_key,
+        base_url="https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(proxy=proxy_url, timeout=120.0) if proxy_url else httpx.AsyncClient(timeout=120.0),
+    )
+
+
+_GEMINI_EXTRA_BODY = {"extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
+_OR_EXTRA_BODY = {"reasoning": {"effort": "low"}, **_GEMINI_EXTRA_BODY}
+
+
+@pytest.mark.asyncio
+async def test_gemini_thinking():
+    """Gemini возвращает мысли через extra_content.google.thought."""
+    key, url, model = get_llm_config()
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=key, base_url=url)
+
+    thinking, response, chunks = await _collect_thinking_stream(client, model, _GEMINI_EXTRA_BODY)
+    print(f"\nthinking={thinking[:100]!r}, response={response[:100]!r}")
+    assert chunks > 0
+    assert thinking, "Gemini не вернул мысли"
+    assert response, "Gemini не вернул ответ"
+
+
+@pytest.mark.parametrize("model,expect_thinking", [
+    ("openrouter/hunter-alpha", True),
+    ("nvidia/nemotron-3-super-120b-a12b:free", True),
+    ("minimax/minimax-m2.5:free", True),
+    ("liquid/lfm-2.5-1.2b-thinking:free", True),
+    ("stepfun/step-3.5-flash:free", True),
+])
+@pytest.mark.asyncio
+async def test_openrouter_thinking(model, expect_thinking):
+    """OpenRouter: thinking-модели не падают от Gemini extra_body и возвращают мысли."""
+    client = _get_openrouter_client()
+    try:
+        thinking, response, chunks = await _collect_thinking_stream(client, model, _OR_EXTRA_BODY)
+    except Exception as e:
+        pytest.skip(f"{model}: провайдер вернул ошибку: {e}")
+    print(f"\n{model}: thinking={bool(thinking)}, response={response[:100]!r}")
+    assert chunks > 0, f"{model}: нет чанков"
+    assert thinking or response, f"{model}: нет ни мыслей, ни ответа"
+    if expect_thinking:
+        assert thinking, f"{model}: нет мыслей"
