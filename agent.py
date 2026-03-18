@@ -1,9 +1,11 @@
-import asyncio, io, os, sys, inspect, logging
+import asyncio, base64, json, os, sys, inspect, logging
+import httpx
 from datetime import datetime
 from typing import Annotated, get_type_hints, get_args, get_origin
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 from src.memory.memory import Memory
+
+
 
 
 def tool(description: str):
@@ -39,12 +41,15 @@ class Skill:
                 if fn._bypass_standalone:
                     self._bypass_standalone.add(fn._bypass_command)
 
-        def param_schema(hint, desc):
-            _GEMINI_TYPES = { str: types.Type.STRING, int: types.Type.INTEGER, float: types.Type.NUMBER, bool: types.Type.BOOLEAN }
+        def param_schema(hint, desc) -> dict:
+            _JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean"}
             if get_origin(hint) is list:
-                return types.Schema(type=types.Type.ARRAY, description=desc,
-                                    items=types.Schema(type=_GEMINI_TYPES.get(get_args(hint)[0], types.Type.STRING)))
-            return types.Schema(type=_GEMINI_TYPES.get(hint, types.Type.STRING), description=desc)
+                schema = {"type": "array", "items": {"type": _JSON_TYPES.get(get_args(hint)[0], "string")}}
+            else:
+                schema = {"type": _JSON_TYPES.get(hint, "string")}
+            if desc:
+                schema["description"] = desc
+            return schema
 
         class_name = type(self).__name__.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider")
         self._tools = []
@@ -61,15 +66,18 @@ class Skill:
             }
             required = [k for k, p in params.items() if p.default is inspect.Parameter.empty]
             tool_name = f"{class_name}_{name}".lower()
-            self._tools.append(types.FunctionDeclaration(
-                name=tool_name,
-                description=fn._tool_description,
-                parameters=types.Schema(type=types.Type.OBJECT, properties=properties, required=required),
-            ))
+            self._tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": fn._tool_description,
+                    "parameters": {"type": "object", "properties": properties, "required": required},
+                },
+            })
             self._tool_map[tool_name] = name
 
     def get_tools(self) -> list:
-        """Возвращает список FunctionDeclaration для этого скилла. Переопределяй для динамических тулов."""
+        """Возвращает список OpenAI-format tool dict для этого скилла. Переопределяй для динамических тулов."""
         return self._tools
 
     def get_bypass_commands(self, standalone_only: bool = False) -> dict[str, str]:
@@ -107,20 +115,24 @@ class Skill:
     async def start(self):
         pass
 
-    async def dispatch_tool_call(self, tool_call) -> dict:
-        if tool_call.name not in self._tool_map:
-            return {"error": f"Unknown tool: {tool_call.name}"}
+    async def dispatch_tool_call(self, tool_call: dict) -> dict:
+        name = tool_call["function"]["name"]
+        if name not in self._tool_map:
+            return {"error": f"Unknown tool: {name}"}
 
-        method_name = self._tool_map[tool_call.name]
+        method_name = self._tool_map[name]
         method = getattr(self, method_name)
-        args = dict(tool_call.args or {})
+        try:
+            args = json.loads(tool_call["function"].get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
 
         try:
             if inspect.iscoroutinefunction(method):
                 return await method(**args)
             return method(**args)
         except Exception as e:
-            logging.exception("[skill] %s failed", tool_call.name)
+            logging.exception("[skill] %s failed", name)
             return {"error": str(e)}
 
 
@@ -140,7 +152,7 @@ class AgentSkill(Skill):
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
+    def __init__(self, model_name: str, api_key: str, base_url: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
         self.model_name = model_name
         self.api_key = api_key
         self.transcription_model_name = transcription_model_name
@@ -149,7 +161,7 @@ class Agent:
             memory_providers = list(memory_providers.values())
         memory_dir = os.path.join(agent_dir, "memory")
         self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [], memory_dir=memory_dir)
-        self.skills = [memory_compressor] + self.memory.providers + (skills or []) + [AgentSkill()]
+        self.skills = ([memory_compressor] if memory_compressor else []) + self.memory.providers + (skills or []) + [AgentSkill()]
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
@@ -158,11 +170,11 @@ class Agent:
             transport.set_agent(self)
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_options: dict = {"api_version": "v1alpha"}
-        if proxy_url:
-            http_options["client_args"] = {"proxy": proxy_url}
-            http_options["async_client_args"] = {"proxy": proxy_url}
-        self.client = genai.Client(api_key=api_key, http_options=http_options)
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.AsyncClient(proxy=proxy_url, timeout=120.0) if proxy_url else None,
+        )
         self._process_message_lock = asyncio.Lock()
         self._pending_messages: list = []
         self._stop_event = asyncio.Event()
@@ -193,58 +205,89 @@ class Agent:
                 ]
                 if ts and turn.get("role") == "user" and any("text" in p for p in turn["parts"] if isinstance(p, dict)):
                     turn["parts"] = [{"text": f"[{ts}]"}] + turn["parts"]
+            elif isinstance(turn.get("content"), list):
+                blocks = [{k: v for k, v in b.items() if not k.startswith("_")} if isinstance(b, dict) else b
+                          for b in turn["content"]]
+                if ts and turn.get("role") == "user":
+                    blocks = [{"type": "text", "text": f"[{ts}]"}] + blocks
+                turn["content"] = blocks
             result.append(turn)
         return result
 
 
-    async def _llm_stream(self, contents, config, label: str = ""):
+    async def _llm_stream(self, contents, tools, system_instruction, label: str = ""):
+        messages = ([{"role": "system", "content": system_instruction}] if system_instruction else []) + contents
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
-                stream = await self.client.aio.models.generate_content_stream(
-                    model=self.model_name, contents=contents, config=config,
-                )
-                text, thinking_text = "", ""
-                stream_id, thinking_id = None, None
-                thinking_finalized = False
-                function_call_parts = []
-                
-                last_chunk = None
+                kwargs: dict = {"model": self.model_name, "messages": messages, "stream": True, "temperature": 1.0}
+                if tools:
+                    kwargs["tools"] = tools
+
+                stream = await self.client.chat.completions.create(**kwargs)
+                text = ""
+                stream_id = None
+                accumulated_calls: dict[int, dict] = {}
+
                 async for chunk in stream:
-                    if self._stop_event.is_set(): break
-                    parts = chunk.candidates[0].content.parts or [] if chunk.candidates else []
-                    for p in parts:
-                        if getattr(p, "thought", False) and getattr(p, "text", None):
-                            logging.info("[stream] thought: %r", p.text[:80])
-                            thinking_text += p.text
-                            if not thinking_finalized:
-                                thinking_id = await self.transport.send_thinking(thinking_text, thinking_id, final=False)
-                        elif getattr(p, "function_call", None):
-                            logging.info("[stream] function_call: %s", p.function_call.name)
-                            function_call_parts.append(p)
-                        elif getattr(p, "text", None) and not getattr(p, "function_call", None):
-                            logging.info("[stream] text: %r", p.text[:80])
-                            if thinking_id and not thinking_finalized:
-                                await self.transport.send_thinking(thinking_text, thinking_id, final=True)
-                                thinking_finalized = True
-                            text += p.text
-                            stream_id = await self.transport.send_message(text, stream_id)
-                        elif getattr(p, "thought_signature", None):
-                            logging.info("[stream] thought_signature: %d bytes", len(p.thought_signature))
-                        elif p.model_fields_set <= {"text"}:
-                            logging.info("[stream] empty padding part")
-                        else:
-                            logging.warning("[stream] unknown part: %r", p)
-                    last_chunk = chunk
-                if thinking_id and not thinking_finalized:
-                    await self.transport.send_thinking(thinking_text, thinking_id, final=True)
-                if last_chunk and (u := last_chunk.usage_metadata):
-                    logging.info("[agent] tokens: in=%s out=%s total=%s %s",
-                        u.prompt_token_count, u.candidates_token_count, u.total_token_count,
-                        f"(iter {label})" if label else "")
-                return function_call_parts, text
+                    if self._stop_event.is_set():
+                        break
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index if tc.index is not None else len(accumulated_calls)
+                            entry = accumulated_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                            if tc.id:
+                                entry["id"] = tc.id
+                            if tc.function and tc.function.name:
+                                entry["name"] += tc.function.name
+                            if tc.function and tc.function.arguments:
+                                entry["arguments"] += tc.function.arguments
+                            # Gemini thinking models attach a thought_signature to tool calls.
+                            # Path: tc.model_extra['extra_content']['google']['thought_signature']
+                            # It must be preserved and sent back in subsequent requests.
+                            tc_extra = getattr(tc, "model_extra", None) or {}
+                            sig = (tc_extra
+                                   .get("extra_content", {})
+                                   .get("google", {})
+                                   .get("thought_signature"))
+                            if sig:
+                                entry["thought_signature"] = sig
+
+                    if delta.content:
+                        logging.info("[stream] text chunk: %r", delta.content[:80])
+                        text += delta.content
+                        stream_id = await self.transport.send_message(text, stream_id)
+
+                    known = {"content", "tool_calls", "role", "refusal"}
+                    unexpected = (delta.model_fields_set or set()) - known
+                    if unexpected:
+                        logging.warning("[stream] unknown delta fields: %s", unexpected)
+
+                tool_calls = []
+                for idx in sorted(accumulated_calls):
+                    call = accumulated_calls[idx]
+                    logging.info("[stream] function_call: %s", call["name"])
+                    tc_dict = {
+                        "id": call["id"], "type": "function",
+                        "function": {"name": call["name"], "arguments": call["arguments"]},
+                    }
+                    # Gemini thinking models return thought_signature in extra_content.google.
+                    # Must be echoed back at the same level in subsequent requests.
+                    if call.get("thought_signature"):
+                        tc_dict["extra_content"] = {"google": {"thought_signature": call["thought_signature"]}}
+                    tool_calls.append(tc_dict)
+
+                return tool_calls, text
             except Exception as e:
-                if attempt + 1 == max_retries or "503" not in str(e) and "UNAVAILABLE" not in str(e): raise
+                if attempt + 1 == max_retries:
+                    raise
+                err = str(e)
+                if not any(c in err for c in ("503", "429", "502", "UNAVAILABLE")):
+                    raise
                 wait = delay * 2 ** attempt
                 logging.warning("[agent] LLM %s unavailable, retry %d/%d in %ds", label, attempt + 1, max_retries, wait)
                 await asyncio.sleep(wait)
@@ -254,17 +297,18 @@ class Agent:
             await skill.start()
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
+        fmt = mime_type.split("/")[-1]
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
-                resp = await self.client.aio.models.generate_content(
+                resp = await self.client.chat.completions.create(
                     model=self.transcription_model_name,
-                    contents=types.Content(role="user", parts=[
-                        types.Part.from_bytes(data=data, mime_type=mime_type),
-                        types.Part.from_text(text="Transcribe the audio. Return only the transcript text."),
-                    ]),
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": "Transcribe the audio. Return only the transcript text."},
+                        {"type": "input_audio", "input_audio": {"data": base64.b64encode(data).decode(), "format": fmt}},
+                    ]}],
                 )
-                return resp.text
+                return resp.choices[0].message.content
             except Exception as e:
                 if attempt + 1 == max_retries: raise
                 wait = delay * 2 ** attempt
@@ -272,47 +316,27 @@ class Agent:
                 await asyncio.sleep(wait)
 
     async def describe_video(self, data: bytes, mime_type: str) -> str:
-        uploaded = None
         if len(data) > 10 * 1024 * 1024:
-            logging.info("[agent] uploading video via Files API (%d bytes)", len(data))
-            uploaded = await self.client.aio.files.upload(
-                file=io.BytesIO(data),
-                config=types.UploadFileConfig(mime_type=mime_type, display_name="video"),
-            )
-            while uploaded.state == types.FileState.PROCESSING:
-                await asyncio.sleep(2)
-                uploaded = await self.client.aio.files.get(name=uploaded.name)
-            if uploaded.state == types.FileState.FAILED:
-                raise RuntimeError(f"Files API processing failed: {uploaded.error}")
-            video_part = types.Part.from_uri(file_uri=uploaded.uri, mime_type=mime_type)
-        else:
-            video_part = types.Part.from_bytes(data=data, mime_type=mime_type)
+            logging.warning("[agent] video >10MB отправляется inline, возможны ошибки")
+        max_retries, delay = 5, 0.5
+        for attempt in range(max_retries):
+            try:
+                resp = await self.client.chat.completions.create(
+                    model=self.transcription_model_name,
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": "Describe the key events in this video, providing both audio and visual details. Include timestamps for salient moments."},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64.b64encode(data).decode()}"}},
+                    ]}],
+                )
+                return resp.choices[0].message.content
+            except Exception as e:
+                if attempt + 1 == max_retries: raise
+                wait = delay * 2 ** attempt
+                logging.warning("[agent] describe_video retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, e)
+                await asyncio.sleep(wait)
 
-        try:
-            max_retries, delay = 5, 0.5
-            for attempt in range(max_retries):
-                try:
-                    resp = await self.client.aio.models.generate_content(
-                        model=self.transcription_model_name,
-                        contents=types.Content(role="user", parts=[
-                            video_part,
-                            types.Part.from_text(text="Describe the key events in this video, providing both audio and visual details. Include timestamps for salient moments."),
-                        ]),
-                    )
-                    return resp.text
-                except Exception as e:
-                    if attempt + 1 == max_retries: raise
-                    wait = delay * 2 ** attempt
-                    logging.warning("[agent] describe_video retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, e)
-                    await asyncio.sleep(wait)
-        finally:
-            if uploaded:
-                try:
-                    await self.client.aio.files.delete(name=uploaded.name)
-                except Exception:
-                    logging.warning("[agent] failed to delete uploaded file %s", uploaded.name)
-
-    async def process_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
+    async def process_message(self, content_parts: list, user_message_id=None):
+        user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
         for skill in self.skills:
             if skill.is_bypass_command(user_query):
                 result = await skill.dispatch_bypass(user_query)
@@ -322,28 +346,26 @@ class Agent:
 
         if self._process_message_lock.locked():
             logging.info("[agent] message queued (will be batched)")
-            self._pending_messages.append((message_parts, user_message_id, user_query))
+            self._pending_messages.append((content_parts, user_message_id))
             return
 
         async with self._process_message_lock:
-            await self._run_message(message_parts, user_message_id, user_query)
+            await self._run_message(content_parts, user_message_id)
             while self._pending_messages:
                 batch = self._pending_messages[:]
                 self._pending_messages.clear()
                 logging.info("[agent] processing batch of %d queued messages", len(batch))
-                merged_parts = [p for i, (parts, _, _) in enumerate(batch) for p in ([{"text": "\n"}] if i > 0 else []) + list(parts)]
-                merged_query = "\n".join(q for _, _, q in batch if q)
-                merged_id = next((mid for _, mid, _ in batch if mid is not None), None)
-                await self._run_message(merged_parts, merged_id, merged_query)
+                merged_parts = [p for i, (parts, _) in enumerate(batch) for p in ([{"type": "text", "text": "\n"}] if i > 0 else []) + list(parts)]
+                merged_id = next((mid for _, mid in batch if mid is not None), None)
+                await self._run_message(merged_parts, merged_id)
 
-    async def _run_message(self, message_parts: list, user_message_id=None, user_query: str = ""):
+    async def _run_message(self, content_parts: list, user_message_id=None):
+        user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
         logging.info("[agent] incoming: %r", user_query)
 
         self._stop_event.clear()
-        await self.memory.add_turn({"role": "user", "parts": message_parts, "_user_message_id": user_message_id})
+        await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
 
-
-        user_text = " ".join(p.get("text", "") for p in message_parts if isinstance(p, dict) and "text" in p).strip()
         tools = []
         tool_to_skill = {}
 
@@ -353,21 +375,14 @@ class Agent:
         system_parts = []
         tools_info = []
         for skill in self.skills:
-            if skill.get_tools():
-                augmented = []
-                for decl in skill.get_tools():
-                    extra = await skill.get_tool_prompt(decl.name)
-                    if extra:
-                        augmented.append(types.FunctionDeclaration(
-                            name=decl.name,
-                            description=(decl.description or "") + "\n\n---\n" + extra,
-                            parameters=decl.parameters,
-                        ))
-                    else:
-                        augmented.append(decl)
-                for f in augmented: tool_to_skill[f.name] = skill
-                tools.append(types.Tool(function_declarations=augmented))
-                tools_info.extend(f"{f.name}: {truncate((f.description or '').splitlines()[0], 100)}" for f in augmented)
+            for decl in skill.get_tools():
+                fn = decl["function"]
+                extra = await skill.get_tool_prompt(fn["name"])
+                if extra:
+                    decl = {"type": "function", "function": {**fn, "description": fn["description"] + "\n\n---\n" + extra}}
+                tool_to_skill[decl["function"]["name"]] = skill
+                tools.append(decl)
+                tools_info.append(f"{decl['function']['name']}: {truncate(decl['function']['description'].splitlines()[0], 100)}")
 
             skill_context = await skill.get_context_prompt(user_query)
             if skill_context:
@@ -378,58 +393,58 @@ class Agent:
             await self.transport.send_system_prompt("[Инструменты модели]\n"+"\n".join(tools_info))
 
 
+        system_instruction = "\n\n".join(system_parts)
         try:
-            config = types.GenerateContentConfig(
-                system_instruction="\n\n".join(system_parts),
-                temperature=1.0,
-                tools=tools,
-                thinking_config=types.ThinkingConfig(include_thoughts=True),
-            )
             logging.info("[agent] → LLM %s", self.model_name)
-            function_call_parts, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), config)
+            tool_calls, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), tools, system_instruction)
             logging.info("[agent] ← LLM")
 
             if self._stop_event.is_set(): logging.info("[agent] stopped by user, response not saved"); return
 
             iteration = 0
-            while function_call_parts and iteration < self.max_iterations:
-                await self.memory.add_turn({"role": "model", "parts": function_call_parts})
-
-                fn_response_parts = []
+            while tool_calls and iteration < self.max_iterations:
                 extra_parts = []
-                for function_call_part in function_call_parts:
-                    tool_call = function_call_part.function_call
-                    logging.info("Инструмент: %s", tool_call.name)
-                    skill = tool_to_skill.get(tool_call.name)
+                tool_turns = []
+                for fc in tool_calls:
+                    name = fc["function"]["name"]
+                    args = json.loads(fc["function"].get("arguments") or "{}")
+                    logging.info("Инструмент: %s", name)
+                    skill = tool_to_skill.get(name)
                     if not skill:
-                        logging.warning("Tool %s not found in skills", tool_call.name)
+                        logging.warning("Tool %s not found in skills", name)
+                        tool_turns.append({"role": "tool", "tool_call_id": fc["id"], "name": name,
+                                           "content": json.dumps({"error": f"Tool {name} not found"})})
                         continue
 
-                    await self.transport.on_tool_call(tool_call.name, dict(tool_call.args or {}))
-                    result = await skill.dispatch_tool_call(tool_call)
-                    await self.transport.on_tool_result(tool_call.name, result)
+                    await self.transport.on_tool_call(name, args)
+                    result = await skill.dispatch_tool_call(fc)
+                    await self.transport.on_tool_result(name, result)
                     extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
-                    fn_response_parts.append(types.Part.from_function_response(
-                        name=tool_call.name,
-                        response=result if isinstance(result, dict) else {"result": result},
-                    ))
+                    tool_turns.append({
+                        "role": "tool", "tool_call_id": fc["id"], "name": name,
+                        "content": json.dumps(result if isinstance(result, dict) else {"result": result}, ensure_ascii=False),
+                    })
 
-                if fn_response_parts:
-                    await self.memory.add_turn({"role": "user", "parts": [*fn_response_parts, *extra_parts]})
+                await self.memory.add_turn({"role": "assistant", "content": None, "tool_calls": tool_calls})
+                for tool_turn in tool_turns:
+                    await self.memory.add_turn(tool_turn)
+
+                if extra_parts:
+                    await self.memory.add_turn({"role": "user", "content": extra_parts})
 
                 iteration += 1
                 logging.info("[agent] → LLM iteration %d", iteration)
-                function_call_parts, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), config, str(iteration))
+                tool_calls, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), tools, system_instruction, str(iteration))
                 logging.info("[agent] ← LLM iteration %d", iteration)
 
                 if self._stop_event.is_set(): logging.info("[agent] stopped by user during iter %d, response not saved", iteration); return
 
-            if function_call_parts:
+            if tool_calls:
                 logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
                 await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
 
-            await self.memory.add_turn({"role": "model", "parts": [{"text": text or ""}]})
+            await self.memory.add_turn({"role": "assistant", "content": text or ""})
 
         except Exception as e:
-            logging.warning("Ошибка при обращении к Gemini: %s", e, exc_info=True)
-            await self.transport.send_message(f"Ошибка при обращении к Gemini: {e}")
+            logging.warning("Ошибка LLM: %s", e, exc_info=True)
+            await self.transport.send_message(f"Ошибка LLM: {e}")

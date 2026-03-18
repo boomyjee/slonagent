@@ -423,58 +423,33 @@ async def run_reflect_agent(
     Args:
         query:          Вопрос пользователя.
         storage:        Storage объект (SQLite + LanceDB).
-        llm_client:     genai.Client.
-        model_name:     Название Gemini-модели.
+        llm_client:     AsyncOpenAI-совместимый клиент.
+        model_name:     Название модели.
         max_iterations: Лимит итераций (default 10).
 
     Returns:
         {"answer": str, "iterations": int, "facts_used": int, ...}
     """
-    from google.genai import types
-
     has_mental_models = await asyncio.to_thread(
         lambda: storage.conn.execute("SELECT COUNT(*) FROM mental_models").fetchone()[0] > 0
     )
 
     system_prompt = _build_system_prompt(has_mental_models)
-    schemas       = _tool_schemas(has_mental_models)
+    tools = [{"type": "function", "function": s} for s in _tool_schemas(has_mental_models)]
 
-    gemini_tools = [
-        types.Tool(function_declarations=[
-            types.FunctionDeclaration(
-                name=s["name"],
-                description=s["description"],
-                parameters=s["parameters"],
-            )
-            for s in schemas
-        ])
-    ]
-
-    def _forced_config(tool_name: str) -> "types.ToolConfig":
-        return types.ToolConfig(
-            function_calling_config=types.FunctionCallingConfig(
-                mode="ANY",
-                allowed_function_names=[tool_name],
-            )
-        )
-
-    def _auto_config() -> "types.ToolConfig":
-        return types.ToolConfig(
-            function_calling_config=types.FunctionCallingConfig(mode="AUTO")
-        )
-
-    def _tool_config_for(iteration: int) -> "types.ToolConfig":
+    def _tool_choice_for(iteration: int):
         if has_mental_models:
-            if iteration == 0: return _forced_config("search_mental_models")
-            if iteration == 1: return _forced_config("search_observations")
-            if iteration == 2: return _forced_config("recall")
+            if iteration == 0: return {"type": "function", "function": {"name": "search_mental_models"}}
+            if iteration == 1: return {"type": "function", "function": {"name": "search_observations"}}
+            if iteration == 2: return {"type": "function", "function": {"name": "recall"}}
         else:
-            if iteration == 0: return _forced_config("search_observations")
-            if iteration == 1: return _forced_config("recall")
-        return _auto_config()
+            if iteration == 0: return {"type": "function", "function": {"name": "search_observations"}}
+            if iteration == 1: return {"type": "function", "function": {"name": "recall"}}
+        return "auto"
 
-    contents: list = [
-        types.Content(role="user", parts=[types.Part.from_text(text=query)])
+    messages: list = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": query},
     ]
 
     available_memory_ids:       set[str] = set()
@@ -485,28 +460,22 @@ async def run_reflect_agent(
         is_last = iteration == max_iterations - 1
 
         if is_last:
-            response = await asyncio.to_thread(
-                llm_client.models.generate_content,
+            response = await llm_client.chat.completions.create(
                 model=model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(system_instruction=system_prompt),
+                messages=messages,
             )
             return {
-                "answer":     (response.text or "").strip(),
+                "answer":     (response.choices[0].message.content or "").strip(),
                 "iterations": iteration + 1,
                 "facts_used": len(available_memory_ids),
             }
 
         try:
-            response = await asyncio.to_thread(
-                llm_client.models.generate_content,
+            response = await llm_client.chat.completions.create(
                 model=model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    tools=gemini_tools,
-                    tool_config=_tool_config_for(iteration),
-                ),
+                messages=messages,
+                tools=tools,
+                tool_choice=_tool_choice_for(iteration),
             )
         except Exception as e:
             log.warning("[reflect_agent] LLM error iter %d: %s", iteration + 1, e, exc_info=True)
@@ -517,10 +486,11 @@ async def run_reflect_agent(
                 continue
             break
 
-        function_calls = response.function_calls or []
+        msg = response.choices[0].message
+        tool_calls = msg.tool_calls or []
 
-        if not function_calls:
-            answer = (response.text or "").strip()
+        if not tool_calls:
+            answer = (msg.content or "").strip()
             if answer:
                 return {
                     "answer":     answer,
@@ -530,8 +500,8 @@ async def run_reflect_agent(
             continue
 
         # Split done vs other tool calls
-        done_calls  = [fc for fc in function_calls if fc.name == "done"]
-        other_calls = [fc for fc in function_calls if fc.name != "done"]
+        done_calls  = [tc for tc in tool_calls if tc.function.name == "done"]
+        other_calls = [tc for tc in tool_calls if tc.function.name != "done"]
 
         if done_calls:
             has_evidence = bool(
@@ -539,22 +509,25 @@ async def run_reflect_agent(
             )
             if not has_evidence and iteration < max_iterations - 1:
                 # Guardrail: требуем сначала собрать доказательства
-                contents.append(response.candidates[0].content)
-                contents.append(types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=types.FunctionResponse(
-                        name="done",
-                        response={
-                            "error": (
-                                "You must search for information first. "
-                                "Use search_observations() or recall() before providing your final answer."
-                            )
-                        },
-                    ))]
-                ))
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in tool_calls],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": done_calls[0].id,
+                    "name": done_calls[0].function.name,
+                    "content": json.dumps({
+                        "error": (
+                            "You must search for information first. "
+                            "Use search_observations() or recall() before providing your final answer."
+                        )
+                    }),
+                })
                 continue
 
-            args = dict(done_calls[0].args)
+            args = json.loads(done_calls[0].function.arguments)
             return {
                 "answer":            args.get("answer", "").strip(),
                 "iterations":        iteration + 1,
@@ -564,38 +537,41 @@ async def run_reflect_agent(
             }
 
         if other_calls:
-            contents.append(response.candidates[0].content)
+            messages.append({
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in other_calls],
+            })
 
             results = await asyncio.gather(
-                *[_execute_tool(fc.name, dict(fc.args), storage, rerank_model) for fc in other_calls],
+                *[_execute_tool(tc.function.name, json.loads(tc.function.arguments), storage, rerank_model) for tc in other_calls],
                 return_exceptions=True,
             )
 
-            for fc, result in zip(other_calls, results):
+            for tc, result in zip(other_calls, results):
                 if isinstance(result, Exception):
                     result = {"error": str(result)}
 
                 # Отслеживаем доступные ID для валидации done()
-                if fc.name == "recall" and isinstance(result, dict):
+                if tc.function.name == "recall" and isinstance(result, dict):
                     for m in result.get("memories", []):
                         if "id" in m:
                             available_memory_ids.add(m["id"])
-                elif fc.name == "search_observations" and isinstance(result, dict):
+                elif tc.function.name == "search_observations" and isinstance(result, dict):
                     for obs in result.get("observations", []):
                         if "id" in obs:
                             available_observation_ids.add(obs["id"])
-                elif fc.name == "search_mental_models" and isinstance(result, dict):
+                elif tc.function.name == "search_mental_models" and isinstance(result, dict):
                     for mm in result.get("mental_models", []):
                         if "id" in mm:
                             available_mental_model_ids.add(mm["id"])
 
-                contents.append(types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=types.FunctionResponse(
-                        name=fc.name,
-                        response=_safe_json(result),
-                    ))]
-                ))
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": tc.function.name,
+                    "content": json.dumps(_safe_json(result), ensure_ascii=False),
+                })
 
     return {
         "answer":     "Не удалось сформулировать ответ в рамках заданного числа итераций.",

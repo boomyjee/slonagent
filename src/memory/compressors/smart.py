@@ -19,7 +19,7 @@ from enum import Enum
 from uuid import uuid4
 
 import httpx
-from google import genai
+from openai import AsyncOpenAI
 
 from agent import Skill
 from src.memory.memory import Memory
@@ -93,8 +93,9 @@ class SmartCompressor(Skill):
 
     def __init__(
         self,
-        api_key: str,
         model_name: str,
+        api_key: str,
+        base_url: str,
         mode: WorkingMemoryMode = WorkingMemoryMode.AUTO,
         max_total_tokens: int = 20_000,
         max_tool_message_tokens: int = 2_000,
@@ -106,9 +107,8 @@ class SmartCompressor(Skill):
     ):
         super().__init__()
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
-        self._client = genai.Client(api_key=api_key, http_options=http_options)
+        http_client = httpx.AsyncClient(proxy=proxy_url) if proxy_url else None
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
         self.model_name = model_name
         self._cleanup_max_age_days = cleanup_max_age_days
         self.store_dir = None
@@ -144,6 +144,14 @@ class SmartCompressor(Skill):
     # Приватные методы
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _fix_split(to_process: list, recent: list) -> tuple[list, list]:
+        """Сдвигает orphan tool-туры из начала recent в конец to_process.
+        Гарантирует, что пара assistant(tool_calls)+tool никогда не разрывается на границе разреза."""
+        while recent and isinstance(recent[0], dict) and recent[0].get("role") == "tool":
+            to_process.append(recent.pop(0))
+        return to_process, recent
+
     def _compact(self, turns: list) -> tuple[list, dict]:
         """Офлоад больших tool outputs в файлы (lossless)."""
         if Memory.count_tokens(turns) <= self.max_total_tokens:
@@ -151,45 +159,45 @@ class SmartCompressor(Skill):
 
         recent = turns[-self.keep_recent_count:] if self.keep_recent_count > 0 else []
         to_process = turns[:-self.keep_recent_count] if self.keep_recent_count > 0 else turns[:]
+        to_process, recent = self._fix_split(to_process, recent)
 
         write_file_dict = {}
         result = []
 
+        # Pre-pass: build tool_call_id → name map from assistant turns
+        id_to_name: dict[str, str] = {}
         for turn in to_process:
-            if not isinstance(turn, dict):
+            if isinstance(turn, dict) and turn.get("role") == "assistant":
+                for tc in turn.get("tool_calls") or []:
+                    tc_id = tc.get("id", "")
+                    tc_name = tc.get("function", {}).get("name", tc_id)
+                    id_to_name[tc_id] = tc_name
+
+        for turn in to_process:
+            if not isinstance(turn, dict) or turn.get("role") != "tool":
                 result.append(turn)
                 continue
 
-            new_parts = []
-            for part in turn.get("parts", []):
-                if not isinstance(part, dict) or "function_response" not in part:
-                    new_parts.append(part)
-                    continue
+            tool_call_id = turn.get("tool_call_id", "")
+            tool_name = id_to_name.get(tool_call_id, tool_call_id)
+            resp_text = turn.get("content", "")
+            if not isinstance(resp_text, str):
+                resp_text = json.dumps(resp_text, ensure_ascii=False)
+            part_tokens = len(resp_text) // 4
 
-                fr = part["function_response"]
-                resp_text = json.dumps(fr.get("response", {}), ensure_ascii=False)
-                part_tokens = len(resp_text) // 4
+            if part_tokens <= self.max_tool_message_tokens:
+                result.append(turn)
+                continue
 
-                if part_tokens <= self.max_tool_message_tokens:
-                    new_parts.append(part)
-                    continue
+            path = self._save_to_file(resp_text, suffix=".txt")
+            write_file_dict[path] = resp_text
 
-                path = self._save_to_file(resp_text, suffix=".txt")
-                write_file_dict[path] = resp_text
+            compact_text = f"tool_result for {tool_name!r} stored in file: {path}"
+            if self.preview_char_length > 0:
+                compact_text += f"\npreview: {resp_text[:self.preview_char_length]}…"
 
-                compact_text = f"tool_result for {fr.get('name')!r} stored in file: {path}"
-                if self.preview_char_length > 0:
-                    compact_text += f"\npreview: {resp_text[:self.preview_char_length]}…"
-
-                new_parts.append({
-                    "function_response": {
-                        "name": fr.get("name"),
-                        "response": {"result": compact_text},
-                    }
-                })
-                log.info("[compact] offloaded %s (%d tokens) → %s", fr.get("name"), part_tokens, path)
-
-            result.append({**turn, "parts": new_parts})
+            log.info("[compact] offloaded %s (%d tokens) → %s", tool_name, part_tokens, path)
+            result.append({**turn, "content": compact_text})
 
         return result + recent, write_file_dict
 
@@ -200,6 +208,7 @@ class SmartCompressor(Skill):
 
         recent = turns[-self.keep_recent_count:] if self.keep_recent_count > 0 else []
         old = turns[:-self.keep_recent_count] if self.keep_recent_count > 0 else turns[:]
+        old, recent = self._fix_split(old, recent)
 
         if not old:
             return turns
@@ -217,12 +226,11 @@ class SmartCompressor(Skill):
 
             log.info("[compress] group %d/%d: %d turns → LLM", idx + 1, len(groups), len(group))
             try:
-                response = await asyncio.to_thread(
-                    self._client.models.generate_content,
+                response = await self._client.chat.completions.create(
                     model=self.model_name,
-                    contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                    messages=[{"role": "user", "content": prompt}],
                 )
-                raw = response.text or ""
+                raw = response.choices[0].message.content or ""
             except Exception as e:
                 log.warning("[compress] LLM failed for group %d: %s — keeping original", idx, e, exc_info=True)
                 return turns
@@ -236,7 +244,7 @@ class SmartCompressor(Skill):
             log.info("[compress] group %d done: %d chars → %s", idx + 1, len(snapshot), original_path)
 
         return [
-            {"role": "user", "parts": [{"text": "\n\n".join(summary_parts)}], "_compressed": True}
+            {"role": "user", "content": "\n\n".join(summary_parts), "_compressed": True}
         ] + recent
 
     async def _auto(self, turns: list) -> list:
@@ -260,24 +268,46 @@ class SmartCompressor(Skill):
 
     @staticmethod
     def _format_turns_for_llm(turns: list) -> str:
+        id_to_name: dict[str, str] = {}
+        for turn in turns:
+            if isinstance(turn, dict) and turn.get("role") == "assistant":
+                for tc in turn.get("tool_calls") or []:
+                    tc_id = tc.get("id", "")
+                    tc_name = tc.get("function", {}).get("name", tc_id)
+                    id_to_name[tc_id] = tc_name
+
         lines = []
         for turn in turns:
             if not isinstance(turn, dict):
                 continue
             role = turn.get("role", "?")
-            for part in turn.get("parts", []):
-                if not isinstance(part, dict):
-                    continue
-                if text := part.get("text"):
-                    lines.append(f"[{role}]: {text}")
-                elif fc := part.get("function_call"):
-                    args = json.dumps(fc.get("args", {}), ensure_ascii=False)
-                    lines.append(f"[{role}/tool_call]: {fc.get('name')} {args}")
-                elif fr := part.get("function_response"):
-                    resp = json.dumps(fr.get("response", {}), ensure_ascii=False)
-                    if len(resp) > 500:
-                        resp = resp[:500] + "…"
-                    lines.append(f"[tool_result/{fr.get('name')}]: {resp}")
+
+            if role in ("user", "assistant"):
+                content = turn.get("content")
+                if isinstance(content, str) and content:
+                    lines.append(f"[{role}]: {content}")
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                            lines.append(f"[{role}]: {block['text']}")
+                for tc in turn.get("tool_calls") or []:
+                    fn = tc.get("function", {})
+                    try:
+                        args = json.dumps(json.loads(fn.get("arguments", "{}")), ensure_ascii=False)
+                    except Exception:
+                        args = fn.get("arguments", "{}")
+                    lines.append(f"[{role}/tool_call]: {fn.get('name')} {args}")
+
+            elif role == "tool":
+                tool_call_id = turn.get("tool_call_id", "")
+                tool_name = id_to_name.get(tool_call_id, tool_call_id)
+                resp = turn.get("content", "")
+                if not isinstance(resp, str):
+                    resp = json.dumps(resp, ensure_ascii=False)
+                if len(resp) > 500:
+                    resp = resp[:500] + "…"
+                lines.append(f"[tool_result/{tool_name}]: {resp}")
+
         return "\n".join(lines)
 
     @staticmethod

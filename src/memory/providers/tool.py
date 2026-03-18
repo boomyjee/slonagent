@@ -9,7 +9,7 @@ import asyncio, json, logging, os
 from datetime import datetime
 
 import httpx
-from google import genai
+from openai import AsyncOpenAI
 
 from agent import Agent
 from src.memory.providers.base import BaseProvider
@@ -38,16 +38,15 @@ Write a concise guideline (max 200 words). Plain text, no code blocks.\
 
 
 class ToolProvider(BaseProvider):
-    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 3_000):
+    def __init__(self, model_name: str, api_key: str, base_url: str, consolidate_tokens: int = 3_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
         self.model_name = model_name
         self._tool_stats_file: str = ""
         self._tool_stats: dict = {}
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
-        self._client = genai.Client(api_key=api_key, http_options=http_options)
+        http_client = httpx.AsyncClient(proxy=proxy_url) if proxy_url else None
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
     async def start(self):
         await super().start()
@@ -76,46 +75,66 @@ class ToolProvider(BaseProvider):
 
     async def _consolidate(self, pending: list):
         tool_names: set[str] = set()
-        call = None
-        call_time = None
+        pending_calls: dict[str, tuple[dict, str]] = {}  # tool_call_id -> (call_info, call_time)
         contents = []
         for turn in pending:
             if not isinstance(turn, dict): continue
+            role = turn.get("role", "")
             text_parts = []
-            for part in turn.get("parts", []):
-                fc = fr = None
-                if not isinstance(part, dict):
-                    continue
-                fc = part.get("function_call")
-                fr = part.get("function_response")
-                if "text" in part:
-                    text_parts.append(part["text"])
-                if fc:
-                    call = fc
-                    call_time = turn.get("_timestamp")
-                elif res := fr:
-                    if call and call["name"] == res["name"]:
-                        success = "error" not in res.get("response", {})
-                        entry = self._tool_stats.setdefault(call["name"], {"content": "", "total_calls": 0, "total_success": 0, "avg_tokens": 0.0, "avg_time": 0.0})
-                        entry["total_calls"] += 1
-                        entry["total_success"] += int(success)
-                        n = entry["total_calls"]
 
-                        token_cost = (len(json.dumps(call.get("args", {}))) + len(json.dumps(res.get("response", {})))) // 4
-                        entry["avg_tokens"] += (token_cost - entry["avg_tokens"]) / n
+            if role == "assistant":
+                content = turn.get("content")
+                if isinstance(content, str) and content:
+                    text_parts.append(content)
+                for tc in turn.get("tool_calls") or []:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "")
+                    try:
+                        args = json.loads(fn.get("arguments", "{}"))
+                    except Exception:
+                        args = {}
+                    pending_calls[tc["id"]] = ({"name": name, "args": args}, turn.get("_timestamp"))
+                    text_parts.append(f"\n[Tool call: {name}({json.dumps(args, ensure_ascii=False)}]\n")
 
-                        try:
+            elif role == "tool":
+                tool_call_id = turn.get("tool_call_id", "")
+                response_content = turn.get("content", "")
+                if tool_call_id in pending_calls:
+                    call, call_time = pending_calls.pop(tool_call_id)
+                    name = call["name"]
+                    args = call["args"]
+                    try:
+                        response = json.loads(response_content) if isinstance(response_content, str) else {}
+                    except Exception:
+                        response = {"result": response_content}
+                    success = "error" not in response
+                    entry = self._tool_stats.setdefault(name, {"content": "", "total_calls": 0, "total_success": 0, "avg_tokens": 0.0, "avg_time": 0.0})
+                    entry["total_calls"] += 1
+                    entry["total_success"] += int(success)
+                    n = entry["total_calls"]
+                    token_cost = (len(json.dumps(args)) + len(json.dumps(response))) // 4
+                    entry["avg_tokens"] += (token_cost - entry["avg_tokens"]) / n
+                    try:
+                        if call_time:
                             delta_time = (datetime.fromisoformat(turn["_timestamp"]) - datetime.fromisoformat(call_time)).total_seconds()
                             entry["avg_time"] += (delta_time - entry["avg_time"]) / n
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
+                    tool_names.add(name)
+                    text_parts.append(f"\n[Tool response: {name} → {json.dumps(response, ensure_ascii=False)}]\n")
 
-                        tool_names.add(call["name"])
-                        text_parts.append(f"\n[Tool call: {call['name']}({json.dumps(call.get('args') or {}, ensure_ascii=False)}]\n")
-                        text_parts.append(f"\n[Tool response: {call['name']} → {json.dumps(res.get('response') or {}, ensure_ascii=False)}]\n")
-                    call = None
+            elif role == "user":
+                content = turn.get("content", "")
+                if isinstance(content, str):
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block["text"])
+
             if text_parts:
-                contents.append({"role": turn.get("role", "model"), "parts": [{"text": p} for p in text_parts]})
+                oai_role = "assistant" if role == "assistant" else "user"
+                contents.append({"role": oai_role, "content": "\n".join(text_parts)})
 
         contents = Agent.strip_contents_private(contents)
         if tool_names:
@@ -133,12 +152,11 @@ class ToolProvider(BaseProvider):
         max_retries, delay = 5, 1.0
         for attempt in range(max_retries):
             try:
-                response = await asyncio.to_thread(
-                    self._client.models.generate_content,
+                response = await self._client.chat.completions.create(
                     model=self.model_name,
-                    contents=[*contents, {"role": "user", "parts": [{"text": instruction}]}],
+                    messages=[*contents, {"role": "user", "content": instruction}],
                 )
-                entry["content"] = (response.text or "").strip()
+                entry["content"] = (response.choices[0].message.content or "").strip()
                 log.info("[ToolProvider] summarized %s", tool_name)
                 return
             except Exception as e:

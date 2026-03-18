@@ -34,7 +34,7 @@ class BaseProvider(Skill):
     async def add_turn(self, turn):
         if self.consolidate_tokens == 0 or not isinstance(turn, dict): return
         self._pending.append(turn)
-        if turn.get("role") == "model":
+        if turn.get("role") == "assistant" and not turn.get("tool_calls"):
             if Memory.count_tokens(self._pending) >= self.consolidate_tokens:
                 await self._consolidate(self._pending)
                 self._pending = []

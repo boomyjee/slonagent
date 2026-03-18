@@ -1,27 +1,87 @@
 import json, logging, os, tempfile
-
-log = logging.getLogger(__name__)
 from datetime import datetime, timezone
 
-from google.genai import types
+log = logging.getLogger(__name__)
 
-def _part_to_jsonable(p) -> dict:
-    """Part (dict или объект SDK) → dict для JSON. SDK-объекты сериализуем через model_dump (bytes→base64 и т.п.)."""
-    if hasattr(p, "model_dump"):
-        return p.model_dump(mode="json", exclude_none=True)
-    if not isinstance(p, dict):
-        return {}
-    return dict(p)
 
-def _turn_to_dict(turn) -> dict:
-    """Turn (dict или Content) → единый dict для хранения и провайдеров. Parts в snake_case (формат SDK), JSON-ready."""
-    if isinstance(turn, dict):
-        parts = [_part_to_jsonable(p) for p in turn.get("parts", [])]
-        return {**turn, "parts": parts}
-    role = getattr(turn, "role", None)
-    role = getattr(role, "value", role) if role is not None and hasattr(role, "value") else role
-    parts = [_part_to_jsonable(p) for p in (getattr(turn, "parts", None) or [])]
-    return {"role": role or "model", "parts": parts}
+def _migrate_gemini_turns(turns: list) -> list:
+    """Конвертирует старые Gemini-format turns в OpenAI-format.
+    Вызывается при загрузке CONTEXT.json если там обнаружены старые туры.
+    """
+    result = []
+    pending_call_ids: list[str] = []
+
+    for turn in turns:
+        if not isinstance(turn, dict) or "parts" not in turn:
+            result.append(turn)
+            continue
+
+        private = {k: v for k, v in turn.items() if k.startswith("_")}
+        role = turn.get("role")
+        parts = turn.get("parts", [])
+
+        text_parts = [p for p in parts if isinstance(p, dict) and "text" in p
+                      and "function_call" not in p and "function_response" not in p]
+        fc_parts   = [p for p in parts if isinstance(p, dict) and "function_call" in p]
+        fr_parts   = [p for p in parts if isinstance(p, dict) and "function_response" in p]
+
+        if role == "model":
+            if fc_parts:
+                thought_sig = turn.get("thought_signature")
+                tool_calls, call_ids = [], []
+                for i, p in enumerate(fc_parts):
+                    fc = p["function_call"]
+                    cid = f"call_{i}_{fc['name']}"
+                    call_ids.append(cid)
+                    tc_entry = {
+                        "id": cid, "type": "function",
+                        "function": {"name": fc["name"], "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False)},
+                    }
+                    if thought_sig:
+                        tc_entry["extra_content"] = {"google": {"thought_signature": thought_sig}}
+                    tool_calls.append(tc_entry)
+                pending_call_ids = call_ids
+                msg = {"role": "assistant", "content": None, "tool_calls": tool_calls, **private}
+                if text_parts:
+                    msg["content"] = " ".join(p["text"] for p in text_parts)
+                result.append(msg)
+            else:
+                content = " ".join(p.get("text", "") for p in text_parts)
+                result.append({"role": "assistant", "content": content, **private})
+                pending_call_ids = []
+
+        elif role == "user":
+            if fr_parts:
+                if not pending_call_ids:
+                    # Осиротевший function_response — соответствующий function_call
+                    # был срезан компрессором. Пропускаем: tool-тур без парного
+                    # assistant(tool_calls) сломает OpenAI-совместимый эндпоинт.
+                    log.warning("_migrate_gemini_turns: пропускаем orphan function_response (%s)",
+                                ", ".join(p["function_response"].get("name", "?") for p in fr_parts))
+                else:
+                    for i, p in enumerate(fr_parts):
+                        fr = p["function_response"]
+                        cid = pending_call_ids[i] if i < len(pending_call_ids) else f"call_{i}"
+                        result.append({"role": "tool", "tool_call_id": cid, "name": fr.get("name", ""),
+                                       "content": json.dumps(fr.get("response", {}), ensure_ascii=False), **private})
+                    pending_call_ids = []
+                if text_parts:
+                    result.append({"role": "user", "content": [{"type": "text", "text": p["text"]} for p in text_parts], **private})
+            else:
+                content_blocks = []
+                for p in parts:
+                    if not isinstance(p, dict):
+                        continue
+                    if "text" in p:
+                        content_blocks.append({"type": "text", "text": p["text"]})
+                    elif "inline_data" in p:
+                        d = p["inline_data"]
+                        content_blocks.append({"type": "image_url",
+                                               "image_url": {"url": f"data:{d['mime_type']};base64,{d['data']}"}})
+                if content_blocks:
+                    result.append({"role": "user", "content": content_blocks, **private})
+
+    return result
 
 
 def save_turns_json(path, turns):
@@ -47,8 +107,15 @@ def load_turns_json(path):
             return []
         # поддержка старого формата (JSON array)
         if content.startswith("["):
-            return json.loads(content)
-        return [json.loads(line) for line in content.splitlines() if line.strip()]
+            turns = json.loads(content)
+        else:
+            turns = [json.loads(line) for line in content.splitlines() if line.strip()]
+        # fallback-конвертер: если туры в старом Gemini-формате (есть поле "parts")
+        if any(isinstance(t, dict) and "parts" in t for t in turns):
+            log.info("load_turns_json %s: обнаружен Gemini-формат, конвертирую в OpenAI", path)
+            turns = _migrate_gemini_turns(turns)
+            save_turns_json(path, turns)
+        return turns
     except FileNotFoundError:
         return []
     except Exception as e:
@@ -81,17 +148,20 @@ class Memory:
         for turn in turns:
             if not isinstance(turn, dict):
                 continue
-            for part in turn.get("parts", []):
-                if not isinstance(part, dict):
-                    continue
-                if "text" in part:
-                    total += len(part["text"]) // 4
-                elif fc := part.get("function_call"):
-                    total += (len(fc.get("name", "")) + len(json.dumps(fc.get("args", {}), ensure_ascii=False))) // 4
-                elif fr := part.get("function_response"):
-                    total += (len(fr.get("name", "")) + len(json.dumps(fr.get("response", {}), ensure_ascii=False))) // 4
-                elif part.get("inline_data") or part.get("file_data"):
-                    total += 258  # ~кол-во визуальных токенов в low-res режиме Gemini
+            content = turn.get("content")
+            if isinstance(content, str):
+                total += len(content) // 4
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text":
+                        total += len(block["text"]) // 4
+                    else:
+                        total += 258  # image_url (~85-765 токенов в зависимости от размера)
+            for tc in turn.get("tool_calls", []):
+                fn = tc.get("function", {})
+                total += (len(fn.get("name", "")) + len(fn.get("arguments", ""))) // 4
         return total
 
     async def get_contents(self) -> list:
@@ -109,12 +179,11 @@ class Memory:
 
         return self._turns
 
-    async def add_turn(self, turn):
-        normalized = _turn_to_dict(turn)
-        if "_timestamp" not in normalized:
-            normalized["_timestamp"] = datetime.now(timezone.utc).isoformat()
-        self._turns.append(normalized)
-        if normalized.get("role") == "model":
+    async def add_turn(self, turn: dict):
+        if "_timestamp" not in turn:
+            turn = {**turn, "_timestamp": datetime.now(timezone.utc).isoformat()}
+        self._turns.append(turn)
+        if turn.get("role") == "assistant" and not turn.get("tool_calls"):
             save_turns_json(self._state_file, self._turns)
         for provider in self.providers:
-            await provider.add_turn(normalized)
+            await provider.add_turn(turn)

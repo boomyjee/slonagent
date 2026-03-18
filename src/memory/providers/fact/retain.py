@@ -443,29 +443,22 @@ async def _extract_from_chunk(
     max_retries, delay = 5, 1.0
     for attempt in range(max_retries):
         try:
-            from google.genai import types as genai_types
-            response = await asyncio.to_thread(
-                client.models.generate_content,
+            response = await client.chat.completions.create(
                 model=model_name,
-                contents=[
-                    {"role": "user", "parts": [{"text": system_prompt}]},
-                    {"role": "model", "parts": [{"text": "Understood. I will extract significant facts from the text you provide."}]},
-                    {"role": "user", "parts": [{"text": user_message}]},
+                messages=[
+                    {"role": "user", "content": system_prompt},
+                    {"role": "assistant", "content": "Understood. I will extract significant facts from the text you provide."},
+                    {"role": "user", "content": user_message},
                 ],
-                config=genai_types.GenerateContentConfig(
-                    max_output_tokens=RETAIN_MAX_OUTPUT_TOKENS,
-                    response_mime_type="application/json",
-                ),
+                max_tokens=RETAIN_MAX_OUTPUT_TOKENS,
+                response_format={"type": "json_object"},
             )
 
-            # Проверяем, был ли вывод обрезан по лимиту токенов
-            candidate = response.candidates[0] if response.candidates else None
-            if candidate is not None:
-                reason = str(getattr(candidate, "finish_reason", "")).upper()
-                if "MAX_TOKEN" in reason or reason == "2":
-                    raise _OutputTooLongError(f"finish_reason={reason}")
+            choice = response.choices[0]
+            if str(getattr(choice, "finish_reason", "")).lower() in ("length", "max_tokens"):
+                raise _OutputTooLongError(f"finish_reason={choice.finish_reason}")
 
-            raw = response.text or ""
+            raw = choice.message.content or ""
             m = re.search(r"\{", raw)
             if not m:
                 log.warning("[retain] no JSON object in response (attempt %d): %r", attempt + 1, raw[:300])
@@ -1010,15 +1003,15 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
     max_retries, delay = 5, 1.0
     for attempt in range(max_retries):
         try:
-            response = await asyncio.to_thread(
-                client.models.generate_content,
+            response = await client.chat.completions.create(
                 model=model_name,
-                contents=[{"role": "user", "parts": [{"text": prompt}]}],
-                config={"response_mime_type": "application/json"},
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
             )
-            if not response.text:
+            raw = response.choices[0].message.content or ""
+            if not raw:
                 raise ValueError("empty response from LLM")
-            data = json.loads(response.text.strip())
+            data = json.loads(raw.strip())
             result = _BatchResponse(
                 creates=[
                     _CreateAction(text=c["text"], source_fact_ids=c.get("source_fact_ids", []))

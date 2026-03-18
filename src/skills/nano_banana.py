@@ -4,7 +4,6 @@ import os
 import base64
 import asyncio
 import requests
-from google.genai import types
 
 class NanoBananaSkill(Skill):
     def __init__(self, api_key: str):
@@ -84,12 +83,13 @@ class NanoBananaSkill(Skill):
                             message_extra = " и отправлено пользователю"
 
 
+                        b64 = base64.b64encode(img_data).decode()
                         return {
                             "status": "success",
                             "message": f"Изображение успешно сгенерировано моделью {model}{message_extra}",
                             "container_path": container_path,
                             "model_used": model_id,
-                            "_parts": [types.Part.from_bytes(data=img_data, mime_type=mime_type)],
+                            "_parts": [{"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}}],
                         }
 
             return {"error": "Изображение не найдено в ответе API.", "details": str(data)[:500]}

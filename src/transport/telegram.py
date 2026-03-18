@@ -1,12 +1,11 @@
 import html
-import io, os, re, asyncio, logging, json, mimetypes
+import base64, io, os, re, asyncio, logging, json, mimetypes
 
 log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot
 from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser
 from agent import Skill, tool
-from google.genai import types
 from src.transport.base import BaseTransport
 
 def _markdown_to_html(text: str) -> str:
@@ -305,9 +304,8 @@ class TelegramTransport(BaseTransport):
         self._tool_msg = None
         self._tool_call_text = ""
         await self.agent.process_message(
-            message_parts=[{"text": text}],
+            content_parts=[{"text": text}],
             user_message_id=sent.message_id,
-            user_query=text,
         )
 
     async def send_system_prompt(self, text: str):
@@ -359,7 +357,7 @@ class TelegramTransport(BaseTransport):
         self._tool_call_text = ""
         typing_task = asyncio.create_task(self._typing_loop(self.chat_id))
 
-        message_parts = []
+        content_parts = []
         user_texts = []
 
         user_id = first.from_user.id if first.from_user else None
@@ -384,24 +382,23 @@ class TelegramTransport(BaseTransport):
                 text = text.split("@")[0] + (text[text.index(" "):] if " " in text else "")
             if text:
                 if forward_sender:
-                    message_parts.append({"text": f"<forwarded_message from=\"{forward_sender}\">\n{text}\n</forwarded_message>"})
+                    content_parts.append({"type": "text", "text": f"<forwarded_message from=\"{forward_sender}\">\n{text}\n</forwarded_message>"})
                 else:
-                    message_parts.append({"text": text})
+                    content_parts.append({"type": "text", "text": text})
                 user_texts.append(text)
 
             if message.photo:
-                message_parts.append(
-                    types.Part.from_bytes(data=await self._download_file(message.photo[-1].file_id), mime_type="image/jpeg")
-                )
+                data = await self._download_file(message.photo[-1].file_id)
+                content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"}})
 
             if message.sticker:
                 sticker = message.sticker
                 if not sticker.is_animated and not sticker.is_video:
-                    message_parts.append(
-                        types.Part.from_bytes(data=await self._download_file(sticker.file_id), mime_type="image/webp")
-                    )
+                    data = await self._download_file(sticker.file_id)
+                    content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/webp;base64,{base64.b64encode(data).decode()}"}})
+
                 hint = f"[стикер {sticker.emoji}]" if sticker.emoji else "[стикер]"
-                message_parts.append({"text": hint})
+                content_parts.append({"type": "text", "text": hint})
                 user_texts.append(hint)
 
             attachment, field = None, None
@@ -450,14 +447,15 @@ class TelegramTransport(BaseTransport):
 
             attrs = " ".join(f'{k}="{v}"' for k, v in file_meta.items())
             if content:
-                message_parts.append({
+                content_parts.append({
+                    "type": "text",
                     "text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>",
                     "_document_id": f"{attachment.file_unique_id}_{filename}",
                 })
             else:
-                message_parts.append({"text": f"<attached_file {attrs} />"})
+                content_parts.append({"type": "text", "text": f"<attached_file {attrs} />"})
 
-        if not message_parts:
+        if not content_parts:
             typing_task.cancel()
             return
 
@@ -466,9 +464,8 @@ class TelegramTransport(BaseTransport):
 
         try:
             await self.agent.process_message(
-                message_parts=message_parts,
+                content_parts=content_parts,
                 user_message_id=first.message_id,
-                user_query=" ".join(user_texts).strip(),
             )
         except Exception as e:
             logging.exception("Error processing message")

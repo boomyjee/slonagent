@@ -18,7 +18,7 @@ import httpx
 import lancedb
 import numpy as np
 import pyarrow as pa
-from google import genai
+from openai import AsyncOpenAI
 
 from agent import tool
 from src.memory.providers.base import BaseProvider
@@ -117,26 +117,24 @@ class SemanticProvider(BaseProvider):
     TABLE_NAME = "memory_entries"
     TOP_K = 10
 
-    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 3_000,
-                 auto_recall: bool = True):
+    def __init__(self, model_name: str, api_key: str, base_url: str,
+                 consolidate_tokens: int = 3_000, auto_recall: bool = True):
         super().__init__(consolidate_tokens=consolidate_tokens)
         self.model_name = model_name
-        self._api_key = api_key
         self._auto_recall = auto_recall
         self._db = None
         self._table = None
         self._embed = None
+
+        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+        http_client = httpx.AsyncClient(proxy=proxy_url) if proxy_url else None
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
     async def start(self):
         await super().start()
         db_path = os.path.join(self.agent.memory.memory_dir, "semantic", "lancedb")
         os.makedirs(db_path, exist_ok=True)
         self._db = lancedb.connect(db_path)
-
-        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
-        self._client = genai.Client(api_key=self._api_key, http_options=http_options)
 
     # ── embedding ──────────────────────────────────────────────────────────────
 
@@ -238,19 +236,21 @@ class SemanticProvider(BaseProvider):
         """Strip private fields, embed _timestamp as text prefix to preserve temporal context."""
         result = []
         for turn in turns:
-            if not isinstance(turn, dict) or turn.get("role") not in ("user", "model"):
+            if not isinstance(turn, dict) or turn.get("role") not in ("user", "assistant"):
                 continue
             ts = (turn.get("_timestamp") or "")[:19]
-            parts = []
-            for i, part in enumerate(turn.get("parts", [])):
-                if not isinstance(part, dict):
-                    continue
-                clean = {k: v for k, v in part.items() if not k.startswith("_")}
-                if i == 0 and ts and "text" in clean:
-                    clean["text"] = f"[{ts}] {clean['text']}"
-                parts.append(clean)
-            if parts:
-                result.append({"role": turn["role"], "parts": parts})
+            content = turn.get("content", "")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                text = ""
+            if not text.strip():
+                continue
+            if ts:
+                text = f"[{ts}] {text}"
+            result.append({"role": turn["role"], "content": text})
         return result
 
     def _build_context(self) -> str:
@@ -271,12 +271,11 @@ class SemanticProvider(BaseProvider):
         instruction = EXTRACT_PROMPT.format(context=context)
         for attempt in range(3):
             try:
-                response = await asyncio.to_thread(
-                    self._client.models.generate_content,
+                response = await self._client.chat.completions.create(
                     model=self.model_name,
-                    contents=[*contents, {"role": "user", "parts": [{"text": instruction}]}],
+                    messages=[*contents, {"role": "user", "content": instruction}],
                 )
-                raw = response.text or ""
+                raw = response.choices[0].message.content or ""
                 m = re.search(r"\[.*\]", raw, re.DOTALL)
                 if not m:
                     log.warning("[SemanticProvider] no JSON array in LLM response (attempt %d)", attempt + 1)
@@ -326,14 +325,15 @@ class SemanticProvider(BaseProvider):
         for turn in pending:
             if not isinstance(turn, dict):
                 continue
-            for part in turn.get("parts", []):
-                if isinstance(part, dict) and "text" in part and part.get("_document_id"):
-                    doc_id = part["_document_id"]
-                    docs.setdefault(doc_id, part["text"])
+            content = turn.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("_document_id"):
+                    docs.setdefault(block["_document_id"], block["text"])
 
         for doc_id, doc_text in docs.items():
-            doc_contents = [{"role": "user", "parts": [{"text": doc_text}]}]
-            entries = await self._extract_entries(doc_contents, document_id=doc_id)
+            entries = await self._extract_entries([{"role": "user", "content": doc_text}], document_id=doc_id)
             all_entries.extend(entries)
             log.info("[SemanticProvider] document %s → %d entries", doc_id, len(entries))
 

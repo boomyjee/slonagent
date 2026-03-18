@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Annotated
 
 import httpx
-from google import genai
+from openai import AsyncOpenAI
 
 from agent import tool, bypass
 from src.memory.memory import Memory
@@ -38,13 +38,14 @@ class FactProvider(BaseProvider):
 
     Хранит факты в SQLite + LanceDB (без внешнего сервера).
     Встраивание — SentenceTransformer (Qwen3-Embedding-0.6B).
-    LLM — тот же genai.Client, что и основной агент.
+    LLM — OpenAI-совместимый клиент (AsyncOpenAI).
     """
 
     def __init__(
         self,
         model_name: str,
         api_key: str,
+        base_url: str,
         consolidate_tokens: int = 3_000,
         recall_max_tokens: int = 12_000,
         auto_recall: bool = False,
@@ -56,8 +57,8 @@ class FactProvider(BaseProvider):
     ):
         """
         Args:
-            model_name:           Имя LLM-модели (Gemini) для извлечения фактов и reflect.
-            api_key:              API-ключ Gemini.
+            model_name:           Имя LLM-модели для извлечения фактов и reflect.
+            api_key:              API-ключ.
             consolidate_tokens:   Порог токенов накопленных ходов для запуска retain.
             recall_max_tokens:    Мягкий лимит токенов в auto-recall (get_context_prompt).
             auto_recall:          Автоматически подмешивать recall в системный промпт.
@@ -78,12 +79,8 @@ class FactProvider(BaseProvider):
         self._rerank_model        = rerank_model
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_options = (
-            {"httpx_client": http_client, "api_version": "v1alpha"}
-            if http_client else {"api_version": "v1alpha"}
-        )
-        self._llm = genai.Client(api_key=api_key, http_options=http_options)
+        http_client = httpx.AsyncClient(proxy=proxy_url) if proxy_url else None
+        self._llm = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
         self._embedding_model = embedding_model
         self.storage: Storage | None = None
@@ -110,19 +107,29 @@ class FactProvider(BaseProvider):
         for turn in pending:
             if not isinstance(turn, dict):
                 continue
-            label  = "Пользователь" if turn.get("role") == "user" else "Ассистент"
+            role = turn.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            label  = "Пользователь" if role == "user" else "Ассистент"
             ts_raw = turn.get("_timestamp")
             ts     = (
                 datetime.fromisoformat(ts_raw)
                 if isinstance(ts_raw, str) else (ts_raw or datetime.utcnow())
             )
-            for part in turn.get("parts", []):
-                if not isinstance(part, dict) or "text" not in part:
+            content = turn.get("content", "")
+            blocks = content if isinstance(content, list) else (
+                [{"type": "text", "text": content}] if isinstance(content, str) and content else []
+            )
+            for block in blocks:
+                if not isinstance(block, dict) or block.get("type") != "text":
                     continue
-                doc_id = part.get("_document_id")
+                text = block.get("text", "")
+                if not text.strip():
+                    continue
+                doc_id = block.get("_document_id")
                 if doc_id:
                     items.append(RetainItem(
-                        content=part["text"],
+                        content=text,
                         context="attached document",
                         event_date=None,
                         document_id=doc_id,
@@ -140,7 +147,7 @@ class FactProvider(BaseProvider):
                     if conv_ts is None:
                         conv_ts = ts
                     ts_prefix = ts.strftime("%Y-%m-%d %H:%M")
-                    conv_lines.append(f"[{ts_prefix}] {label}: {part['text']}")
+                    conv_lines.append(f"[{ts_prefix}] {label}: {text}")
 
         if conv_lines:
             items.insert(0, RetainItem(
@@ -153,7 +160,6 @@ class FactProvider(BaseProvider):
 
         if not items:
             return
-
         retain(items, self._llm, self._model_name, self.storage,
                with_observations=self._auto_consolidate)
 

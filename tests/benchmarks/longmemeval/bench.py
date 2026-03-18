@@ -53,7 +53,8 @@ def load_config():
     cfg = json.loads((ROOT / ".config.json").read_text(encoding="utf-8"))
     for k, v in cfg.get("env", {}).items():
         os.environ.setdefault(k, v)
-    return os.environ["GEMINI_API_KEY"]
+    keys = cfg.get("keys", {})
+    return keys.get("llm") or os.environ["LLM_KEY"], keys.get("llm_url", "")
 
 
 async def prepare(compressor, sample):
@@ -106,7 +107,7 @@ async def ask(client, model, turns, question, question_date):
 async def main():
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 10
 
-    api_key = load_config()
+    api_key, base_url = load_config()
 
     print(f"Компрессор: {COMPRESSOR_MODEL}")
     print(f"Ответы:     {ANSWER_MODEL}")
@@ -119,7 +120,7 @@ async def main():
     http_opts = {"httpx_client": httpx.Client(proxy=proxy), "api_version": "v1alpha"} if proxy else {"api_version": "v1alpha"}
     client = genai.Client(api_key=api_key, http_options=http_opts)
 
-    compressor = LogCompressor(model_name=COMPRESSOR_MODEL, api_key=api_key)
+    compressor = LogCompressor(model_name=COMPRESSOR_MODEL, api_key=api_key, base_url=base_url)
 
     data_path = Path(__file__).parent / "data" / "longmemeval_s_cleaned.json"
     data = json.loads(data_path.read_text(encoding="utf-8"))[:limit]

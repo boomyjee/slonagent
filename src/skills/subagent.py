@@ -52,7 +52,7 @@ class SubAgentSkill(Skill):
                     skills=extra_skills,
                 )
                 await sub.start()
-                await sub.process_message(message_parts=[{"text": task}], user_query=task)
+                await sub.process_message(content_parts=[{"type": "text", "text": task}])
             return transport.result
 
         results = await asyncio.gather(*[run_one(t) for t in tasks])

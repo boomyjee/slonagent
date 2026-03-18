@@ -17,8 +17,7 @@ import os
 import re
 from datetime import datetime, timezone
 import httpx
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 
 from agent import Agent, Skill
 from src.memory.memory import Memory
@@ -371,7 +370,7 @@ class LogCompressor(Skill):
     OM_turn персистируется в истории через memory.py как обычный turn.
     """
 
-    def __init__(self, model_name: str, api_key: str,
+    def __init__(self, model_name: str, api_key: str, base_url: str,
                  recent_tokens: int        = 6_000,
                  min_recent_turns: int     = 10,
                  compress_after_tokens: int = 30_000,
@@ -384,9 +383,8 @@ class LogCompressor(Skill):
         self._model_name = model_name
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_opts = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
-        self._client = genai.Client(api_key=api_key, http_options=http_opts)
+        http_client = httpx.AsyncClient(proxy=proxy_url) if proxy_url else None
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -416,7 +414,7 @@ class LogCompressor(Skill):
 
         updated = (existing_observations + "\n\n" + new_obs).strip() if existing_observations else new_obs
 
-        obs_tokens = Memory.count_tokens([{"role": "user", "parts": [{"text": updated}]}])
+        obs_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
         if obs_tokens >= self._reflect_after_tokens:
             updated = await self._run_reflector(updated) or updated
 
@@ -427,7 +425,7 @@ class LogCompressor(Skill):
             "Do not give generic advice — personalize your response based on what you know about this user. "
             "For conflicting information, prefer the MOST RECENT observation (check dates)."
         )
-        new_om = {"role": "user", "parts": [{"text": obs_text}], "_observation_message": True, "_raw_observations": updated}
+        new_om = {"role": "user", "content": obs_text, "_observation_message": True, "_raw_observations": updated}
         self._write_log(updated)  # debug only
         log.info("[LogCompressor] %d → 1 OM + %d recent turns", len(to_observe), len(recent))
         return [new_om] + recent
@@ -465,6 +463,8 @@ class LogCompressor(Skill):
         """Отделяет recent_turns (последние до recent_tokens) от turns для наблюдения.
 
         Гарантирует не менее min_recent_turns шагов в recent, даже если они превышают бюджет токенов.
+        Никогда не разрывает пару assistant(tool_calls) + tool: если граница попадает внутрь пары,
+        tool-туры сдвигаются в to_observe вместе с вызовом.
         """
         recent_budget = self._recent_tokens
         recent, tokens = [], 0
@@ -476,19 +476,23 @@ class LogCompressor(Skill):
             tokens += t
         recent.reverse()
         to_observe = turns[:len(turns) - len(recent)]
+
+        # Не допускаем, чтобы recent начинался с tool-тура без парного assistant перед ним.
+        while recent and isinstance(recent[0], dict) and recent[0].get("role") == "tool":
+            to_observe.append(recent.pop(0))
+
         return to_observe, recent
 
-    async def _generate(self, label: str, config: types.GenerateContentConfig, contents: list) -> str:
+    async def _generate(self, label: str, system: str, messages: list, **kwargs) -> str:
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
-                response = await asyncio.to_thread(
-                    self._client.models.generate_content,
+                response = await self._client.chat.completions.create(
                     model=self._model_name,
-                    contents=contents,
-                    config=config,
+                    messages=[{"role": "system", "content": system}, *messages],
+                    **kwargs,
                 )
-                return response.text.strip()
+                return (response.choices[0].message.content or "").strip()
             except Exception as e:
                 e_str = str(e)
                 if attempt + 1 == max_retries or not any(s in e_str for s in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")):
@@ -499,17 +503,15 @@ class LogCompressor(Skill):
                 await asyncio.sleep(wait)
 
     async def _run_observer(self, turns: list, existing_observations: str) -> str:
-        contents = []
+        messages = []
         if existing_observations:
-            contents.append({"role": "user", "parts": [{"text": f"## Previous Observations\n\n{existing_observations}\n\nDo not repeat existing observations. Append new ones only."}]})
-            contents.append({"role": "model", "parts": [{"text": "Understood. I will only append new observations."}]})
-        contents.extend(Agent.strip_contents_private(turns))
-        contents.append({"role": "user", "parts": [{"text": "Extract observations from the conversation above."}]})
+            messages.append({"role": "user", "content": f"## Previous Observations\n\n{existing_observations}\n\nDo not repeat existing observations. Append new ones only."})
+            messages.append({"role": "assistant", "content": "Understood. I will only append new observations."})
+        messages.extend(Agent.strip_contents_private(turns))
+        messages.append({"role": "user", "content": "Extract observations from the conversation above."})
 
         response = await self._generate(
-            "Observer",
-            types.GenerateContentConfig(system_instruction=OBSERVER_SYSTEM_PROMPT, temperature=0.3, max_output_tokens=100_000),
-            contents,
+            "Observer", OBSERVER_SYSTEM_PROMPT, messages, temperature=0.3, max_tokens=100_000,
         )
         return _parse_observations(response)
 
@@ -523,17 +525,16 @@ class LogCompressor(Skill):
             user_prompt += f"\n\n{_COMPRESSION_GUIDANCE[compression_level]}"
 
         reflected = _parse_observations(await self._generate(
-            "Reflector",
-            types.GenerateContentConfig(system_instruction=REFLECTOR_SYSTEM_PROMPT, temperature=0.0, max_output_tokens=100_000),
-            [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "Reflector", REFLECTOR_SYSTEM_PROMPT, [{"role": "user", "content": user_prompt}],
+            temperature=0.0, max_tokens=100_000,
         ))
 
         if not reflected:
             log.warning("[LogCompressor] Reflector returned empty")
             return ""
 
-        orig_tokens = Memory.count_tokens([{"role": "user", "parts": [{"text": observations}]}])
-        refl_tokens = Memory.count_tokens([{"role": "user", "parts": [{"text": reflected}]}])
+        orig_tokens = Memory.count_tokens([{"role": "user", "content": observations}])
+        refl_tokens = Memory.count_tokens([{"role": "user", "content": reflected}])
 
         if refl_tokens >= orig_tokens and compression_level < 3:
             log.warning("[LogCompressor] Reflection didn't compress (level %d → %d)", compression_level, compression_level + 1)

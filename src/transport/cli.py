@@ -31,6 +31,5 @@ class CliTransport(BaseTransport):
     async def inject_message(self, text: str):
         print(f"\n[→] {text}")
         await self.agent.process_message(
-            message_parts=[{"text": text}],
-            user_query=text,
+            content_parts=[{"type": "text", "text": text}],
         )

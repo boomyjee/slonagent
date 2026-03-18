@@ -1,7 +1,6 @@
-import asyncio, os, re, logging, subprocess
+import asyncio, base64, json, os, re, logging, subprocess
 from typing import Annotated
 from agent import Skill, tool
-from google.genai import types
 
 
 class SandboxSkill(Skill):
@@ -42,15 +41,15 @@ class SandboxSkill(Skill):
             tool_name = f"script_{name}"
             script_path = os.path.join(self.tools_dir, fname)
             self._script_map[tool_name] = (script_path, ext)
-            result.append(types.FunctionDeclaration(
-                name=tool_name,
-                description=self._read_script_description(script_path) or f"Скрипт {fname}",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={"args": types.Schema(type=types.Type.STRING, description="Аргументы командной строки")},
-                    required=[],
-                ),
-            ))
+            result.append({"type": "function", "function": {
+                "name": tool_name,
+                "description": self._read_script_description(script_path) or f"Скрипт {fname}",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"args": {"type": "string", "description": "Аргументы командной строки"}},
+                    "required": [],
+                },
+            }})
         return result
 
     @staticmethod
@@ -68,11 +67,12 @@ class SandboxSkill(Skill):
             pass
         return "\n".join(lines)
 
-    async def dispatch_tool_call(self, tool_call) -> dict:
-        if tool_call.name in self._script_map:
-            script_path, ext = self._script_map[tool_call.name]
+    async def dispatch_tool_call(self, tool_call: dict) -> dict:
+        name = tool_call["function"]["name"]
+        if name in self._script_map:
+            script_path, ext = self._script_map[name]
             fname = os.path.basename(script_path)
-            args = (tool_call.args or {}).get("args", "")
+            args = json.loads(tool_call["function"].get("arguments") or "{}").get("args", "")
             cmd = f"{'python' if ext == '.py' else 'bash'} /workspace/tools/{fname}"
             if args:
                 cmd += f" {args}"
@@ -249,7 +249,7 @@ class SandboxSkill(Skill):
         except Exception as e:
             return {"error": str(e)}
 
-    @tool("Посмотреть изображение из workspace — передаёт его напрямую в Gemini Vision.")
+    @tool("Посмотреть изображение из workspace — передаёт его в LLM для анализа.")
     def view_image(
         self,
         path: Annotated[str, "Путь к изображению внутри контейнера (например /workspace/photo.png)."],
@@ -267,4 +267,5 @@ class SandboxSkill(Skill):
         with open(host_path, "rb") as f:
             img_bytes = f.read()
 
-        return {"_parts": [types.Part.from_bytes(data=img_bytes, mime_type=mime)]}
+        b64 = base64.b64encode(img_bytes).decode()
+        return {"_parts": [{"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}

@@ -7,26 +7,24 @@
 Контекст инжектируется автоматически через get_context_prompt.
 Поиск по архиву — через инструмент read_history.
 """
-import asyncio, logging, os, httpx
+import asyncio, json, logging, os, httpx
 
 log = logging.getLogger(__name__)
 from typing import Annotated
 from agent import tool, Agent
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 from src.memory.providers.base import BaseProvider
 
 
 class SummaryProvider(BaseProvider):
-    def __init__(self, model_name: str, api_key: str, consolidate_tokens: int = 1_000):
+    def __init__(self, model_name: str, api_key: str, base_url: str, consolidate_tokens: int = 1_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
         self.memory_file: str = ""
         self.history_file: str = ""
         self.model_name = model_name
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_options = {"httpx_client": http_client, "api_version": "v1alpha"} if http_client else {"api_version": "v1alpha"}
-        self._client = genai.Client(api_key=api_key, http_options=http_options)
+        http_client = httpx.AsyncClient(proxy=proxy_url) if proxy_url else None
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
     async def start(self):
         await super().start()
@@ -67,41 +65,55 @@ class SummaryProvider(BaseProvider):
             "- memory_update: полный обновлённый текст MEMORY.md (вплети новые факты в старые)."
         )
 
-        save_memory_tool = types.FunctionDeclaration(
-            name="save_memory",
-            description="Сохранить результат консолидации.",
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "history_entry": types.Schema(type=types.Type.STRING, description="Краткая выжимка диалога."),
-                    "memory_update": types.Schema(type=types.Type.STRING, description="Обновлённый текст MEMORY.md.")
+        save_memory_tool = {
+            "type": "function",
+            "function": {
+                "name": "save_memory",
+                "description": "Сохранить результат консолидации.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "history_entry": {"type": "string", "description": "Краткая выжимка диалога."},
+                        "memory_update": {"type": "string", "description": "Обновлённый текст MEMORY.md."},
+                    },
+                    "required": ["history_entry", "memory_update"],
                 },
-                required=["history_entry", "memory_update"]
-            )
-        )
+            },
+        }
 
         try:
-            config = types.GenerateContentConfig(
-                system_instruction=system,
-                tools=[types.Tool(function_declarations=[save_memory_tool])],
-            )
-            text_only = [
-                {"role": t["role"], "parts": [p for p in t["parts"] if "text" in p]}
-                for t in pending
+            text_only = []
+            for t in pending:
+                role = t.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                content = t.get("content")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+                else:
+                    text = ""
+                if not text.strip():
+                    continue
+                text_only.append({"role": role, "content": text})
+            messages = [
+                {"role": "system", "content": system},
+                *Agent.strip_contents_private(text_only),
+                {"role": "user", "content": "Вызови save_memory."},
             ]
-            contents = [
-                *text_only,
-                {"role": "user", "parts": [{"text": "Вызови save_memory."}]},
-            ]
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=self.model_name, contents=Agent.strip_contents_private(contents), config=config,
+            response = await self._client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                tools=[save_memory_tool],
+                tool_choice={"type": "function", "function": {"name": "save_memory"}},
             )
-            if not response.function_calls:
+            msg = response.choices[0].message
+            if not msg.tool_calls:
                 log.warning("Консолидация: LLM не вызвала save_memory.")
                 return
 
-            args = response.function_calls[0].args
+            args = json.loads(msg.tool_calls[0].function.arguments)
             if entry := args.get("history_entry"):
                 with open(self.history_file, "a", encoding="utf-8") as f:
                     f.write(entry.strip() + "\n\n")

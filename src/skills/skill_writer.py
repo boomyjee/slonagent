@@ -140,4 +140,4 @@ class MySkill(Skill):
         instance.register(self.agent)
         self.agent.skills.append(instance)
         self._active[name] = instance
-        return {"tools": [t.name for t in instance.get_tools()]}
+        return {"tools": [t["function"]["name"] for t in instance.get_tools()]}

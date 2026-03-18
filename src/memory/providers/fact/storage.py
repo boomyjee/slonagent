@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 
 import lancedb
 import pyarrow as pa
@@ -243,11 +244,27 @@ class Storage:
     def __init__(self, sqlite_path: str, lancedb_path: str, embedding_model=None):
         self._embedder = _make_embedder(embedding_model or DEFAULT_EMBEDDING_MODEL)
         self._lancedb_path = lancedb_path
+        self._sqlite_path = sqlite_path
         self.embed_dim = self._embedder.dimension
         log.info("[storage] embedder loaded: %s, dim=%d", type(self._embedder).__name__, self.embed_dim)
 
-        self.conn = self._open_sqlite(sqlite_path)
+        # Thread-local connections: каждый поток получает своё соединение SQLite,
+        # чтобы избежать конкурентного доступа из asyncio.to_thread.
+        self._local = threading.local()
+        self._init_conn()  # создаём соединение для главного потока
+
         self.table, self.mm_table = self._open_lancedb(lancedb_path)
+
+    def _init_conn(self):
+        """Открывает SQLite-соединение для текущего потока (если ещё нет)."""
+        if not getattr(self._local, "conn", None):
+            self._local.conn = self._open_sqlite(self._sqlite_path)
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """Возвращает thread-local соединение, создавая его при первом обращении."""
+        self._init_conn()
+        return self._local.conn
 
     # ── Embedding ────────────────────────────────────────────────────────────────
 
