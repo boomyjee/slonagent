@@ -28,6 +28,9 @@
     "agent": {
         "model_name": "gemini-3.1-pro-preview",
         "transcription_model_name": "gemini-3-flash-preview",
+        "transcription_api_key": "$keys.llm",
+        "transcription_base_url": "$keys.llm_url",
+        "reasoning_effort": "medium",
         "api_key": "$keys.llm",
         "base_url": "$keys.llm_url",
         "memory_compressor": {

@@ -435,8 +435,9 @@ class TelegramTransport(BaseTransport):
             if field == "voice":
                 try:
                     content = await self.agent.transcribe_audio(await self._download_file(attachment.file_id), "audio/ogg")
-                except Exception:
+                except Exception as e:
                     logging.exception("[transport] Не удалось транскрибировать голосовое %s", attachment.file_id)
+                    await self._send(f"⚠️ Не удалось распознать голосовое сообщение: {e}")
 
             if field in ("video", "video_note"):
                 try:

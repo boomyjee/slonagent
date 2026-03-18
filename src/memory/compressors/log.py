@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 import httpx
 from openai import AsyncOpenAI
 
-from agent import Agent, Skill
+from agent import Skill
 from src.memory.memory import Memory
 
 log = logging.getLogger(__name__)
@@ -494,12 +494,12 @@ class LogCompressor(Skill):
                 )
                 return (response.choices[0].message.content or "").strip()
             except Exception as e:
-                e_str = str(e)
-                if attempt + 1 == max_retries or not any(s in e_str for s in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")):
+                messages = self.agent.apply_error_restriction(self._model_name, e, messages)
+                if attempt + 1 == max_retries:
                     log.error("[LogCompressor] %s LLM failed: %s", label, e, exc_info=True)
                     return ""
                 wait = delay * 2 ** attempt
-                log.warning("[LogCompressor] %s unavailable, retry %d/%d in %ds", label, attempt + 1, max_retries, wait)
+                log.warning("[LogCompressor] %s error, retry %d/%d in %ds: %s", label, attempt + 1, max_retries, wait, e)
                 await asyncio.sleep(wait)
 
     async def _run_observer(self, turns: list, existing_observations: str) -> str:
@@ -507,7 +507,7 @@ class LogCompressor(Skill):
         if existing_observations:
             messages.append({"role": "user", "content": f"## Previous Observations\n\n{existing_observations}\n\nDo not repeat existing observations. Append new ones only."})
             messages.append({"role": "assistant", "content": "Understood. I will only append new observations."})
-        messages.extend(Agent.strip_contents_private(turns))
+        messages.extend(self.agent.strip_contents_private(turns, self._model_name))
         messages.append({"role": "user", "content": "Extract observations from the conversation above."})
 
         response = await self._generate(

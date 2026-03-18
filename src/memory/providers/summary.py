@@ -11,7 +11,7 @@ import asyncio, json, logging, os, httpx
 
 log = logging.getLogger(__name__)
 from typing import Annotated
-from agent import tool, Agent
+from agent import tool
 from openai import AsyncOpenAI
 from src.memory.providers.base import BaseProvider
 
@@ -81,47 +81,57 @@ class SummaryProvider(BaseProvider):
             },
         }
 
-        try:
-            text_only = []
-            for t in pending:
-                role = t.get("role")
-                if role not in ("user", "assistant"):
-                    continue
-                content = t.get("content")
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    text = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-                else:
-                    text = ""
-                if not text.strip():
-                    continue
-                text_only.append({"role": role, "content": text})
-            messages = [
-                {"role": "system", "content": system},
-                *Agent.strip_contents_private(text_only),
-                {"role": "user", "content": "Вызови save_memory."},
-            ]
-            response = await self._client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                tools=[save_memory_tool],
-                tool_choice={"type": "function", "function": {"name": "save_memory"}},
-            )
-            msg = response.choices[0].message
-            if not msg.tool_calls:
-                log.warning("Консолидация: LLM не вызвала save_memory.")
+        text_only = []
+        for t in pending:
+            role = t.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = t.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                text = ""
+            if not text.strip():
+                continue
+            text_only.append({"role": role, "content": text})
+
+        messages = [
+            {"role": "system", "content": system},
+            *self.agent.strip_contents_private(text_only, self.model_name),
+            {"role": "user", "content": "Вызови save_memory."},
+        ]
+        max_retries, delay = 5, 1.0
+        for attempt in range(max_retries):
+            try:
+                response = await self._client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    tools=[save_memory_tool],
+                    tool_choice={"type": "function", "function": {"name": "save_memory"}},
+                )
+                msg = response.choices[0].message
+                if not msg.tool_calls:
+                    log.warning("Консолидация: LLM не вызвала save_memory.")
+                    return
+
+                args = json.loads(msg.tool_calls[0].function.arguments)
+                if entry := args.get("history_entry"):
+                    with open(self.history_file, "a", encoding="utf-8") as f:
+                        f.write(entry.strip() + "\n\n")
+                if update := args.get("memory_update"):
+                    with open(self.memory_file, "w", encoding="utf-8") as f:
+                        f.write(update)
+
+                log.info("Консолидация завершена.")
                 return
-
-            args = json.loads(msg.tool_calls[0].function.arguments)
-            if entry := args.get("history_entry"):
-                with open(self.history_file, "a", encoding="utf-8") as f:
-                    f.write(entry.strip() + "\n\n")
-            if update := args.get("memory_update"):
-                with open(self.memory_file, "w", encoding="utf-8") as f:
-                    f.write(update)
-
-            log.info("Консолидация завершена.")
-        except Exception as e:
-            log.error("Ошибка консолидации: %s", e, exc_info=True)
+            except Exception as e:
+                messages = self.agent.apply_error_restriction(self.model_name, e, messages)
+                if attempt + 1 == max_retries:
+                    log.error("Ошибка консолидации: %s", e, exc_info=True)
+                    return
+                wait = delay * 2 ** attempt
+                log.warning("Консолидация retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, e)
+                await asyncio.sleep(wait)
 

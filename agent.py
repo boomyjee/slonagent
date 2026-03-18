@@ -1,5 +1,7 @@
-import asyncio, base64, json, os, sys, inspect, logging
+import asyncio, base64, io, json, os, sys, inspect, logging
 import httpx
+import numpy as np
+import soundfile as sf
 from datetime import datetime
 from typing import Annotated, get_type_hints, get_args, get_origin
 from openai import AsyncOpenAI
@@ -152,10 +154,11 @@ class AgentSkill(Skill):
 
 
 class Agent:
-    def __init__(self, model_name: str, api_key: str, base_url: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transport=None):
+    def __init__(self, model_name: str, api_key: str, base_url: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None, reasoning_effort: str = None):
         self.model_name = model_name
         self.api_key = api_key
         self.transcription_model_name = transcription_model_name
+        self.reasoning_effort = reasoning_effort
         self.agent_dir = agent_dir
         if isinstance(memory_providers, dict):
             memory_providers = list(memory_providers.values())
@@ -170,21 +173,50 @@ class Agent:
             transport.set_agent(self)
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=httpx.AsyncClient(proxy=proxy_url, timeout=120.0) if proxy_url else None,
+        http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0) if proxy_url else None
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+        self.transcription_client = AsyncOpenAI(
+            api_key=transcription_api_key or api_key,
+            base_url=transcription_base_url or base_url,
+            http_client=http_client,
         )
         self._process_message_lock = asyncio.Lock()
         self._pending_messages: list = []
         self._stop_event = asyncio.Event()
+        self._restrictions_file = os.path.join(memory_dir, ".restrictions.json")
+        self._restrictions: dict = self._load_restrictions()
+
+    def _load_restrictions(self) -> dict:
+        try:
+            with open(self._restrictions_file, encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+
+    def _save_restriction(self, key: str, value):
+        self._restrictions[key] = value
+        try:
+            with open(self._restrictions_file, "w", encoding="utf-8") as f:
+                json.dump(self._restrictions, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.warning("[agent] не удалось сохранить restrictions: %s", e)
+
+    def apply_error_restriction(self, model_name: str, e: Exception, messages: list) -> list:
+        """Выставляет ограничение на основе ошибки и возвращает обновлённые messages."""
+        err = str(e)
+        if "image input" in err and "404" in err:
+            logging.warning("[agent] модель %s не поддерживает картинки, сохраняю ограничение", model_name)
+            self._save_restriction(f"{model_name}.no_images", True)
+            return self.strip_contents_private(messages, model_name)
+        return messages
 
     def stop(self):
         """Прервать текущий ответ. Частичный ответ не сохраняется в историю."""
         self._stop_event.set()
 
-    @staticmethod
-    def strip_contents_private(turns: list) -> list:
+    def strip_contents_private(self, turns: list, model_name: str = None) -> list:
+        model = model_name or self.model_name
+        no_images = self._restrictions.get(f"{model}.no_images", False)
         result = []
         for t in turns:
             if not isinstance(t, dict):
@@ -208,9 +240,11 @@ class Agent:
             elif isinstance(turn.get("content"), list):
                 blocks = [{k: v for k, v in b.items() if not k.startswith("_")} if isinstance(b, dict) else b
                           for b in turn["content"]]
+                if no_images:
+                    blocks = [b for b in blocks if not (isinstance(b, dict) and b.get("type") == "image_url")]
                 if ts and turn.get("role") == "user":
                     blocks = [{"type": "text", "text": f"[{ts}]"}] + blocks
-                turn["content"] = blocks
+                turn["content"] = blocks or None
             result.append(turn)
         return result
 
@@ -223,9 +257,13 @@ class Agent:
                 kwargs: dict = {"model": self.model_name, "messages": messages, "stream": True, "temperature": 1.0}
                 if tools:
                     kwargs["tools"] = tools
+                if self.reasoning_effort:
+                    kwargs["reasoning_effort"] = self.reasoning_effort
 
                 stream = await self.client.chat.completions.create(**kwargs)
                 text = ""
+                thinking_text = ""
+                thinking_id = None
                 stream_id = None
                 accumulated_calls: dict[int, dict] = {}
 
@@ -257,8 +295,19 @@ class Agent:
                             if sig:
                                 entry["thought_signature"] = sig
 
+                    # Мысли могут приходить как reasoning_content (OpenAI o1-стиль)
+                    # или через model_extra (Gemini-специфичный путь)
+                    delta_extra = getattr(delta, "model_extra", None) or {}
+                    thought_chunk = (
+                        delta_extra.get("reasoning_content")
+                        or delta_extra.get("thinking")
+                        or (delta_extra.get("extra_content", {}).get("google", {}).get("thinking"))
+                    )
+                    if thought_chunk:
+                        thinking_text += thought_chunk
+                        thinking_id = await self.transport.send_thinking(thinking_text, thinking_id)
+
                     if delta.content:
-                        logging.info("[stream] text chunk: %r", delta.content[:80])
                         text += delta.content
                         stream_id = await self.transport.send_message(text, stream_id)
 
@@ -283,13 +332,11 @@ class Agent:
 
                 return tool_calls, text
             except Exception as e:
+                messages = self.apply_error_restriction(self.model_name, e, messages)
                 if attempt + 1 == max_retries:
                     raise
-                err = str(e)
-                if not any(c in err for c in ("503", "429", "502", "UNAVAILABLE")):
-                    raise
                 wait = delay * 2 ** attempt
-                logging.warning("[agent] LLM %s unavailable, retry %d/%d in %ds", label, attempt + 1, max_retries, wait)
+                logging.warning("[agent] LLM %s error, retry %d/%d in %ds: %s", label, attempt + 1, max_retries, wait, e)
                 await asyncio.sleep(wait)
 
     async def start(self):
@@ -298,10 +345,15 @@ class Agent:
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
         fmt = mime_type.split("/")[-1]
+        if fmt not in ("wav", "mp3"):
+            audio, sr = sf.read(io.BytesIO(data))
+            wav_buf = io.BytesIO()
+            sf.write(wav_buf, audio, sr, format='WAV', subtype='PCM_16')
+            data, fmt = wav_buf.getvalue(), "wav"
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
-                resp = await self.client.chat.completions.create(
+                resp = await self.transcription_client.chat.completions.create(
                     model=self.transcription_model_name,
                     messages=[{"role": "user", "content": [
                         {"type": "text", "text": "Transcribe the audio. Return only the transcript text."},
@@ -321,7 +373,7 @@ class Agent:
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
-                resp = await self.client.chat.completions.create(
+                resp = await self.transcription_client.chat.completions.create(
                     model=self.transcription_model_name,
                     messages=[{"role": "user", "content": [
                         {"type": "text", "text": "Describe the key events in this video, providing both audio and visual details. Include timestamps for salient moments."},

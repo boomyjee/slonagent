@@ -11,7 +11,6 @@ from datetime import datetime
 import httpx
 from openai import AsyncOpenAI
 
-from agent import Agent
 from src.memory.providers.base import BaseProvider
 from src.memory.memory import Memory
 
@@ -136,7 +135,7 @@ class ToolProvider(BaseProvider):
                 oai_role = "assistant" if role == "assistant" else "user"
                 contents.append({"role": oai_role, "content": "\n".join(text_parts)})
 
-        contents = Agent.strip_contents_private(contents)
+        contents = self.agent.strip_contents_private(contents, self.model_name)
         if tool_names:
             await asyncio.gather(*[self._summarize_tool_use(name, contents) for name in tool_names])
             log.info("[ToolProvider] consolidated %d tools: %s", len(tool_names), list(tool_names))
@@ -160,6 +159,7 @@ class ToolProvider(BaseProvider):
                 log.info("[ToolProvider] summarized %s", tool_name)
                 return
             except Exception as e:
+                contents = self.agent.apply_error_restriction(self.model_name, e, contents)
                 if attempt + 1 == max_retries:
                     log.warning("[ToolProvider] summarize failed for %s after %d attempts: %s", tool_name, max_retries, e, exc_info=True)
                 else:

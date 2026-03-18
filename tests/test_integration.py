@@ -205,3 +205,53 @@ async def test_memory_turn_structure_after_tool_call(tmp_path):
     # tool_call_id в tool-реплике должен совпадать с id в assistant
     tool_turns = [t for t in turns if t["role"] == "tool"]
     assert tool_turns[0].get("tool_call_id"), "tool_call_id не сохранился"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. Транскрипция аудио
+#    Проверяет: transcribe_audio возвращает непустой текст для реального .ogg
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def test_transcribe_audio(tmp_path):
+    """Транскрипция аудио через реальный LLM.
+
+    Для теста используется минимальный синтетический OGG/Opus файл.
+    Если TRANSCRIPTION_MODEL не задан — используется gemini-2.5-flash.
+    Переменные: LLM_KEY (обязателен), TRANSCRIPTION_MODEL (опционально).
+    """
+    import struct, math
+
+    key, url, _ = get_llm_config()
+    model = os.environ.get("TRANSCRIPTION_MODEL", "gemini-2.5-flash")
+
+    # Минимальный синтетический WAV (440 Hz, 1 сек, mono 16bit 8000Hz)
+    # — проще WAV чем OGG, Gemini принимает audio/wav
+    sample_rate = 8000
+    duration = 1
+    freq = 440
+    num_samples = sample_rate * duration
+    samples = [int(32767 * math.sin(2 * math.pi * freq * i / sample_rate)) for i in range(num_samples)]
+    pcm = struct.pack(f"<{num_samples}h", *samples)
+    data_size = len(pcm)
+    header = struct.pack("<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 36 + data_size, b"WAVE",
+        b"fmt ", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16,
+        b"data", data_size)
+    wav_bytes = header + pcm
+
+    transport = CapturingTransport()
+    agent = Agent(
+        model_name="gemini-3-flash-preview",
+        api_key=key,
+        base_url=url,
+        agent_dir=str(tmp_path),
+        memory_compressor=PassthroughCompressor(),
+        transport=transport,
+        transcription_model_name=model,
+    )
+
+    result = await agent.transcribe_audio(wav_bytes, "audio/wav")
+
+    assert result is not None, "transcribe_audio вернул None"
+    assert isinstance(result, str), f"Ожидали str, получили {type(result)}"
+    assert len(result.strip()) > 0, "Транскрипция пустая"
