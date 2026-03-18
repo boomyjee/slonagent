@@ -298,7 +298,7 @@ async def test_fact_provider_retain_and_recall(tmp_path):
     key, url, model = get_llm_config()
     from src.memory.providers.fact import FactProvider
 
-    embedding_cfg = {"provider": "google", "model": "models/gemini-embedding-001", "api_key": key}
+    embedding_cfg = {"provider": "openai", "model": "gemini-embedding-001", "api_key": key, "base_url": url}
     provider = FactProvider(
         model_name=model, api_key=key, base_url=url,
         consolidate_tokens=1,
@@ -341,7 +341,7 @@ async def test_fact_provider_context_prompt(tmp_path):
     key, url, model = get_llm_config()
     from src.memory.providers.fact import FactProvider
 
-    embedding_cfg = {"provider": "google", "model": "models/gemini-embedding-001", "api_key": key}
+    embedding_cfg = {"provider": "openai", "model": "gemini-embedding-001", "api_key": key, "base_url": url}
     provider = FactProvider(
         model_name=model, api_key=key, base_url=url,
         consolidate_tokens=1,

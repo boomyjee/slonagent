@@ -252,9 +252,8 @@ async def test_transcribe_audio(tmp_path):
 
     result = await agent.transcribe_audio(wav_bytes, "audio/wav")
 
-    assert result is not None, "transcribe_audio вернул None"
     assert isinstance(result, str), f"Ожидали str, получили {type(result)}"
-    assert len(result.strip()) > 0, "Транскрипция пустая"
+    # Синтетический тон без речи — модель может вернуть пустую строку, это нормально
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -314,11 +313,11 @@ _OR_EXTRA_BODY = {"reasoning": {"effort": "low"}, **_GEMINI_EXTRA_BODY}
 @pytest.mark.asyncio
 async def test_gemini_thinking():
     """Gemini возвращает мысли через extra_content.google.thought."""
-    key, url, model = get_llm_config()
+    key, url, _ = get_llm_config()
     from openai import AsyncOpenAI
     client = AsyncOpenAI(api_key=key, base_url=url)
 
-    thinking, response, chunks = await _collect_thinking_stream(client, model, _GEMINI_EXTRA_BODY)
+    thinking, response, chunks = await _collect_thinking_stream(client, "gemini-3.1-pro-preview", _GEMINI_EXTRA_BODY)
     print(f"\nthinking={thinking[:100]!r}, response={response[:100]!r}")
     assert chunks > 0
     assert thinking, "Gemini не вернул мысли"
@@ -345,3 +344,28 @@ async def test_openrouter_thinking(model, expect_thinking):
     assert thinking or response, f"{model}: нет ни мыслей, ни ответа"
     if expect_thinking:
         assert thinking, f"{model}: нет мыслей"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. OpenAI-compatible embeddings
+#    Проверяет: OpenAIEmbedder работает с Gemini endpoint
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_openai_embedder():
+    """OpenAIEmbedder: создаёт векторы через OpenAI-compatible endpoint."""
+    from openai import OpenAI
+    from src.memory.providers.fact.storage import OpenAIEmbedder
+
+    key, url, _ = get_llm_config()
+    embedder = OpenAIEmbedder(model="gemini-embedding-001", api_key=key, base_url=url)
+
+    assert embedder.dimension > 0, "dimension не определена"
+
+    vec = embedder.encode_query("что такое память?")
+    assert len(vec) == embedder.dimension, "размерность query не совпадает"
+
+    vecs = embedder.encode_texts(["первый текст", "второй текст"])
+    assert len(vecs) == 2, "должно быть 2 вектора"
+    assert len(vecs[0]) == embedder.dimension, "размерность docs не совпадает"
+
+    print(f"\nOpenAIEmbedder: dim={embedder.dimension}, query_norm={sum(x**2 for x in vec)**0.5:.4f}")

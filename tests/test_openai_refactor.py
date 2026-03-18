@@ -49,6 +49,7 @@ def make_stream_chunk(text: str = None, tool_name: str = None, tool_id: str = No
     delta = MagicMock()
     delta.content = text
     delta.tool_calls = []
+    delta.model_extra = None  # без этого MagicMock вернёт truthy объект и текст попадёт в thinking
     delta.model_fields_set = set()  # предотвращает предупреждения о неизвестных полях
 
     if tool_name is not None:
@@ -83,34 +84,50 @@ from agent import Agent
 
 class TestStripContentsPrivate:
 
+    def _make_agent(self):
+        import tempfile
+        agent = Agent(
+            model_name="test-model",
+            api_key="test-key",
+            base_url="http://test",
+            agent_dir=tempfile.mkdtemp(),
+            memory_compressor=PassthroughCompressor(),
+        )
+        return agent
+
     def test_strips_turn_level_private(self):
         # без _timestamp — content не меняется
+        agent = self._make_agent()
         turns = [{"role": "user", "content": "hi", "_secret": "x"}]
-        result = Agent.strip_contents_private(turns)
+        result = agent.strip_contents_private(turns)
         assert "_secret" not in result[0]
         assert result[0]["content"] == "hi"
 
     def test_strips_content_block_private(self):
+        agent = self._make_agent()
         turns = [{"role": "user", "content": [{"type": "text", "text": "doc", "_document_id": "x"}]}]
-        result = Agent.strip_contents_private(turns)
+        result = agent.strip_contents_private(turns)
         block = result[0]["content"][0]
         assert "_document_id" not in block
         assert block["text"] == "doc"
 
     def test_injects_timestamp_into_list_content(self):
+        agent = self._make_agent()
         turns = [{"role": "user", "content": [{"type": "text", "text": "hi"}], "_timestamp": "2024-06-01T12:00:00"}]
-        result = Agent.strip_contents_private(turns)
+        result = agent.strip_contents_private(turns)
         assert result[0]["content"][0]["type"] == "text"
         assert "2024-06-01" in result[0]["content"][0]["text"]
 
     def test_no_timestamp_no_inject(self):
+        agent = self._make_agent()
         turns = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
-        result = Agent.strip_contents_private(turns)
+        result = agent.strip_contents_private(turns)
         assert result[0]["content"] == [{"type": "text", "text": "hello"}]
 
     def test_assistant_turn_passthrough(self):
+        agent = self._make_agent()
         turns = [{"role": "assistant", "content": "ok", "_timestamp": "x"}]
-        result = Agent.strip_contents_private(turns)
+        result = agent.strip_contents_private(turns)
         assert result[0]["content"] == "ok"
         assert "_timestamp" not in result[0]
 
@@ -237,6 +254,7 @@ class TestAgentLoop:
         """Создаёт полный async-мок transport."""
         t = MagicMock()
         t.send_message = AsyncMock(return_value=None)
+        t.send_thinking = AsyncMock(return_value=None)
         t.send_system_prompt = AsyncMock(return_value=None)
         t.on_tool_call = AsyncMock(return_value=None)
         t.on_tool_result = AsyncMock(return_value=None)
@@ -269,7 +287,7 @@ class TestAgentLoop:
         agent.transport = transport
 
         await agent.start()
-        await agent.process_message(content_parts=[{"text": "hi"}])
+        await agent.process_message(content_parts=[{"type": "text", "text": "hi"}])
 
         # Агент должен был ответить
         assert responses, "Агент не отправил ответ"
@@ -349,7 +367,7 @@ class TestAgentLoop:
         agent.transport = transport
 
         await agent.start()
-        await agent.process_message(content_parts=[{"text": "ping"}])
+        await agent.process_message(content_parts=[{"type": "text", "text": "ping"}])
 
         assert "testskill_ping" in tool_was_called, "Инструмент не был вызван"
 

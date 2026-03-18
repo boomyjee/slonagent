@@ -106,7 +106,6 @@ agentSel.addEventListener('change', () => {
   document.querySelectorAll('[data-agent-id]').forEach(el => {
     el.style.display = visible(el.dataset.agentId) ? '' : 'none';
   });
-  btn.disabled = agentSel.value === '__all__';
 });
 
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
@@ -174,7 +173,8 @@ let ws;
 function sendMsg() {
   const text = ta.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({type: 'user_message', text, agent_id: agentSel.value}));
+  const agentId = agentSel.value === '__all__' ? 'main' : agentSel.value;
+  ws.send(JSON.stringify({type: 'user_message', text, agent_id: agentId}));
   ta.value = ''; ta.style.height = '38px';
   btn.disabled = true;
 }
@@ -182,7 +182,7 @@ function sendMsg() {
 function sendRecall() {
   const text = rta.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  const agentId = agentSel.value === '__all__' ? 'main' : agentSel.value;
+  const agentId = agentSel.value === '__all__' ? ([...knownAgents][0] || 'main') : agentSel.value;
   const p = document.getElementById('recall-msgs');
   const d = document.createElement('div');
   d.className = 'msg'; d.dataset.agentId = agentId;

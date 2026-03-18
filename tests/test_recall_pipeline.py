@@ -34,7 +34,7 @@ for k, v in list(os.environ.items()):
         os.environ[k] = os.environ.get(v[1:], v)
 
 fact_cfg = next(
-    p for p in cfg["agent"]["memory_providers"]
+    p for p in cfg["agent"]["memory_providers"].values()
     if "FactProvider" in p["__class__"]
 )
 embedding_model_cfg = fact_cfg.get("embedding_model", {})

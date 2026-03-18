@@ -116,7 +116,7 @@ async def run_telegram():
             with open(config_path, encoding="utf-8") as f:
                 agent_cfg = json.load(f)["agent"]
 
-        transport = WrappedTG(**config["telegram"]["transport"], bot=bot, chat_id=chat_id, thread_id=thread_id, agent_id=agent_id)
+        transport = WrappedTG(**config["telegram"]["transport"], bot=bot, chat_id=chat_id, thread_id=thread_id, agent_id="main" if is_main_agent else agent_id)
         agent = Agent(**resolve(agent_cfg), agent_dir=agent_dir, transport=transport)
         if copy_memory_from:
             agent.memory.copy_from(copy_memory_from.memory)

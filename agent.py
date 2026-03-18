@@ -363,7 +363,7 @@ class Agent:
                         {"type": "input_audio", "input_audio": {"data": base64.b64encode(data).decode(), "format": fmt}},
                     ]}],
                 )
-                return resp.choices[0].message.content
+                return resp.choices[0].message.content or ""
             except Exception as e:
                 if attempt + 1 == max_retries: raise
                 wait = delay * 2 ** attempt
@@ -450,7 +450,7 @@ class Agent:
 
         system_instruction = "\n\n".join(system_parts)
         try:
-            logging.info("[agent] → LLM %s", self.model_name)
+            logging.info("[agent] → LLM %s (tools=%d)", self.model_name, len(tools))
             tool_calls, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), tools, system_instruction)
             logging.info("[agent] ← LLM")
 

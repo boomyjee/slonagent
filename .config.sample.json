@@ -2,7 +2,8 @@
     "env": {
         "HTTP_PROXY": "http://user:pass@host:port",
         "HTTPS_PROXY": "http://user:pass@host:port",
-        "HF_HUB_OFFLINE": "0"
+        "HF_HUB_OFFLINE": "0",
+        "TRANSFORMERS_VERBOSITY": "error"
     },
     "keys": {
         "gemini": "YOUR_GEMINI_API_KEY",
@@ -51,9 +52,10 @@
                 "auto_recall": false,
                 "auto_consolidate": true,
                 "embedding_model": {
-                    "provider": "google",
-                    "model": "models/gemini-embedding-001",
-                    "api_key": "$keys.gemini"
+                    "provider": "openai",
+                    "model": "gemini-embedding-001",
+                    "api_key": "$keys.gemini",
+                    "base_url": "$keys.llm_url"
                 }
             },
             "personality": {

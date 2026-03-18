@@ -165,30 +165,21 @@ class LocalEmbedder:
         return self._model.encode(texts, normalize_embeddings=True).tolist()
 
 
-class GoogleEmbedder:
-    """Google Gemini embedder (text-embedding-004) с task_type для асимметричного retrieval."""
+class OpenAIEmbedder:
+    """Embedder через OpenAI-compatible /embeddings endpoint (OpenAI, OpenRouter, Gemini и др.)."""
 
-    def __init__(self, model: str, api_key: str):
+    def __init__(self, model: str, api_key: str, base_url: str):
         import httpx
-        from google import genai
+        from openai import OpenAI
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        http_options = {"api_version": "v1alpha"}
-        if http_client:
-            http_options["httpx_client"] = http_client
-        self._client = genai.Client(api_key=api_key, http_options=http_options)
+        self._client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
         self._model = model
-        # Определяем размерность через тестовый запрос
-        result = self._client.models.embed_content(model=model, contents="test")
-        self.dimension = len(result.embeddings[0].values)
+        result = self._client.embeddings.create(model=model, input=["test"])
+        self.dimension = len(result.data[0].embedding)
 
     def encode_query(self, text: str) -> list:
-        result = self._client.models.embed_content(
-            model=self._model,
-            contents=text,
-            config={"task_type": "RETRIEVAL_QUERY"},
-        )
-        return list(result.embeddings[0].values)
+        return self._client.embeddings.create(model=self._model, input=[text]).data[0].embedding
 
     def encode_texts(self, texts) -> list:
         if isinstance(texts, str):
@@ -196,25 +187,24 @@ class GoogleEmbedder:
         batch_size = 100
         all_embeddings = []
         for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            result = self._client.models.embed_content(
-                model=self._model,
-                contents=batch,
-                config={"task_type": "RETRIEVAL_DOCUMENT"},
-            )
-            all_embeddings.extend(list(e.values) for e in result.embeddings)
+            result = self._client.embeddings.create(model=self._model, input=texts[i:i + batch_size])
+            all_embeddings.extend(item.embedding for item in result.data)
         return all_embeddings
 
 
-def _make_embedder(embedding_model) -> "LocalEmbedder | GoogleEmbedder":
-    """Создаёт embedder по конфигу: строка → LocalEmbedder, dict → по provider."""
+def _make_embedder(embedding_model) -> "LocalEmbedder | OpenAIEmbedder":
+    """Создаёт embedder по конфигу: строка → LocalEmbedder, dict → по provider.
+
+    provider "openai": любой OpenAI-совместимый /embeddings endpoint (OpenAI, OpenRouter, Gemini и др.)
+    """
     if isinstance(embedding_model, str):
         return LocalEmbedder(embedding_model or DEFAULT_EMBEDDING_MODEL)
     provider = embedding_model.get("provider", "local")
-    if provider == "google":
-        return GoogleEmbedder(
-            model=embedding_model.get("model", "models/text-embedding-004"),
+    if provider == "openai":
+        return OpenAIEmbedder(
+            model=embedding_model["model"],
             api_key=embedding_model["api_key"],
+            base_url=embedding_model["base_url"],
         )
     return LocalEmbedder(embedding_model.get("model", DEFAULT_EMBEDDING_MODEL))
 

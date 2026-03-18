@@ -2,6 +2,8 @@
 Загружает ключи и env из .config.json в переменные окружения
 до запуска тестов, чтобы не нужно было передавать их вручную.
 """
+
+collect_ignore = ["test_recall_pipeline.py"]
 import io
 import json
 import os

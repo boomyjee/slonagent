@@ -318,7 +318,7 @@ class TelegramTransport(BaseTransport):
         self._tool_msg = None
         self._tool_call_text = ""
         await self.agent.process_message(
-            content_parts=[{"text": text}],
+            content_parts=[{"type": "text", "text": text}],
             user_message_id=sent.message_id,
         )
 
