@@ -4,6 +4,7 @@ import base64, io, os, re, asyncio, logging, json, mimetypes
 log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser
 from agent import Skill, tool
 from src.transport.base import BaseTransport
@@ -201,8 +202,18 @@ class TelegramTransport(BaseTransport):
         self._flush_task: asyncio.Task | None = None
         self._pending_answer = {}
 
+    async def _tg_call(self, coro):
+        """Выполняет Telegram API вызов с автоматическим retry при flood control."""
+        for attempt in range(3):
+            try:
+                return await coro
+            except TelegramRetryAfter as e:
+                log.warning("Flood control, waiting %s sec (attempt %d)", e.retry_after, attempt + 1)
+                await asyncio.sleep(e.retry_after)
+        return await coro
+
     async def _send(self, text: str, **kwargs) -> Message:
-        return await self.bot.send_message(self.chat_id, text, message_thread_id=self.thread_id, link_preview_options=self._no_link_preview, **kwargs)
+        return await self._tg_call(self.bot.send_message(self.chat_id, text, message_thread_id=self.thread_id, link_preview_options=self._no_link_preview, **kwargs))
 
     def set_agent(self, agent):
         self.agent = agent
@@ -226,11 +237,11 @@ class TelegramTransport(BaseTransport):
             result_text = html.escape(result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2))
         result_text = result_text[:2000]
         try:
-            await self._tool_msg.edit_text(
+            await self._tg_call(self._tool_msg.edit_text(
                 f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
                 parse_mode="HTML",
                 link_preview_options=self._no_link_preview,
-            )
+            ))
         except Exception:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
@@ -247,13 +258,16 @@ class TelegramTransport(BaseTransport):
         if pending:
             return messages
 
-        THROTLE_DELAY = 1.0
+        THROTLE_DELAY = 2.5
         async def _do():
             await asyncio.sleep(THROTLE_DELAY)
             recent_text, recent_collapsed = self._pending_answer[key]
             self._pending_answer[key] = None
-            await self._do_answer(recent_text, messages, expandable, recent_collapsed, prefix, max_chunks)
-        
+            try:
+                await self._do_answer(recent_text, messages, expandable, recent_collapsed, prefix, max_chunks)
+            except Exception as e:
+                log.error("_answer task failed: %s", e)
+
         asyncio.create_task(_do())
         return messages
     
@@ -283,7 +297,7 @@ class TelegramTransport(BaseTransport):
         for m, body in enumerate(bodies):
             if m < len(messages):
                 try:
-                    messages[m] = await messages[m].edit_text(body, parse_mode="HTML", link_preview_options=self._no_link_preview)
+                    messages[m] = await self._tg_call(messages[m].edit_text(body, parse_mode="HTML", link_preview_options=self._no_link_preview))
                 except Exception as e:
                     if "message is not modified" not in str(e):
                         raise
