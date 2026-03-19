@@ -1008,7 +1008,7 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
             )
-            raw = response.choices[0].message.content or ""
+            raw = (response.choices[0].message and response.choices[0].message.content) or ""
             if not raw:
                 raise ValueError("empty response from LLM")
             data = json.loads(raw.strip())
@@ -1036,7 +1036,7 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
                 log.warning("[consolidate] LLM call failed after %d attempts: %s", max_retries, e, exc_info=True)
             else:
                 wait = delay * 2 ** attempt
-                log.warning("[consolidate] LLM call attempt %d/%d in %.0fs: %s", attempt + 1, max_retries, wait, e, exc_info=True)
+                log.warning("[consolidate] LLM call attempt %d/%d in %.0fs: %s", attempt + 1, max_retries, wait, e)
                 await asyncio.sleep(wait)
     return _BatchResponse()
 
