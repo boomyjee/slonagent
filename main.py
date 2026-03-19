@@ -91,10 +91,12 @@ async def run_telegram():
     bot = Bot(token=config["telegram"]["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
     dp = Dispatcher()
 
+    allowed_user_ids = config["telegram"]["allowed_user_ids"]
     agents: dict[str, Agent] = {}
 
-    async def make_agent(chat_id: int, thread_id: int, force_create: bool, is_main_agent: bool = False, copy_memory_from=None):
-        agent_id = f"{chat_id}_{thread_id}"
+    async def make_agent(chat_id: int, thread_id: int, force_create: bool, copy_memory_from=None):
+        is_main_agent = (chat_id == allowed_user_ids[0] and thread_id is None)
+        agent_id = "main" if is_main_agent else f"{chat_id}_{thread_id}"
         if agent_id in agents: return agents[agent_id]
 
         agent_dir = os.getcwd() if is_main_agent else os.path.join(os.getcwd(), "forks", agent_id)
@@ -116,7 +118,7 @@ async def run_telegram():
             with open(config_path, encoding="utf-8") as f:
                 agent_cfg = json.load(f)["agent"]
 
-        transport = WrappedTG(**config["telegram"]["transport"], bot=bot, chat_id=chat_id, thread_id=thread_id, agent_id="main" if is_main_agent else agent_id)
+        transport = WrappedTG(**config["telegram"]["transport"], bot=bot, chat_id=chat_id, thread_id=thread_id, agent_id=agent_id)
         agent = Agent(**resolve(agent_cfg), agent_dir=agent_dir, transport=transport)
         if copy_memory_from:
             agent.memory.copy_from(copy_memory_from.memory)
@@ -124,8 +126,7 @@ async def run_telegram():
         agents[agent_id] = agent
         return agent
 
-    allowed_user_ids = config["telegram"]["allowed_user_ids"]
-    main_agent = await make_agent(allowed_user_ids[0], None, force_create=True, is_main_agent=True)
+    main_agent = await make_agent(allowed_user_ids[0], None, force_create=True)
 
     commands = [
         BotCommand(command=cmd, description=desc)

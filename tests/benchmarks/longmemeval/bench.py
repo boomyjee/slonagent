@@ -18,7 +18,6 @@ ROOT = Path(__file__).parents[3]
 sys.path.insert(0, str(ROOT))
 
 from src.memory.compressors.log import LogCompressor
-from google.genai import types
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,8 +64,8 @@ async def prepare(compressor, sample):
             if not msg.get("content"):
                 continue
             turns.append({
-                "role": "user" if msg["role"] == "user" else "model",
-                "parts": [{"text": msg["content"]}],
+                "role": "user" if msg["role"] == "user" else "assistant",
+                "content": [{"type": "text", "text": msg["content"]}],
                 "_timestamp": date,
             })
         turns = await retry(lambda t=turns: compressor.compress(t))
@@ -75,31 +74,29 @@ async def prepare(compressor, sample):
 
 async def ask(client, model, turns, question, question_date):
     """Задаём вопрос, используя сжатую память как контекст."""
-    contents = []
+    messages = [{"role": "system", "content": "You are a helpful assistant with memory of past conversations."}]
 
-    # Наблюдения из компрессора (OM_turn) + недавние реплики
     for t in turns:
-        if isinstance(t, dict) and t.get("role") in ("user", "model"):
-            contents.append({"role": t["role"], "parts": t["parts"]})
+        if not isinstance(t, dict) or t.get("role") not in ("user", "assistant"):
+            continue
+        content = t.get("content")
+        if isinstance(content, list):
+            text = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        else:
+            text = str(content or "")
+        if text.strip():
+            messages.append({"role": t["role"], "content": text})
 
-    # Сам вопрос
-    contents.append({
-        "role": "user",
-        "parts": [{"text": f"Current Date: {question_date}\nQuestion: {question}"}],
-    })
+    messages.append({"role": "user", "content": f"Current Date: {question_date}\nQuestion: {question}"})
 
     async def call():
-        resp = await asyncio.to_thread(
-            client.models.generate_content,
+        resp = await client.chat.completions.create(
             model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction="You are a helpful assistant with memory of past conversations.",
-                temperature=0,
-                max_output_tokens=256,
-            ),
+            messages=messages,
+            temperature=0,
+            max_tokens=256,
         )
-        return resp.text.strip()
+        return resp.choices[0].message.content.strip()
 
     return await retry(call)
 
@@ -115,10 +112,10 @@ async def main():
     print()
 
     import httpx
-    from google import genai
+    from openai import AsyncOpenAI
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-    http_opts = {"httpx_client": httpx.Client(proxy=proxy), "api_version": "v1alpha"} if proxy else {"api_version": "v1alpha"}
-    client = genai.Client(api_key=api_key, http_options=http_opts)
+    http_client = httpx.AsyncClient(proxy=proxy, timeout=120.0) if proxy else httpx.AsyncClient(timeout=120.0)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
     compressor = LogCompressor(model_name=COMPRESSOR_MODEL, api_key=api_key, base_url=base_url)
 

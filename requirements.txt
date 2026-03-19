@@ -1,6 +1,5 @@
 aiogram>=3.4.0
 openai>=1.0.0
-google-genai>=0.3.0
 aiohttp-socks>=0.8.4
 psutil>=5.9.0
 fastapi

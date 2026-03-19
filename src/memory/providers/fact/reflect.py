@@ -1,7 +1,7 @@
 """reflect.py — агентный цикл для fact_reflect.
 
 Аналог Hindsight run_reflect_agent, адаптированный для:
-  - Gemini tool calling (google-genai SDK)
+  - Tool calling (OpenAI-compatible API)
   - Локальных компонентов (SQLite + LanceDB вместо PostgreSQL)
   - Без bank_profile / disposition / directives
 
