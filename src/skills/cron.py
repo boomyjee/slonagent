@@ -2,15 +2,33 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated
 
 from agent import Skill, bypass, tool
 
+
 log = logging.getLogger(__name__)
 
-REPEAT_UNITS = Literal["once", "hourly", "daily", "weekly"]
+_INTERVAL_RE = re.compile(r"^(\d+)\s*(s|m|h|d|w)$", re.IGNORECASE)
+_INTERVAL_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+_LEGACY_INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
+
+
+def _parse_interval(repeat: str) -> timedelta | None:
+    """Парсит интервал повторения. Примеры: '30m', '2h', '1d', '7d', '90s'."""
+    if repeat in ("once", ""):
+        return None
+    if repeat in _LEGACY_INTERVALS:
+        return _LEGACY_INTERVALS[repeat]
+    m = _INTERVAL_RE.match(repeat.strip())
+    if not m:
+        raise ValueError(f"Неверный формат интервала: {repeat!r}. Используй: 30m, 2h, 1d, 7d и т.п.")
+    return timedelta(seconds=int(m.group(1)) * _INTERVAL_SECONDS[m.group(2).lower()])
 
 
 class CronSkill(Skill):
@@ -40,26 +58,27 @@ class CronSkill(Skill):
             log.warning("[cron] failed to save tasks: %s", e, exc_info=True)
 
     def _next_run(self, scheduled_at: str, repeat: str) -> str | None:
-        dt = datetime.fromisoformat(scheduled_at)
-        if repeat == "hourly":
-            return (dt + timedelta(hours=1)).isoformat()
-        if repeat == "daily":
-            return (dt + timedelta(days=1)).isoformat()
-        if repeat == "weekly":
-            return (dt + timedelta(weeks=1)).isoformat()
-        return None
+        delta = _parse_interval(repeat)
+        if delta is None:
+            return None
+        return (datetime.fromisoformat(scheduled_at) + delta).isoformat()
 
     @tool("Запланировать задачу: агент проснётся в указанное время и выполнит заданное действие.")
     async def schedule_task(
         self,
         message: Annotated[str, "Что агент должен сделать или сообщить пользователю в указанное время."],
         scheduled_at: Annotated[str, "Время запуска в формате ISO 8601, например '2026-03-11T10:00:00'. Часовой пояс пользователя."],
-        repeat: Annotated[REPEAT_UNITS, "Повторение: once — однократно, hourly — каждый час, daily — каждый день, weekly — каждую неделю."] = "once",
+        repeat: Annotated[str, "Интервал повторения: 'once' — однократно, или произвольный интервал: '30m', '2h', '1d', '7d', '90s' и т.п. По умолчанию once."] = "once",
     ) -> dict:
         try:
             dt = datetime.fromisoformat(scheduled_at).astimezone()
         except ValueError:
             return {"error": f"Неверный формат даты: {scheduled_at!r}. Используй ISO 8601."}
+
+        try:
+            _parse_interval(repeat)
+        except ValueError as e:
+            return {"error": str(e)}
 
         task = {
             "id": str(uuid.uuid4())[:8],

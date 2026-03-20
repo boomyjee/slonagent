@@ -23,7 +23,7 @@ class SummaryProvider(BaseProvider):
         self.history_file: str = ""
         self.model_name = model_name
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.AsyncClient(proxy=proxy_url) if proxy_url else None
+        http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
     async def start(self):
