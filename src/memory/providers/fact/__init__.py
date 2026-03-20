@@ -163,7 +163,7 @@ class FactProvider(BaseProvider):
         retain(items, self._llm, self._model_name, self.storage,
                with_observations=self._auto_consolidate)
 
-    async def _recall_text(self, query: str, query_label: str, max_tokens: int | None = None, budget: str = "mid") -> str:
+    async def _recall_text(self, query: str, query_label: str, max_tokens: int | None = None, budget: str = "mid", include_chunks: bool = False) -> str:
         """Три параллельных recall (observations / documents / conversations) + форматирование."""
         total_tokens = max_tokens or self._recall_max_tokens
         q_vec = await asyncio.to_thread(self.storage.encode_query, query)
@@ -175,6 +175,7 @@ class FactProvider(BaseProvider):
                 max_tokens=total_tokens // 3,
                 budget=budget,
                 rerank_model=self._rerank_model,
+                include_chunks=include_chunks,
             ),
             recall_async(
                 query, q_vec, self.storage,
@@ -183,6 +184,7 @@ class FactProvider(BaseProvider):
                 max_tokens=total_tokens // 3,
                 budget=budget,
                 rerank_model=self._rerank_model,
+                include_chunks=include_chunks,
             ),
             recall_async(
                 query, q_vec, self.storage,
@@ -191,14 +193,27 @@ class FactProvider(BaseProvider):
                 max_tokens=total_tokens // 3,
                 budget=budget,
                 rerank_model=self._rerank_model,
+                include_chunks=include_chunks,
             ),
         )
 
-        obs_lines = [f"- {r.fact}" for r in obs_resp.results]
+        seen_chunk_ids: set[str] = set()
+
+        def _format_result(r) -> str:
+            line = f"- {r.fact}"
+            if r.chunk_text and r.chunk_id:
+                if r.chunk_id not in seen_chunk_ids:
+                    seen_chunk_ids.add(r.chunk_id)
+                    line += f"\n  [chunk: {r.chunk_text}]"
+                else:
+                    line += "\n  [исходный чанк уже показан выше]"
+            return line
+
+        obs_lines = [_format_result(r) for r in obs_resp.results]
         doc_by_id: dict[str, list[str]] = {}
         for r in doc_resp.results:
-            doc_by_id.setdefault(r.document_id, []).append(f"  - {r.fact}")
-        conv_lines = [f"- {r.fact}" for r in conv_resp.results]
+            doc_by_id.setdefault(r.document_id, []).append(f"  {_format_result(r)}")
+        conv_lines = [_format_result(r) for r in conv_resp.results]
 
         parts = []
         if conv_lines:
@@ -253,6 +268,8 @@ class FactProvider(BaseProvider):
         "Используй для конкретных фактов: кто, что, когда, где. "
         "Запрос — утверждение или развёрнутый вопрос, не ключевые слова: "
         "вместо 'Анна работа' пиши 'где работает Анна и кем'. "
+        "Возвращает три независимых результата: факты из разговоров, синтезированные наблюдения "
+        "и факты из загруженных документов (с document_id — используй его в get_document чтобы прочитать исходный текст). "
         "Для сложных вопросов (анализ, сравнение, выводы из нескольких фактов) используй fact_reflect."
     )
     async def recall(
@@ -268,24 +285,39 @@ class FactProvider(BaseProvider):
             log.warning("[FactProvider] recall tool failed: %s", e, exc_info=True)
             return {"error": str(e)}
 
-    @tool("Получить полный текст документа из памяти по его document_id.")
+    @tool("Получить текст документа из памяти по его document_id. Поддерживает пагинацию по чанкам.")
     async def get_document(
         self,
-        document_id: Annotated[str, "ID документа (из результатов factprovider_recall)"],
+        document_id: Annotated[str, "ID документа (из результатов fact_recall)"],
+        offset: Annotated[int, "С какого чанка начинать (0-based). По умолчанию 0."] = 0,
+        limit: Annotated[int, "Сколько чанков вернуть. По умолчанию 5. Передай -1 чтобы получить документ целиком — только если уверен что он нужен полностью."] = 5,
     ) -> dict:
         try:
-            rows = await asyncio.to_thread(
+            total_row = await asyncio.to_thread(
                 self.storage.conn.execute,
-                "SELECT chunk_index, chunk_text FROM chunks WHERE document_id = ? ORDER BY chunk_index",
+                "SELECT COUNT(*) AS cnt FROM chunks WHERE document_id = ?",
                 (document_id,),
             )
-            chunks = rows.fetchall()
-            if not chunks:
+            total = total_row.fetchone()
+            if not total or total["cnt"] == 0:
                 return {"error": f"Документ {document_id!r} не найден в памяти."}
+            total_chunks = total["cnt"]
+
+            rows = await asyncio.to_thread(
+                self.storage.conn.execute,
+                "SELECT chunk_index, chunk_text FROM chunks WHERE document_id = ? ORDER BY chunk_index LIMIT ? OFFSET ?",
+                (document_id, limit, offset),
+            )
+            chunks = rows.fetchall()
+
+            has_more = (offset + len(chunks)) < total_chunks
             return {
                 "document_id": document_id,
-                "original_text": "\n".join(c["chunk_text"] for c in chunks),
-                "chunk_count": len(chunks),
+                "text": "\n".join(c["chunk_text"] for c in chunks),
+                "chunks_returned": len(chunks),
+                "offset": offset,
+                "total_chunks": total_chunks,
+                **({"has_more": True, "next_offset": offset + len(chunks)} if has_more else {"has_more": False}),
             }
         except Exception as e:
             log.warning("[FactProvider] get_document failed: %s", e, exc_info=True)

@@ -58,6 +58,8 @@ class RecallResult:
     occurred_end: Optional[str] = None
     mentioned_at: Optional[str] = None
     document_id: Optional[str] = None
+    chunk_id: Optional[str] = None
+    chunk_text: Optional[str] = None
     context: Optional[str] = None
     tags: list[str] = field(default_factory=list)
     score: float = 0.0
@@ -102,6 +104,7 @@ def _row_to_result(row: sqlite3.Row, score: float = 0.0, source: str = "") -> Re
         occurred_end=row["occurred_end"] or None,
         mentioned_at=row["mentioned_at"] or None,
         document_id=row["document_id"] or None,
+        chunk_id=(row["chunk_id"] or None) if "chunk_id" in keys else None,
         context=context,
         tags=tags,
         score=score,
@@ -714,6 +717,7 @@ def recall(
     tags_match: Literal["any", "all", "any_strict", "all_strict"] = "any",
     rerank_model: str = "",
     is_real_document: Optional[bool] = None,
+    include_chunks: bool = False,
 ) -> RecallResponse:
     """
     4-way поиск + RRF + cross-encoder reranking.
@@ -816,6 +820,20 @@ def recall(
     # 6. Token budget
     results = _apply_token_budget(results, max_tokens)
 
+    # 7. Attach chunk texts (один запрос на все уникальные chunk_id)
+    if include_chunks:
+        chunk_ids = list({r.chunk_id for r in results if r.chunk_id})
+        if chunk_ids:
+            placeholders = ",".join("?" * len(chunk_ids))
+            rows = storage.conn.execute(
+                f"SELECT chunk_id, chunk_text FROM chunks WHERE chunk_id IN ({placeholders})",
+                chunk_ids,
+            ).fetchall()
+            chunk_map = {r["chunk_id"]: r["chunk_text"] for r in rows}
+            for r in results:
+                if r.chunk_id:
+                    r.chunk_text = chunk_map.get(r.chunk_id)
+
     pending = storage.get_pending_consolidation_count()
     log.info(
         "[recall] %r → %d results (sem=%d bm25=%d graph=%d temporal=%d budget=%s pending=%d)",
@@ -837,9 +855,10 @@ async def recall_async(
     tags_match: Literal["any", "all", "any_strict", "all_strict"] = "any",
     rerank_model: str = "",
     is_real_document: Optional[bool] = None,
+    include_chunks: bool = False,
 ) -> RecallResponse:
     return await asyncio.to_thread(
         recall, query, query_vec, storage,
         types, max_tokens, budget, query_timestamp, tags, tags_match, rerank_model,
-        is_real_document,
+        is_real_document, include_chunks,
     )
