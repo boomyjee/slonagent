@@ -78,6 +78,7 @@ class Dashboard:
             if transport:
                 self.add_chat("user", text, agent_id=agent_id)
                 await transport.inject_message(text)
+                await transport.process_message(content_parts=[{"type": "text", "text": text}])
 
     def _emit(self, event: dict) -> None:
         event["ts"] = datetime.now().strftime("%H:%M:%S")

@@ -79,7 +79,7 @@ async def run_cli():
     while True:
         text = await asyncio.get_event_loop().run_in_executor(None, input, "Вы: ")
         if text.strip():
-            await agent.process_message(content_parts=[{"type": "text", "text": text}])
+            await transport.process_message(content_parts=[{"type": "text", "text": text}])
             print()
 
 async def run_telegram():

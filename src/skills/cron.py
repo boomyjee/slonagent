@@ -154,8 +154,11 @@ class CronSkill(Skill):
 
             if due <= now:
                 log.info("[cron] firing task %s: %r", task["id"], task["message"])
-                await self.agent.transport.inject_message(
-                    f"⏰ Cron task [{task['id']}]: {task['message']}"
+                text = f"⏰ Cron task [{task['id']}]: {task['message']}"
+                await self.agent.transport.inject_message(text)
+                await self.agent.transport.process_message(
+                    content_parts=[{"type": "text", "text": text}],
+                    user_message_id=f"{task['id']}_{int(now.timestamp())}",
                 )
                 next_run = self._next_run(task["scheduled_at"], task.get("repeat", "once"))
                 if next_run:

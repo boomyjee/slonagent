@@ -202,6 +202,11 @@ class TelegramTransport(BaseTransport):
         self._flush_task: asyncio.Task | None = None
         self._pending_answer = {}
 
+    def set_agent(self, agent):
+        self.agent = agent
+        self._skill.register(agent)
+        agent.skills.insert(0, self._skill)
+
     async def _tg_call(self, coro):
         """Выполняет Telegram API вызов с автоматическим retry при flood control."""
         for attempt in range(3):
@@ -214,38 +219,7 @@ class TelegramTransport(BaseTransport):
 
     async def _send(self, text: str, **kwargs) -> Message:
         return await self._tg_call(self.bot.send_message(self.chat_id, text, message_thread_id=self.thread_id, link_preview_options=self._no_link_preview, **kwargs))
-
-    def set_agent(self, agent):
-        self.agent = agent
-        self._skill.register(agent)
-        agent.skills.insert(0, self._skill)
-        
-    async def on_user_message(self, text: str):
-        pass
-
-    async def on_tool_call(self, name: str, args: dict):
-        lines = "\n".join(f"  {html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
-        call_text = f"<b>[{html.escape(name)}]</b>\n{lines}" if lines else f"<b>[{html.escape(name)}]</b>"
-        self._tool_call_text = call_text[:2000]
-        self._tool_msg = await self._send(f"<blockquote expandable>{self._tool_call_text}</blockquote>", parse_mode="HTML")
-
-    async def on_tool_result(self, name: str, result):
-        if isinstance(result, dict):
-            parts = [f"<b>[{html.escape(k)}]</b>\n{html.escape(str(v))}" for k, v in result.items() if v not in (None, "", [], {})]
-            result_text = "\n".join(parts) if parts else "(пусто)"
-        else:
-            result_text = html.escape(result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2))
-        result_text = result_text[:2000]
-        try:
-            await self._tg_call(self._tool_msg.edit_text(
-                f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
-                parse_mode="HTML",
-                link_preview_options=self._no_link_preview,
-            ))
-        except Exception:
-            logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
-
-    # throttle
+    
     async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, collapsed: bool = True, prefix: str = "", max_chunks = None):
         if messages is None: 
             messages = []
@@ -310,17 +284,33 @@ class TelegramTransport(BaseTransport):
                 pass
         del messages[len(bodies):]
 
+    async def on_tool_call(self, name: str, args: dict):
+        lines = "\n".join(f"{html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
+        call_text = f"<b>[{html.escape(name)}]</b>\n{lines}" if lines else f"<b>[{html.escape(name)}]</b>"
+        self._tool_call_text = call_text[:2000]
+        self._tool_msg = await self._send(f"<blockquote expandable>{self._tool_call_text}</blockquote>", parse_mode="HTML")
+
+    async def on_tool_result(self, name: str, result):
+        if isinstance(result, dict):
+            parts = [f"<b>[{html.escape(k)}]</b>\n{html.escape(str(v))}" for k, v in result.items() if v not in (None, "", [], {})]
+            result_text = "\n".join(parts) if parts else "(пусто)"
+        else:
+            result_text = html.escape(result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2))
+        result_text = result_text[:2000]
+        try:
+            await self._tg_call(self._tool_msg.edit_text(
+                f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
+                parse_mode="HTML",
+                link_preview_options=self._no_link_preview,
+            ))
+        except Exception:
+            logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
+
     async def send_message(self, text: str, stream_id=None):
         return await self._answer((text or "").strip() or "[…]", messages=stream_id)
 
     async def inject_message(self, text: str):
         sent = await self._send("[→]" + text)
-        self._tool_msg = None
-        self._tool_call_text = ""
-        await self.agent.process_message(
-            content_parts=[{"type": "text", "text": text}],
-            user_message_id=sent.message_id,
-        )
 
     async def send_system_prompt(self, text: str):
         if not self.verbose: return
@@ -346,33 +336,33 @@ class TelegramTransport(BaseTransport):
             messages = self._pending_messages[:]
             self._pending_messages.clear()
             self._flush_task = None
-            await self._process_messages(messages)
+            await self._handle_messages(messages)
 
         self._flush_task = asyncio.create_task(flush())
 
-    async def _download_file(self, file_id: str) -> bytes:
-        buf = io.BytesIO()
-        await self.bot.download_file((await self.bot.get_file(file_id)).file_path, buf)
-        return buf.getvalue()
-
-    async def _typing_loop(self, chat_id: int) -> None:
-        try:
-            while True:
-                await self.bot.send_chat_action(chat_id=chat_id, action="typing", message_thread_id=self.thread_id)
-                await asyncio.sleep(4)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            log.debug("[transport] typing loop stopped for %s: %s", chat_id, e)
-
-    async def _process_messages(self, messages: list[Message]):
+    async def _handle_messages(self, messages: list[Message]):
         first = messages[0]
         self._tool_msg = None
         self._tool_call_text = ""
-        typing_task = asyncio.create_task(self._typing_loop(self.chat_id))
+
+        async def _download_file(file_id: str) -> bytes:
+            buf = io.BytesIO()
+            await self.bot.download_file((await self.bot.get_file(file_id)).file_path, buf)
+            return buf.getvalue()
+
+        async def _typing_loop():
+            try:
+                while True:
+                    await self.bot.send_chat_action(chat_id=self.chat_id, action="typing", message_thread_id=self.thread_id)
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.debug("[transport] typing loop stopped for %s: %s", self.chat_id, e)
+
+        typing_task = asyncio.create_task(_typing_loop())
 
         content_parts = []
-        user_texts = []
 
         user_id = first.from_user.id if first.from_user else None
 
@@ -399,21 +389,19 @@ class TelegramTransport(BaseTransport):
                     content_parts.append({"type": "text", "text": f"<forwarded_message from=\"{forward_sender}\">\n{text}\n</forwarded_message>"})
                 else:
                     content_parts.append({"type": "text", "text": text})
-                user_texts.append(text)
 
             if message.photo:
-                data = await self._download_file(message.photo[-1].file_id)
+                data = await _download_file(message.photo[-1].file_id)
                 content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"}})
 
             if message.sticker:
                 sticker = message.sticker
                 if not sticker.is_animated and not sticker.is_video:
-                    data = await self._download_file(sticker.file_id)
+                    data = await _download_file(sticker.file_id)
                     content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/webp;base64,{base64.b64encode(data).decode()}"}})
 
                 hint = f"[стикер {sticker.emoji}]" if sticker.emoji else "[стикер]"
                 content_parts.append({"type": "text", "text": hint})
-                user_texts.append(hint)
 
             attachment, field = None, None
             if message.photo: attachment, field = message.photo[-1], "photo"
@@ -442,13 +430,13 @@ class TelegramTransport(BaseTransport):
             content = None
             if field == "document" and os.path.splitext(filename or "")[1].lower() in text_extensions:
                 try:
-                    content = (await self._download_file(attachment.file_id)).decode("utf-8", errors="replace")
+                    content = (await _download_file(attachment.file_id)).decode("utf-8", errors="replace")
                 except Exception:
                     logging.exception("[transport] Не удалось прочитать текстовый файл %s", filename)
 
             if field == "voice":
                 try:
-                    content = await self.agent.transcribe_audio(await self._download_file(attachment.file_id), "audio/ogg")
+                    content = await self.agent.transcribe_audio(await _download_file(attachment.file_id), "audio/ogg")
                 except Exception as e:
                     logging.exception("[transport] Не удалось транскрибировать голосовое %s", attachment.file_id)
                     await self._send(f"⚠️ Не удалось распознать голосовое сообщение: {e}")
@@ -456,7 +444,7 @@ class TelegramTransport(BaseTransport):
             if field in ("video", "video_note"):
                 try:
                     video_mime = getattr(attachment, "mime_type", None) or "video/mp4"
-                    content = await self.agent.describe_video(await self._download_file(attachment.file_id), video_mime)
+                    content = await self.agent.describe_video(await _download_file(attachment.file_id), video_mime)
                 except Exception:
                     logging.exception("[transport] Не удалось распознать видео %s", attachment.file_id)
 
@@ -474,11 +462,8 @@ class TelegramTransport(BaseTransport):
             typing_task.cancel()
             return
 
-        if user_texts:
-            await self.on_user_message(" ".join(user_texts).strip())
-
         try:
-            await self.agent.process_message(
+            await self.process_message(
                 content_parts=content_parts,
                 user_message_id=first.message_id,
             )

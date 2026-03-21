@@ -30,6 +30,3 @@ class CliTransport(BaseTransport):
 
     async def inject_message(self, text: str):
         print(f"\n[→] {text}")
-        await self.agent.process_message(
-            content_parts=[{"type": "text", "text": text}],
-        )
