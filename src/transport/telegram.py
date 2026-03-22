@@ -207,18 +207,20 @@ class TelegramTransport(BaseTransport):
         self._skill.register(agent)
         agent.skills.insert(0, self._skill)
 
-    async def _tg_call(self, coro):
-        """Выполняет Telegram API вызов с автоматическим retry при flood control."""
+    async def _tg_retry(self, fn):
         for attempt in range(3):
             try:
-                return await coro
+                return await fn()
             except TelegramRetryAfter as e:
                 log.warning("Flood control, waiting %s sec (attempt %d)", e.retry_after, attempt + 1)
                 await asyncio.sleep(e.retry_after)
-        return await coro
+        return await fn()
 
     async def _send(self, text: str, **kwargs) -> Message:
-        return await self._tg_call(self.bot.send_message(self.chat_id, text, message_thread_id=self.thread_id, link_preview_options=self._no_link_preview, **kwargs))
+        return await self._tg_retry(lambda: self.bot.send_message(self.chat_id, text, message_thread_id=self.thread_id, link_preview_options=self._no_link_preview, **kwargs))
+
+    async def _edit(self, msg: Message, text: str, **kwargs) -> Message:
+        return await self._tg_retry(lambda: msg.edit_text(text, link_preview_options=self._no_link_preview, **kwargs))
     
     async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, collapsed: bool = True, prefix: str = "", max_chunks = None):
         if messages is None: 
@@ -271,7 +273,7 @@ class TelegramTransport(BaseTransport):
         for m, body in enumerate(bodies):
             if m < len(messages):
                 try:
-                    messages[m] = await self._tg_call(messages[m].edit_text(body, parse_mode="HTML", link_preview_options=self._no_link_preview))
+                    messages[m] = await self._edit(messages[m], body, parse_mode="HTML")
                 except Exception as e:
                     if "message is not modified" not in str(e):
                         raise
@@ -298,11 +300,11 @@ class TelegramTransport(BaseTransport):
             result_text = html.escape(result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2))
         result_text = result_text[:2000]
         try:
-            await self._tg_call(self._tool_msg.edit_text(
+            await self._edit(
+                self._tool_msg,
                 f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
                 parse_mode="HTML",
-                link_preview_options=self._no_link_preview,
-            ))
+            )
         except Exception:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
