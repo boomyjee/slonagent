@@ -43,3 +43,6 @@ Thumbs.db
 desktop.ini
 
 .agent.pid
+
+# Отчёты скриптов
+/*.html

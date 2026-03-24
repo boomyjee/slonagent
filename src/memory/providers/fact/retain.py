@@ -134,6 +134,27 @@ about experiences ARE important to remember, even if they seem small (e.g., how 
 tasted, how someone looked, how loud music was). Extract these if they characterize
 an experience or person."""
 
+_SOURCE_ATTRIBUTION_SECTION = """
+
+══════════════════════════════════════════════════════════════════════════
+SOURCE ATTRIBUTION
+══════════════════════════════════════════════════════════════════════════
+
+The input text may contain labeled speaker turns (e.g. "[timestamp] Name: text").
+Determine who is the PRIMARY USER — the main subject of this memory (typically
+the person whose thoughts, life and preferences are being stored).
+
+- Facts stated DIRECTLY by the primary user → write as plain statements:
+  "User likes coffee", "User is planning a trip to Paris"
+
+- Facts from ANY OTHER source → always attribute the source in the fact text:
+  · Assistant inferences/suggestions: "Assistant suggested that ...",
+    "Assistant noted that ...", "Assistant inferred that ..."
+  · Forwarded messages / quotes: "John (forwarded) wrote that ..."
+  · Third-party opinions: "Manager said that ..."
+
+NEVER present someone else's assumption or opinion as a confirmed user fact."""
+
 _CAUSAL_RELATIONSHIPS_SECTION = """
 
 ══════════════════════════════════════════════════════════════════════════
@@ -160,13 +181,6 @@ ALWAYS return valid JSON in this exact structure:
 If no significant facts found, return: {"facts": []}
 NEVER return plain text. NEVER omit the JSON wrapper."""
 
-CONCISE_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
-    retain_mission_section="",
-    extraction_guidelines=_CONCISE_GUIDELINES,
-    examples=_CONCISE_EXAMPLES,
-) + _CAUSAL_RELATIONSHIPS_SECTION + _OUTPUT_FORMAT_SECTION
-
-
 def _build_extraction_prompt(retain_mission: str = "", custom_instructions: str = "") -> str:
     """Строит промпт извлечения фактов с опциональными mission и custom_instructions."""
     if retain_mission:
@@ -185,6 +199,7 @@ def _build_extraction_prompt(retain_mission: str = "", custom_instructions: str 
             extraction_guidelines=guidelines,
             examples=_CONCISE_EXAMPLES,
         )
+        + _SOURCE_ATTRIBUTION_SECTION
         + _CAUSAL_RELATIONSHIPS_SECTION
         + _OUTPUT_FORMAT_SECTION
     )
