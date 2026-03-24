@@ -173,11 +173,12 @@ class Agent:
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
         self.transcription_client = AsyncOpenAI(
             api_key=transcription_api_key or api_key,
             base_url=transcription_base_url or base_url,
             http_client=http_client,
+            max_retries=0,
         )
         self._process_message_lock = asyncio.Lock()
         self._pending_messages: list = []

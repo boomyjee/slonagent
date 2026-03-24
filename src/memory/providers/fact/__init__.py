@@ -80,7 +80,7 @@ class FactProvider(BaseProvider):
 
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self._llm = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+        self._llm = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
 
         self._embedding_model = embedding_model
         self.storage: Storage | None = None

@@ -108,7 +108,7 @@ class SmartCompressor(Skill):
         super().__init__()
         proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
         self.model_name = model_name
         self._cleanup_max_age_days = cleanup_max_age_days
         self.store_dir = None
