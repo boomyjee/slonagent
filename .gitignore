@@ -13,6 +13,7 @@ config.json
 # Python
 venv/
 .venv/
+.venv*/
 __pycache__/
 .cache/
 *.py[cod]
