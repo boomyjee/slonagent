@@ -24,7 +24,8 @@ class SandboxSkill(Skill):
     async def start(self):
         self.workspace_dir = self.workspace_dir or os.path.join(self.agent.memory.memory_dir, "workspace")
         os.makedirs(self.workspace_dir, exist_ok=True)
-        self.container_name = self.container_name or "slonagent_" + re.sub(r"[^a-zA-Z0-9_-]", "_", self.agent.agent_dir).strip("_")
+        sanitized = re.sub(r"[^a-z0-9]+", "_", self.agent.agent_dir.lower()).strip("_")
+        self.container_name = self.container_name or f"slonagent_{sanitized}"
         self.tools_dir = os.path.join(self.workspace_dir, "tools")
         os.makedirs(self.tools_dir, exist_ok=True)
 
