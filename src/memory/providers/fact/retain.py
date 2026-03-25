@@ -12,7 +12,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 log = logging.getLogger(__name__)
 
@@ -566,11 +566,15 @@ async def extract_facts(
     items: list[RetainItem],
     client,
     model_name: str,
+    chunk_fn: Callable[[str], list[str]] | None = None,
 ) -> tuple[list[Fact], list[tuple[str, int, str]]]:
     """
     Извлекает факты из списка items, все чанки всех items обрабатываются параллельно.
     Возвращает (facts, chunk_meta) где chunk_meta: [(document_id, chunk_index, chunk_text), ...]
     для всех items — как у Hindsight. Для items без document_id генерируется UUID.
+
+    chunk_fn — кастомная функция нарезки текста; если None, используется chunk_text.
+    Если chunk_fn вернула пустой список — айтем пропускается.
     """
     if not items:
         return [], []
@@ -590,7 +594,9 @@ async def extract_facts(
             return await coro
 
     for item_idx, item in enumerate(items):
-        chunks = chunk_text(item.content)
+        chunks = chunk_fn(item.content) if chunk_fn else chunk_text(item.content)
+        if not chunks:
+            continue
         for chunk_idx, chunk in enumerate(chunks):
             tasks.append(_limited(_extract_from_chunk_auto_split(
                 chunk, chunk_idx, len(chunks), item.event_date, item.context, client, model_name,
