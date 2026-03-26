@@ -418,21 +418,15 @@ class Agent:
                 merged_id = next((mid for _, mid in batch if mid is not None), None)
                 await self._run_message(merged_parts, merged_id)
 
-    async def _run_message(self, content_parts: list, user_message_id=None):
-        user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
-        logging.info("[agent] incoming: %r", user_query)
-
-        self._stop_event.clear()
-        await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
-
+    async def _build_llm_context(self, user_query: str, send_prompts: bool = False) -> tuple[list, dict, str]:
         tools = []
         tool_to_skill = {}
+        system_parts = []
+        tools_info = []
 
         def truncate(s: str, n: int) -> str:
             return s[:n] + "..." if len(s) > n else s
 
-        system_parts = []
-        tools_info = []
         for skill in self.skills:
             for decl in skill.get_tools():
                 fn = decl["function"]
@@ -446,13 +440,23 @@ class Agent:
             skill_context = await skill.get_context_prompt(user_query)
             if skill_context:
                 system_parts.append(skill_context)
-                await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
+                if send_prompts:
+                    await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
 
-        if tools_info:
-            await self.transport.send_system_prompt("[Инструменты модели]\n"+"\n".join(tools_info))
+        if send_prompts and tools_info:
+            await self.transport.send_system_prompt("[Инструменты модели]\n" + "\n".join(tools_info))
 
+        return tools, tool_to_skill, "\n\n".join(system_parts)
 
-        system_instruction = "\n\n".join(system_parts)
+    async def _run_message(self, content_parts: list, user_message_id=None):
+        user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
+        logging.info("[agent] incoming: %r", user_query)
+
+        self._stop_event.clear()
+        await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
+
+        tools, tool_to_skill, system_instruction = await self._build_llm_context(user_query, send_prompts=True)
+
         try:
             logging.info("[agent] → LLM %s (tools=%d)", self.model_name, len(tools))
             tool_calls, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), tools, system_instruction)
@@ -491,6 +495,7 @@ class Agent:
                 if extra_parts:
                     await self.memory.add_turn({"role": "user", "content": extra_parts})
 
+                tools, tool_to_skill, system_instruction = await self._build_llm_context(user_query)
                 iteration += 1
                 logging.info("[agent] → LLM iteration %d", iteration)
                 tool_calls, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), tools, system_instruction, str(iteration))
