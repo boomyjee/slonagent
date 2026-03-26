@@ -139,3 +139,47 @@ class TestPersonalityProvider:
         # Создаём новый провайдер — должен прочитать .active.json
         p2 = await make_provider(tmp_path)
         assert "hero" in p2._active
+
+    @pytest.mark.asyncio
+    async def test_replace_replaces_text(self, tmp_path):
+        p = await make_provider(tmp_path)
+        p.create("hero", "Герой", "Старый контент\n\nВторой абзац")
+        result = p.replace("hero", "Старый контент", "Новый контент")
+        assert result == {"ok": True}
+        _, content = p._read("hero")
+        assert "Новый контент" in content
+        assert "Старый контент" not in content
+        assert "Второй абзац" in content
+
+    @pytest.mark.asyncio
+    async def test_replace_appends_when_old_empty(self, tmp_path):
+        p = await make_provider(tmp_path)
+        p.create("hero", "Герой", "Первый абзац")
+        result = p.replace("hero", "", "Новый блок")
+        assert result == {"ok": True}
+        _, content = p._read("hero")
+        assert "Первый абзац" in content
+        assert "Новый блок" in content
+
+    @pytest.mark.asyncio
+    async def test_replace_deletes_when_new_empty(self, tmp_path):
+        p = await make_provider(tmp_path)
+        p.create("hero", "Герой", "Первый абзац\n\nУдалить это")
+        result = p.replace("hero", "Удалить это", "")
+        assert result == {"ok": True}
+        _, content = p._read("hero")
+        assert "Удалить это" not in content
+        assert "Первый абзац" in content
+
+    @pytest.mark.asyncio
+    async def test_replace_not_found_returns_error(self, tmp_path):
+        p = await make_provider(tmp_path)
+        p.create("hero", "Герой", "Контент")
+        result = p.replace("hero", "Несуществующий текст", "Новый")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_replace_unknown_personality_returns_error(self, tmp_path):
+        p = await make_provider(tmp_path)
+        result = p.replace("nonexistent", "", "текст")
+        assert "error" in result

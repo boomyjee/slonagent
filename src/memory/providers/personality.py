@@ -130,6 +130,33 @@ class PersonalityProvider(BaseProvider):
         log.info("[PersonalityProvider] обновлена: %s", name)
         return {"updated": name}
 
+    @tool(
+        "Точечно редактировать субличность без полной перезаписи. "
+        "old='' → вставить new в конец. "
+        "new='' → удалить точное вхождение old. "
+        "Оба заданы → заменить первое вхождение old на new."
+    )
+    def replace(
+        self,
+        name: Annotated[str, "Имя субличности"],
+        old: Annotated[str, "Точный текст для поиска (пустая строка — вставка в конец)"],
+        new: Annotated[str, "Новый текст (пустая строка — удаление)"],
+    ) -> dict:
+        if not os.path.exists(self._path(name)):
+            return {"error": f"Субличность '{name}' не найдена."}
+        description, content = self._read(name)
+        if not old:
+            content = content.rstrip("\n") + ("\n\n" if content else "") + new
+        elif old not in content:
+            return {"error": f"Текст не найден в субличности '{name}'."}
+        elif not new:
+            content = content.replace(old, "", 1)
+        else:
+            content = content.replace(old, new, 1)
+        self._write(name, description, content.strip())
+        log.info("[PersonalityProvider] replace: %s", name)
+        return {"ok": True}
+
     @tool("Создать новую субличность.")
     def create(
         self,
