@@ -4,7 +4,7 @@
     .venv\\Scripts\\python scripts/diary_enchiment/validate.py 2014
 """
 import json, re, sys
-from collections import Counter
+from datetime import date, timedelta
 from pathlib import Path
 
 DATA = Path(__file__).parent / "data"
@@ -53,7 +53,38 @@ def validate(year: int) -> bool:
 
     ok = True
 
-    # 1. Пропуски
+    # 0. Полнота дневника (с 2015 — каждый день года)
+    if year >= 2015:
+        start = date(year, 1, 1)
+        end = date(year, 12, 31)
+        all_days = set()
+        d = start
+        while d <= end:
+            all_days.add(d.strftime("%Y.%m.%d"))
+            d += timedelta(days=1)
+        diary_dates = set(originals.keys())
+        gaps = sorted(all_days - diary_dates)
+        dupes_in_diary = []  # уже дедуплицированы в load_originals, проверяем сырой файл
+        path = DATA / f"diary_{year}.txt"
+        if path.exists():
+            raw_dates = _DAY_HEADER.findall(path.read_text(encoding="utf-8"))
+            seen = set()
+            for rd in raw_dates:
+                if rd in seen:
+                    dupes_in_diary.append(rd)
+                seen.add(rd)
+        if gaps:
+            print(f"FAIL  Пропуски в дневнике ({len(gaps)}): {', '.join(gaps[:10])}{'...' if len(gaps) > 10 else ''}")
+            ok = False
+        else:
+            print(f"  OK  Все {len(all_days)} дней года в дневнике")
+        if dupes_in_diary:
+            print(f"FAIL  Дубли в дневнике: {', '.join(dupes_in_diary)}")
+            ok = False
+        else:
+            print(f"  OK  Нет дублей дат")
+
+    # 1. Пропуски enrichments
     missing = sorted(d for d in originals if d not in enrichments)
     if missing:
         print(f"FAIL  Пропущены ({len(missing)}): {', '.join(missing)}")
