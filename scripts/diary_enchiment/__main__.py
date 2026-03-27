@@ -682,34 +682,18 @@ async def run_enrichment_loop(
             reason = resp.choices[0].finish_reason if resp.choices else "no choices"
             await tg.notify(f"⚠️ LLM вернула пустой ответ (finish_reason={reason})")
             if "content_filter" in str(reason):
-                dates_list = ", ".join(f"<code>{d.date_str}</code>" for d in active_week)
-                await tg.send(
-                    f"🚫 content_filter на неделе {date_from}–{date_to}.\n\n"
-                    f"Укажи дату дня который пометить как CENSORED ({dates_list}), "
-                    f"или <code>skip</code> чтобы пропустить всю неделю."
+                fallback_cfg = json.loads((CONFIG_PATH.parent / "config_censored.json").read_text(encoding="utf-8"))
+                await tg.notify(f"🚫 content_filter — переключаюсь на {fallback_cfg.get('model', '?')} для этой недели")
+                fallback_http = httpx.AsyncClient(proxy=fallback_cfg.get("proxy"), timeout=120.0)
+                fallback_llm = AsyncOpenAI(
+                    api_key=fallback_cfg["api_key"],
+                    base_url=fallback_cfg.get("api_base_url", "https://openrouter.ai/api/v1"),
+                    http_client=fallback_http,
                 )
-                answer = await tg.wait_for_message()
-                if answer.strip().lower() == "skip":
-                    return {}
-                censor_date = answer.strip()
-                censor_day = next((d for d in active_week if d.date_str == censor_date), None)
-                if censor_day is None:
-                    await tg.notify(f"⚠️ Дата {censor_date} не найдена, продолжаю без изменений")
-                else:
-                    censored[censor_date] = censor_day.text
-                    save_censored(censored)
-                    all_enc = load_enrichments(year)
-                    all_enc[censor_date] = censor_day.text
-                    save_enrichments(year, all_enc)
-                    active_week = [d for d in active_week if d.date_str not in censored]
-                    week_text = "\n\n".join(d.text for d in active_week)
-                    week_date_list = ", ".join(d.date_str for d in active_week)
-                    messages[1]["content"] = (
-                        f"[DIARY WEEK {date_from} — {date_to}]\n"
-                        f"Дни недели (используй эти строки как ключи в enrich_diary): {week_date_list}\n\n"
-                        f"{week_text}"
-                    )
-                    await tg.notify(f"🔇 {censor_date} помечен CENSORED, повторяю без него")
+                try:
+                    return await run_enrichment_loop(week, year, tg, fallback_llm, fallback_cfg.get("model", model))
+                finally:
+                    await fallback_http.aclose()
             elif llm_turn >= 5:
                 await tg.notify("❌ LLM 5 раз подряд вернула пустой ответ — прерываю неделю")
                 return {}
@@ -738,7 +722,8 @@ async def run_enrichment_loop(
         messages.append(assistant_msg)
 
         if not msg.tool_calls:
-            break
+            messages.append({"role": "user", "content": "Ты не вызвал enrich_diary. Обработай неделю и вызови enrich_diary со всеми днями."})
+            continue
 
         tool_calls = list(msg.tool_calls)
         await tg.notify(f"🔧 Инструменты: {', '.join(tc.function.name for tc in tool_calls)}")
@@ -1127,6 +1112,7 @@ async def main():
 
     try:
         await tg.drain_pending()
+        print("Ожидание первого сообщения от пользователя...")
         await tg.wait_for_message()
 
         if rerun_date:
