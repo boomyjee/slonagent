@@ -426,16 +426,22 @@ TOOLS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "days": {
-                        "type": "object",
-                        "description": (
-                            "Словарь date_str -> аннотированный текст. "
-                            "Ключи СТРОГО в формате YYYY.MM.DD — только цифры и точки. "
-                            "ЗАПРЕЩЕНО: h-префикс, подчёркивания, кавычки. "
-                            "ПРАВИЛЬНО: {\"2014.05.12\": \"...\", \"2014.05.13\": \"...\"}. "
-                            "НЕПРАВИЛЬНО: {\"h2014_05_12\": \"...\"}. "
-                            "Список допустимых ключей передаётся в начале сообщения пользователя."
-                        ),
-                        "additionalProperties": {"type": "string"}
+                        "type": "array",
+                        "description": "Массив дней с аннотированным текстом.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "date": {
+                                    "type": "string",
+                                    "description": "Дата дня в формате YYYY.MM.DD, например 2014.05.12"
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "Полный аннотированный текст дня"
+                                }
+                            },
+                            "required": ["date", "text"]
+                        }
                     }
                 },
                 "required": ["days"]
@@ -739,7 +745,30 @@ async def run_enrichment_loop(
 
         tool_results: list[dict] = []
         enrich_approved = False
-        for call in tool_calls:
+
+        glossary_calls = [c for c in tool_calls if c.function.name == "glossary_add"]
+        other_calls = [c for c in tool_calls if c.function.name != "glossary_add"]
+        glossary_rejected = False
+        for call in glossary_calls:
+            fn = call.function.name
+            try:
+                args = json.loads(call.function.arguments)
+            except json.JSONDecodeError:
+                args = {}
+            proposal = _format_glossary_add_proposal(args["id"], args["description"])
+            await tg.send(proposal)
+            answer = await tg.wait_for_message()
+            if _is_approval(answer):
+                glossary_add(args["id"], args["description"])
+                result = f"Добавлен ID:{args['id']}"
+            else:
+                feedback, soul_note = _split_reply(answer)
+                _append_soul(soul_note)
+                result = f"ОТКЛОНЕНО: {feedback}" if feedback else "ОТКЛОНЕНО пользователем."
+                glossary_rejected = True
+            tool_results.append({"role": "tool", "tool_call_id": call.id, "content": result})
+
+        for call in other_calls:
             fn = call.function.name
             try:
                 args = json.loads(call.function.arguments)
@@ -747,14 +776,29 @@ async def run_enrichment_loop(
                 args = {}
 
             if fn == "enrich_diary":
+                if glossary_rejected:
+                    result = (
+                        "enrich_diary отклонён: glossary_add был отклонён пользователем. "
+                        "Исправь глоссарий и повтори оба вызова."
+                    )
+                    tool_results.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                    continue
                 # LLM иногда оборачивает ключи в лишние кавычки или генерирует
                 # html-anchor стиль (h2014_07_21) — нормализуем к YYYY.MM.DD
-                def _normalize_key(k: str) -> str:
-                    k = k.strip('"').strip("'")
-                    k = re.sub(r'^h(\d)', r'\1', k)  # h2014_07_21 → 2014_07_21
-                    k = k.replace('_', '.')           # 2014_07_21 → 2014.07.21
-                    return k
-                days_arg = {_normalize_key(k): v for k, v in args.get("days", {}).items()}
+                days_list = args.get("days", [])
+                if isinstance(days_list, dict):
+                    days_list = [{"date": k, "text": v} for k, v in days_list.items()]
+                bad_items = [i for i, item in enumerate(days_list) if not item.get("date") or not item.get("text")]
+                if bad_items:
+                    valid = ", ".join(d.date_str for d in active_week)
+                    result = (
+                        f"ОШИБКА ФОРМАТА: элементы {bad_items} не содержат date или text. "
+                        f"Каждый элемент массива days должен быть {{\"date\": \"YYYY.MM.DD\", \"text\": \"...\"}}. "
+                        f"Допустимые даты: {valid}"
+                    )
+                    tool_results.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                    continue
+                days_arg = {item["date"]: item["text"] for item in days_list}
                 await tg.notify(f"🔍 days_arg ключей: {len(days_arg)}, первые: {list(days_arg.keys())[:3]}")
                 # Валидация
                 errors: list[str] = []
@@ -764,7 +808,8 @@ async def run_enrichment_loop(
                     print(f"[debug] валидирую {ds}, len(annotated)={len(annotated) if isinstance(annotated, str) else type(annotated)}")
                     orig = next((d.text for d in active_week if d.date_str == ds), None)
                     if orig is None:
-                        errors.append(f"{ds}: дата не в текущей неделе")
+                        valid = ", ".join(d.date_str for d in active_week)
+                        errors.append(f"Ключ \"{ds}\" не найден. Допустимые ключи: {valid}")
                         continue
                     print(f"[debug] вызываю validate_enrichment для {ds}")
                     ok, err = validate_enrichment(orig, annotated)
@@ -774,6 +819,20 @@ async def run_enrichment_loop(
                     else:
                         valid_days[ds] = annotated
                 print(f"[debug] валидация завершена: errors={len(errors)}, valid={len(valid_days)}")
+
+                glossary = read_glossary_dict()
+                for ds, annotated in list(valid_days.items()):
+                    unknown = []
+                    for m in _ID_RE.finditer(annotated):
+                        tag = m.group(0)             # [ID:Pers:Arbuzov]
+                        glossary_key = tag[4:-1]     # Pers:Arbuzov
+                        if glossary_key.startswith("Loc:"):
+                            continue
+                        if glossary_key not in glossary:
+                            unknown.append(tag)
+                    if unknown:
+                        errors.append(f"{ds}: ID отсутствуют в глоссарии: {', '.join(unknown)}")
+                        valid_days.pop(ds)
 
                 # Проверяем что все active дни недели присутствуют (censored не считаем)
                 active_dates = {d.date_str for d in active_week}
@@ -830,19 +889,6 @@ async def run_enrichment_loop(
                         result = _feedback_note(accumulated_feedback)
                         tool_results.append({"role": "tool", "tool_call_id": call.id, "content": result})
                 continue  # tool_results уже appended выше
-
-            elif fn == "glossary_add":
-                proposal = _format_glossary_add_proposal(args["id"], args["description"])
-                await tg.send(proposal)
-                answer = await tg.wait_for_message()
-                if _is_approval(answer):
-                    glossary_add(args["id"], args["description"])
-                    result = f"Добавлен ID:{args['id']}"
-                else:
-                    feedback, soul_note = _split_reply(answer)
-                    _append_soul(soul_note)
-                    accumulated_feedback.append(feedback)
-                    result = _feedback_note(accumulated_feedback)
 
             elif fn == "glossary_update":
                 old_desc = read_glossary_dict().get(args["id"], "")
@@ -1038,7 +1084,26 @@ async def run_glossary_feedback_loop(
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
+def _find_week_by_date(target_date: str) -> tuple[list, int] | None:
+    """Найти неделю, содержащую указанную дату. Возвращает (week, year)."""
+    year = int(target_date[:4])
+    days = parse_diary(year)
+    if not days:
+        return None
+    weeks = group_into_weeks(days)
+    for week in weeks:
+        if any(d.date_str == target_date for d in week):
+            return week, year
+    return None
+
+
 async def main():
+    import sys as _sys
+    rerun_date = None
+    for i, arg in enumerate(_sys.argv):
+        if arg == "--rerun" and i + 1 < len(_sys.argv):
+            rerun_date = _sys.argv[i + 1]
+
     cfg = load_config()
 
     tg = TgClient(
@@ -1059,15 +1124,29 @@ async def main():
         http_client=llm_http,
     )
     model = cfg.get("model", "gemini-3-flash-preview")
-    state = load_state()
-
-    print(f"Старт: year={state.year}, week_idx={state.week_idx}")
-    print("Ожидание первого сообщения от пользователя...")
 
     try:
         await tg.drain_pending()
-        # Ждём первого сообщения чтобы установить куда отвечать
         await tg.wait_for_message()
+
+        if rerun_date:
+            result = _find_week_by_date(rerun_date)
+            if not result:
+                await tg.send(f"❌ Дата {rerun_date} не найдена в дневниках.")
+                return
+            week, year = result
+            date_from, date_to = week[0].date_str, week[-1].date_str
+            await tg.send(
+                f"🔄 <b>Rerun: неделя {date_from} — {date_to}</b> ({year})\n\n"
+                + "\n\n".join(_html_escape(d.text) for d in week)
+            )
+            await run_enrichment_loop(week, year, tg, llm, model)
+            await tg.send(f"✅ <b>Rerun {date_from} — {date_to} завершён.</b>")
+            return
+
+        state = load_state()
+        print(f"Старт: year={state.year}, week_idx={state.week_idx}")
+
         await tg.send(
             f"✅ Начинаем. Позиция: <b>{state.year}</b>, неделя <b>{state.week_idx + 1}</b>.\n\n"
             f"<b>Как это работает:</b>\n"
