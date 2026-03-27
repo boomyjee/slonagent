@@ -47,3 +47,7 @@ desktop.ini
 
 # Отчёты скриптов
 /*.html
+
+# diary_enchiment — личные данные и конфиг
+scripts/diary_enchiment/data/
+scripts/diary_enchiment/config.json
