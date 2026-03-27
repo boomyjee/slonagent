@@ -50,4 +50,4 @@ desktop.ini
 
 # diary_enchiment — личные данные и конфиг
 scripts/diary_enchiment/data/
-scripts/diary_enchiment/config.json
+scripts/diary_enchiment/config*.json

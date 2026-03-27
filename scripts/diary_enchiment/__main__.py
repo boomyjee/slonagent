@@ -234,7 +234,8 @@ CENSORED_PATH = DATA / "censored.json"
 def load_censored() -> dict[str, str]:
     if not CENSORED_PATH.exists():
         return {}
-    return json.loads(CENSORED_PATH.read_text(encoding="utf-8"))
+    text = CENSORED_PATH.read_text(encoding="utf-8").strip()
+    return json.loads(text) if text else {}
 
 def save_censored(data: dict[str, str]):
     CENSORED_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -428,8 +429,10 @@ TOOLS: list[dict] = [
                         "type": "object",
                         "description": (
                             "Словарь date_str -> аннотированный текст. "
-                            "Ключи СТРОГО в формате YYYY.MM.DD — только цифры и точки, без каких-либо кавычек внутри. "
-                            "Пример ключа: 2014.05.12 (не '2014.05.12', не \"2014.05.12\"). "
+                            "Ключи СТРОГО в формате YYYY.MM.DD — только цифры и точки. "
+                            "ЗАПРЕЩЕНО: h-префикс, подчёркивания, кавычки. "
+                            "ПРАВИЛЬНО: {\"2014.05.12\": \"...\", \"2014.05.13\": \"...\"}. "
+                            "НЕПРАВИЛЬНО: {\"h2014_05_12\": \"...\"}. "
                             "Список допустимых ключей передаётся в начале сообщения пользователя."
                         ),
                         "additionalProperties": {"type": "string"}
@@ -744,9 +747,14 @@ async def run_enrichment_loop(
                 args = {}
 
             if fn == "enrich_diary":
-                # LLM иногда оборачивает ключи в лишние кавычки — нормализуем
-                _strip = lambda k: k.strip('"').strip("'")
-                days_arg = {_strip(k): v for k, v in args.get("days", {}).items()}
+                # LLM иногда оборачивает ключи в лишние кавычки или генерирует
+                # html-anchor стиль (h2014_07_21) — нормализуем к YYYY.MM.DD
+                def _normalize_key(k: str) -> str:
+                    k = k.strip('"').strip("'")
+                    k = re.sub(r'^h(\d)', r'\1', k)  # h2014_07_21 → 2014_07_21
+                    k = k.replace('_', '.')           # 2014_07_21 → 2014.07.21
+                    return k
+                days_arg = {_normalize_key(k): v for k, v in args.get("days", {}).items()}
                 await tg.notify(f"🔍 days_arg ключей: {len(days_arg)}, первые: {list(days_arg.keys())[:3]}")
                 # Валидация
                 errors: list[str] = []
