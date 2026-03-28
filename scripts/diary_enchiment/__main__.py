@@ -399,18 +399,23 @@ class TgClient:
                 payload["message_thread_id"] = self._reply_thread_id
             try:
                 r = await self._http.post(self._url("sendMessage"), json=payload)
-                if not r.is_success:
-                    print(f"[tg] send HTTP {r.status_code}: {r.text[:300]}")
+                rj = r.json()
+                if not rj.get("ok"):
+                    print(f"[tg] send FAILED: {r.status_code} {r.text[:300]}")
+                else:
+                    print(f"[tg] send ok, msg_id={rj['result']['message_id']}, len={len(chunk)}")
             except Exception as e:
                 print(f"[tg] send error: {e}")
 
-    async def send_collage(self, paths: list[Path]):
+    async def send_collage(self, paths: list[Path], caption: str = ""):
         """Собрать коллаж из фото и отправить одним изображением."""
         if not paths or self._reply_chat_id is None:
             return
         buf = make_collage(paths)
         try:
             data: dict = {"chat_id": str(self._reply_chat_id)}
+            if caption:
+                data["caption"] = caption
             if self._reply_thread_id:
                 data["message_thread_id"] = str(self._reply_thread_id)
             r = await self._http.post(
@@ -805,8 +810,9 @@ async def run_enrichment_loop(
         tool_results: list[dict] = []
         enrich_approved = False
 
-        glossary_calls = [c for c in tool_calls if c.function.name == "glossary_add"]
-        other_calls = [c for c in tool_calls if c.function.name != "glossary_add"]
+        _glossary_names = {"glossary_add", "glossary_update"}
+        glossary_calls = [c for c in tool_calls if c.function.name in _glossary_names]
+        other_calls = [c for c in tool_calls if c.function.name not in _glossary_names]
         glossary_rejected = False
         for call in glossary_calls:
             fn = call.function.name
@@ -814,19 +820,38 @@ async def run_enrichment_loop(
                 args = json.loads(call.function.arguments)
             except json.JSONDecodeError:
                 args = {}
-            if args["id"].startswith("ID:"):
-                args["id"] = args["id"][3:]
-            proposal = _format_glossary_add_proposal(args["id"], args["description"])
-            await tg.send(proposal)
-            answer = await tg.wait_for_message()
-            if _is_approval(answer):
-                glossary_add(args["id"], args["description"])
-                result = f"Добавлен ID:{args['id']}"
-            else:
-                feedback, soul_note = _split_reply(answer)
-                _append_soul(soul_note)
-                result = f"ОТКЛОНЕНО: {feedback}" if feedback else "ОТКЛОНЕНО пользователем."
-                glossary_rejected = True
+
+            if fn == "glossary_add":
+                if args["id"].startswith("ID:"):
+                    args["id"] = args["id"][3:]
+                proposal = _format_glossary_add_proposal(args["id"], args["description"])
+                await tg.send(proposal)
+                answer = await tg.wait_for_message()
+                if _is_approval(answer):
+                    glossary_add(args["id"], args["description"])
+                    result = f"Добавлен ID:{args['id']}"
+                else:
+                    feedback, soul_note = _split_reply(answer)
+                    _append_soul(soul_note)
+                    result = f"ОТКЛОНЕНО: {feedback}" if feedback else "ОТКЛОНЕНО пользователем."
+                    glossary_rejected = True
+
+            elif fn == "glossary_update":
+                old_desc = read_glossary_dict().get(args["id"], "")
+                proposal = _format_glossary_update_proposal(
+                    args["id"], old_desc, args["new_description"]
+                )
+                await tg.send(proposal)
+                answer = await tg.wait_for_message()
+                if _is_approval(answer):
+                    glossary_update(args["id"], args["new_description"])
+                    result = f"Обновлён ID:{args['id']}"
+                else:
+                    feedback, soul_note = _split_reply(answer)
+                    _append_soul(soul_note)
+                    result = f"ОТКЛОНЕНО: {feedback}" if feedback else "ОТКЛОНЕНО пользователем."
+                    glossary_rejected = True
+
             tool_results.append({"role": "tool", "tool_call_id": call.id, "content": result})
 
         for call in other_calls:
@@ -839,8 +864,8 @@ async def run_enrichment_loop(
             if fn == "enrich_diary":
                 if glossary_rejected:
                     result = (
-                        "enrich_diary отклонён: glossary_add был отклонён пользователем. "
-                        "Исправь глоссарий и повтори оба вызова."
+                        "enrich_diary отклонён: изменение глоссария было отклонено пользователем. "
+                        "Исправь глоссарий и повтори вызов."
                     )
                     tool_results.append({"role": "tool", "tool_call_id": call.id, "content": result})
                     continue
@@ -950,22 +975,6 @@ async def run_enrichment_loop(
                         result = _feedback_note(accumulated_feedback)
                         tool_results.append({"role": "tool", "tool_call_id": call.id, "content": result})
                 continue  # tool_results уже appended выше
-
-            elif fn == "glossary_update":
-                old_desc = read_glossary_dict().get(args["id"], "")
-                proposal = _format_glossary_update_proposal(
-                    args["id"], old_desc, args["new_description"]
-                )
-                await tg.send(proposal)
-                answer = await tg.wait_for_message()
-                if _is_approval(answer):
-                    glossary_update(args["id"], args["new_description"])
-                    result = f"Обновлён ID:{args['id']}"
-                else:
-                    feedback, soul_note = _split_reply(answer)
-                    _append_soul(soul_note)
-                    accumulated_feedback.append(feedback)
-                    result = _feedback_note(accumulated_feedback)
 
             elif fn == "ask_user":
                 questions = args.get("questions", [])
@@ -1235,7 +1244,7 @@ async def main():
                 for day in week:
                     photos, total = find_day_photos(day.date_str)
                     if photos:
-                        await tg.send_collage(photos)
+                        await tg.send_collage(photos, caption=day.date_str)
                         if total > len(photos):
                             await tg.notify(f"📷 {day.date_str}: {len(photos)} из {total} фото")
                     await tg.send(
