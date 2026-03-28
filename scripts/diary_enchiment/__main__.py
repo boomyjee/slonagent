@@ -115,7 +115,7 @@ def save_state(state: State):
 
 # ── Diary parsing ──────────────────────────────────────────────────────────────
 
-_DAY_HEADER = re.compile(r'^(\d{4}\.\d{2}\.\d{2})(?:\s+-\s+\S+)?', re.MULTILINE)
+_DAY_HEADER = re.compile(r'^(\d{4}\.\d{2}\.\d{2})(?:[ \t]+-[ \t]+\S+)?', re.MULTILINE)
 
 @dataclass
 class DiaryDay:
