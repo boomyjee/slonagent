@@ -306,7 +306,7 @@ def find_day_photos(date_str: str) -> tuple[list[Path], int]:
 
 def make_collage(paths: list[Path], size: int = COLLAGE_SIZE) -> io.BytesIO:
     """Собрать коллаж 3x3 (или меньше) из фото. Возвращает JPEG в BytesIO."""
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     n = len(paths)
     cols = 1 if n == 1 else 2 if n <= 4 else 3
@@ -317,6 +317,7 @@ def make_collage(paths: list[Path], size: int = COLLAGE_SIZE) -> io.BytesIO:
     for i, p in enumerate(paths):
         row, col = divmod(i, cols)
         with Image.open(str(p)) as img:
+            img = ImageOps.exif_transpose(img)
             img.thumbnail((cell, cell))
             x = col * cell + (cell - img.width) // 2
             y = row * cell + (cell - img.height) // 2
