@@ -740,6 +740,8 @@ async def run_enrichment_loop(
                 args = json.loads(call.function.arguments)
             except json.JSONDecodeError:
                 args = {}
+            if args["id"].startswith("ID:"):
+                args["id"] = args["id"][3:]
             proposal = _format_glossary_add_proposal(args["id"], args["description"])
             await tg.send(proposal)
             answer = await tg.wait_for_message()
