@@ -5,6 +5,7 @@
 Данные: scripts/diary_enchiment/data/
 """
 import asyncio
+import io
 import json
 import os
 import re
@@ -26,6 +27,9 @@ GLOSSARY_PATH = DATA / "glossary.md"
 SOUL_PATH     = DATA / "SOUL.md"
 
 DIARY_YEARS = list(range(2014, 2025))
+PHOTOS_DIR  = Path("h:/fotki_dnevnik_new")
+COLLAGE_MAX = 9
+COLLAGE_SIZE = 1280
 
 # ── Protocol ───────────────────────────────────────────────────────────────────
 
@@ -281,6 +285,45 @@ def build_compiled(year: int):
     path.write_text("\n".join(out), encoding="utf-8")
     return path
 
+# ── Photos ─────────────────────────────────────────────────────────────────────
+
+def find_day_photos(date_str: str) -> tuple[list[Path], int]:
+    """Найти фото для дня. Возвращает (paths[:COLLAGE_MAX], total_count)."""
+    if not PHOTOS_DIR.exists():
+        return [], 0
+    matches = list(PHOTOS_DIR.glob(f"{date_str}*"))
+    if not matches or not matches[0].is_dir():
+        return [], 0
+    all_photos = sorted(
+        f for f in matches[0].iterdir()
+        if f.is_file() and f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.webp')
+    )
+    return all_photos[:COLLAGE_MAX], len(all_photos)
+
+
+def make_collage(paths: list[Path], size: int = COLLAGE_SIZE) -> io.BytesIO:
+    """Собрать коллаж 3x3 (или меньше) из фото. Возвращает JPEG в BytesIO."""
+    from PIL import Image
+
+    n = len(paths)
+    cols = 1 if n == 1 else 2 if n <= 4 else 3
+    rows = (n + cols - 1) // cols
+    cell = size // cols
+
+    canvas = Image.new("RGB", (cols * cell, rows * cell), (0, 0, 0))
+    for i, p in enumerate(paths):
+        row, col = divmod(i, cols)
+        with Image.open(str(p)) as img:
+            img.thumbnail((cell, cell))
+            x = col * cell + (cell - img.width) // 2
+            y = row * cell + (cell - img.height) // 2
+            canvas.paste(img, (x, y))
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="JPEG", quality=60)
+    buf.seek(0)
+    return buf
+
 # ── Telegram ───────────────────────────────────────────────────────────────────
 
 class TgClient:
@@ -357,6 +400,27 @@ class TgClient:
                     print(f"[tg] send HTTP {r.status_code}: {r.text[:300]}")
             except Exception as e:
                 print(f"[tg] send error: {e}")
+
+    async def send_collage(self, paths: list[Path]):
+        """Собрать коллаж из фото и отправить одним изображением."""
+        if not paths or self._reply_chat_id is None:
+            return
+        buf = make_collage(paths)
+        try:
+            data: dict = {"chat_id": str(self._reply_chat_id)}
+            if self._reply_thread_id:
+                data["message_thread_id"] = str(self._reply_thread_id)
+            r = await self._http.post(
+                self._url("sendPhoto"),
+                data=data,
+                files={"photo": ("collage.jpg", buf, "image/jpeg")},
+            )
+            if not r.is_success:
+                print(f"[tg] send_collage HTTP {r.status_code}: {r.text[:300]}")
+        except Exception as e:
+            print(f"[tg] send_collage error: {e}")
+        finally:
+            buf.close()
 
     async def drain_pending(self) -> None:
         """Сбрасывает все накопленные обновления — вызвать один раз при старте."""
@@ -541,8 +605,8 @@ def _append_soul(note: str) -> None:
         f.write(f"\n\n---\n{note}\n")
 
 _APPROVE_HINT = (
-    "\n\n<i>Одобрить: отправь . или любой символ &lt;3 симв.\n"
-    "Замечание: напиши текст. Строки с + в начале сохраняются в SOUL.md.</i>"
+    "\n\n<i>Одобрить: отправь . или любой символ &lt;3 симв.</i>\n"
+    "<i>Замечание: напиши текст. Строки с + в начале сохраняются в SOUL.md.</i>"
 )
 
 def _format_enrich_proposal(week: list[DiaryDay], proposed_days: dict[str, str]) -> str:
@@ -1158,11 +1222,16 @@ async def main():
                 date_to   = week[-1].date_str
 
                 print(f"  Неделя {date_from} — {date_to} ({week_idx+1}/{len(weeks)})")
-                await tg.send(
-                    f"📖 <b>Неделя {date_from} — {date_to}</b> "
-                    f"({week_idx+1}/{len(weeks)}, {year})\n\n"
-                    + "\n\n".join(_html_escape(d.text) for d in week)
-                )
+                for day in week:
+                    photos, total = find_day_photos(day.date_str)
+                    if photos:
+                        await tg.send_collage(photos)
+                        if total > len(photos):
+                            await tg.notify(f"📷 {day.date_str}: {len(photos)} из {total} фото")
+                    await tg.send(
+                        f"📖 <b>{day.date_str}</b>\n\n"
+                        + _html_escape(day.text)
+                    )
 
                 await run_enrichment_loop(week, year, tg, llm, model)
 
