@@ -622,6 +622,16 @@ _APPROVE_HINT = (
     "<i>Замечание: напиши текст. Строки с + в начале сохраняются в SOUL.md.</i>"
 )
 
+def _highlight_ids(text: str) -> str:
+    parts = []
+    last = 0
+    for m in _ID_RE.finditer(text):
+        parts.append(_html_escape(text[last:m.start()]))
+        parts.append(f"<code>{_html_escape(m.group(0))}</code>")
+        last = m.end()
+    parts.append(_html_escape(text[last:]))
+    return "".join(parts)
+
 def _format_enrich_proposal(week: list[DiaryDay], proposed_days: dict[str, str]) -> str:
     glossary = read_glossary_dict()
     lines = ["📝 <b>Предлагаемое обогащение:</b>\n"]
@@ -629,7 +639,8 @@ def _format_enrich_proposal(week: list[DiaryDay], proposed_days: dict[str, str])
         annotated = proposed_days.get(day.date_str)
         if not annotated:
             continue
-        lines.append(_html_escape(annotated))
+        text_body = annotated.removeprefix(day.date_str).lstrip()
+        lines.append(f"📖 <b>{day.date_str}</b> {_highlight_ids(text_body)}")
         used: list[tuple[str, str]] = []
         seen: set[str] = set()
         for m in _ID_RE.finditer(annotated):
@@ -641,9 +652,8 @@ def _format_enrich_proposal(week: list[DiaryDay], proposed_days: dict[str, str])
             used.append((id_full, glossary.get(key, "?")))
         if used:
             lines.append("")
-            lines.append("  <i>Расшифровка:</i>")
             for id_full, desc in used:
-                lines.append(f"  • <code>{_html_escape(id_full)}</code> — {_html_escape(desc)}")
+                lines.append(f"<i>• {_html_escape(id_full)} — {_html_escape(desc)}</i>")
         lines.append("")
     return "\n".join(lines) + _APPROVE_HINT
 
@@ -1242,12 +1252,12 @@ async def main():
                 for day in week:
                     photos, total = find_day_photos(day.date_str)
                     if photos:
-                        await tg.send_collage(photos, caption=day.date_str)
+                        await tg.send_collage(photos)
                         if total > len(photos):
                             await tg.notify(f"📷 {day.date_str}: {len(photos)} из {total} фото")
+                    text_body = day.text.removeprefix(day.date_str).lstrip()
                     await tg.send(
-                        f"📖 <b>{day.date_str}</b>\n\n"
-                        + _html_escape(day.text)
+                        f"📖 <b>{day.date_str}</b> {_html_escape(text_body)}"
                     )
 
                 await run_enrichment_loop(week, year, tg, llm, model)
