@@ -290,18 +290,16 @@ def build_compiled(year: int):
 
 # ── Photos ─────────────────────────────────────────────────────────────────────
 
-def find_day_photos(date_str: str) -> tuple[list[Path], int]:
-    """Найти фото для дня. Возвращает (paths[:COLLAGE_MAX], total_count)."""
+def find_day_photos(date_str: str) -> list[Path]:
     if not PHOTOS_DIR.exists():
-        return [], 0
+        return []
     matches = list(PHOTOS_DIR.glob(f"{date_str}*"))
     if not matches or not matches[0].is_dir():
-        return [], 0
-    all_photos = sorted(
+        return []
+    return sorted(
         f for f in matches[0].iterdir()
         if f.is_file() and f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.webp')
     )
-    return all_photos[:COLLAGE_MAX], len(all_photos)
 
 
 def make_collage(paths: list[Path], size: int = COLLAGE_SIZE) -> io.BytesIO:
@@ -408,28 +406,37 @@ class TgClient:
             except Exception as e:
                 print(f"[tg] send error: {e}")
 
-    async def send_collage(self, paths: list[Path], caption: str = ""):
-        """Собрать коллаж из фото и отправить одним изображением."""
+    async def send_collage(self, paths: list[Path]):
         if not paths or self._reply_chat_id is None:
             return
-        buf = make_collage(paths)
+        bufs = []
+        for i in range(0, len(paths), COLLAGE_MAX):
+            buf = make_collage(paths[i:i + COLLAGE_MAX])
+            print(f"[tg] collage part {i // COLLAGE_MAX + 1}: {min(COLLAGE_MAX, len(paths) - i)} photos, {buf.getbuffer().nbytes // 1024}KB")
+            bufs.append(buf)
         try:
-            data: dict = {"chat_id": str(self._reply_chat_id)}
-            if caption:
-                data["caption"] = caption
+            media = []
+            files = {}
+            for idx, buf in enumerate(bufs):
+                key = f"collage{idx}"
+                media.append({"type": "photo", "media": f"attach://{key}"})
+                files[key] = (f"{key}.jpg", buf, "image/jpeg")
+            data: dict = {"chat_id": str(self._reply_chat_id), "media": json.dumps(media)}
             if self._reply_thread_id:
                 data["message_thread_id"] = str(self._reply_thread_id)
             r = await self._http.post(
-                self._url("sendPhoto"),
+                self._url("sendMediaGroup"),
                 data=data,
-                files={"photo": ("collage.jpg", buf, "image/jpeg")},
+                files=files,
+                timeout=120.0,
             )
             if not r.is_success:
                 print(f"[tg] send_collage HTTP {r.status_code}: {r.text[:300]}")
         except Exception as e:
             print(f"[tg] send_collage error: {e}")
         finally:
-            buf.close()
+            for buf in bufs:
+                buf.close()
 
     async def drain_pending(self) -> None:
         """Сбрасывает все накопленные обновления — вызвать один раз при старте."""
@@ -694,6 +701,20 @@ def _get_prev_weeks_context(week: list[DiaryDay], year: int, n: int = 2) -> str:
         lines.append(enc[ds])
     return "\n\n".join(lines)
 
+_LLM_RETRY_DELAYS = [5, 15, 30, 60]
+
+async def _llm_call(llm, tg: TgClient, **kwargs):
+    for attempt, delay in enumerate(_LLM_RETRY_DELAYS, 1):
+        try:
+            return await llm.chat.completions.create(**kwargs)
+        except Exception as e:
+            code = getattr(e, 'status_code', None)
+            if code in (429, 503) and attempt < len(_LLM_RETRY_DELAYS):
+                await tg.notify(f"⚠️ LLM {code}: {e}. Retry {attempt}/{len(_LLM_RETRY_DELAYS)} через {delay}с...")
+                await asyncio.sleep(delay)
+            else:
+                raise
+
 # ── LLM enrichment loop ────────────────────────────────────────────────────────
 
 async def run_enrichment_loop(
@@ -762,9 +783,7 @@ async def run_enrichment_loop(
         messages[0]["content"] = _build_system()
         llm_turn += 1
         await tg.notify(f"🤔 LLM думает (итерация {llm_turn})...")
-        resp = await llm.chat.completions.create(
-            model=model, messages=messages, tools=TOOLS, tool_choice="auto",
-        )
+        resp = await _llm_call(llm, tg, model=model, messages=messages, tools=TOOLS, tool_choice="auto")
         if not resp.choices or resp.choices[0].message is None:
             reason = resp.choices[0].finish_reason if resp.choices else "no choices"
             await tg.notify(f"⚠️ LLM вернула пустой ответ (finish_reason={reason})")
@@ -1072,9 +1091,7 @@ async def run_glossary_feedback_loop(
 
     while True:
         messages[0]["content"] = _build_system()
-        resp = await llm.chat.completions.create(
-            model=model, messages=messages, tools=_GLOSSARY_TOOLS, tool_choice="auto",
-        )
+        resp = await _llm_call(llm, tg, model=model, messages=messages, tools=_GLOSSARY_TOOLS, tool_choice="auto")
         if not resp.choices or resp.choices[0].message is None:
             reason = resp.choices[0].finish_reason if resp.choices else "no choices"
             await tg.notify(f"⚠️ LLM вернула пустой ответ (finish_reason={reason}), повторяю...")
@@ -1250,11 +1267,9 @@ async def main():
 
                 print(f"  Неделя {date_from} — {date_to} ({week_idx+1}/{len(weeks)})")
                 for day in week:
-                    photos, total = find_day_photos(day.date_str)
+                    photos = find_day_photos(day.date_str)
                     if photos:
                         await tg.send_collage(photos)
-                        if total > len(photos):
-                            await tg.notify(f"📷 {day.date_str}: {len(photos)} из {total} фото")
                     text_body = day.text.removeprefix(day.date_str).lstrip()
                     await tg.send(
                         f"📖 <b>{day.date_str}</b> {_html_escape(text_body)}"
