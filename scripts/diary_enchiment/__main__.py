@@ -447,10 +447,9 @@ class TgClient:
         except Exception as e:
             print(f"[tg] drain error: {e}")
 
-    async def wait_for_message(self, timeout_sec: int = 7200) -> str:
+    async def wait_for_message(self) -> str:
         """Polling до первого текстового сообщения от разрешённого пользователя."""
-        deadline = asyncio.get_event_loop().time() + timeout_sec
-        while asyncio.get_event_loop().time() < deadline:
+        while True:
             params: dict = {"timeout": 20, "allowed_updates": ["message"]}
             if self._last_update_id is not None:
                 params["offset"] = self._last_update_id + 1
@@ -474,8 +473,6 @@ class TgClient:
             except Exception as e:
                 print(f"[tg] polling error: {e}")
                 await asyncio.sleep(3)
-
-        raise TimeoutError("Таймаут ожидания ответа пользователя")
 
     async def close(self):
         await self._http.aclose()
