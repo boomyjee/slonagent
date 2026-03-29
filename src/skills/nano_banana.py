@@ -61,7 +61,7 @@ class NanoBananaSkill(Skill):
         proxies = {"http": proxy, "https": proxy} if proxy else None
 
         try:
-            response = await asyncio.to_thread(requests.post, url, json=payload, proxies=proxies, timeout=90)
+            response = await asyncio.to_thread(requests.post, url, json=payload, proxies=proxies, timeout=300)
             if response.status_code != 200:
                 return {"error": f"API Error {response.status_code}: {response.text}"}
 

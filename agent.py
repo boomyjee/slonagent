@@ -480,7 +480,15 @@ class Agent:
                         continue
 
                     await self.transport.on_tool_call(name, args)
-                    result = await skill.dispatch_tool_call(fc)
+                    tool_task = asyncio.create_task(skill.dispatch_tool_call(fc))
+                    tool_stop_task = asyncio.create_task(self._stop_event.wait())
+                    await asyncio.wait({tool_task, tool_stop_task}, return_when=asyncio.FIRST_COMPLETED)
+                    tool_stop_task.cancel()
+                    if self._stop_event.is_set():
+                        tool_task.cancel()
+                        logging.info("[agent] tool %s cancelled by /stop", name)
+                        return
+                    result = tool_task.result()
                     await self.transport.on_tool_result(name, result)
                     extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
                     tool_turns.append({
