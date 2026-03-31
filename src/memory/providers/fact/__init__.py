@@ -84,6 +84,7 @@ class FactProvider(BaseProvider):
 
         self._embedding_model = embedding_model
         self.storage: Storage | None = None
+        self._current_recall_ids: dict[str, str] = {}  # short_id → full fact_id
 
     async def start(self):
         await super().start()
@@ -163,102 +164,62 @@ class FactProvider(BaseProvider):
         retain(items, self._llm, self._model_name, self.storage,
                with_observations=self._auto_consolidate)
 
-    async def _recall_text(self, query: str, query_label: str, max_tokens: int | None = None, budget: str = "mid", include_chunks: bool = False) -> str:
-        """Три параллельных recall (observations / documents / conversations) + форматирование."""
-        total_tokens = max_tokens or self._recall_max_tokens
-        q_vec = await asyncio.to_thread(self.storage.encode_query, query)
-
-        obs_resp, doc_resp, conv_resp = await asyncio.gather(
-            recall_async(
-                query, q_vec, self.storage,
-                types=["observation"],
-                max_tokens=total_tokens // 3,
-                budget=budget,
-                rerank_model=self._rerank_model,
-                include_chunks=include_chunks,
-            ),
-            recall_async(
-                query, q_vec, self.storage,
-                types=["world", "experience"],
-                is_real_document=True,
-                max_tokens=total_tokens // 3,
-                budget=budget,
-                rerank_model=self._rerank_model,
-                include_chunks=include_chunks,
-            ),
-            recall_async(
-                query, q_vec, self.storage,
-                types=["world", "experience"],
-                is_real_document=False,
-                max_tokens=total_tokens // 3,
-                budget=budget,
-                rerank_model=self._rerank_model,
-                include_chunks=include_chunks,
-            ),
-        )
-
-        seen_chunk_ids: set[str] = set()
-
-        def _format_result(r) -> str:
-            line = f"- {r.fact}"
-            if r.chunk_text and r.chunk_id:
-                if r.chunk_id not in seen_chunk_ids:
-                    seen_chunk_ids.add(r.chunk_id)
-                    line += f"\n  [chunk: {r.chunk_text}]"
-                else:
-                    line += "\n  [исходный чанк уже показан выше]"
-            return line
-
-        obs_lines = [_format_result(r) for r in obs_resp.results]
-        doc_by_id: dict[str, list[str]] = {}
-        for r in doc_resp.results:
-            doc_by_id.setdefault(r.document_id, []).append(f"  {_format_result(r)}")
-        conv_lines = [_format_result(r) for r in conv_resp.results]
-
-        parts = []
-        if conv_lines:
-            parts.append("Из разговоров:\n" + "\n".join(conv_lines))
-        if obs_lines:
-            parts.append("Синтезированные наблюдения (выведены из фактов):\n" + "\n".join(obs_lines))
-        for doc_id, lines in doc_by_id.items():
-            parts.append(
-                f"Из документа [id={doc_id}] (факты документа, не реальные события):\n"
-                + "\n".join(lines)
-            )
-
-        if not parts:
-            return ""
-
-        pending = max(obs_resp.pending_consolidation, doc_resp.pending_consolidation, conv_resp.pending_consolidation)
-        if pending > 0:
-            parts.append(
-                f"⚠ Память не до конца обработана "
-                f"({pending} необработанных фактов — наблюдения ещё синтезируются)."
-            )
-
-        body = "\n\n".join(parts)
-        return (
-            f'<fact_memories sorted_by_relevance="1" query="{query_label}">\n'
-            + body + "\n"
-            "</fact_memories>\n\n"
-            "Управляй долгосрочной памятью: fact_recall, fact_reflect"
-        )
-
     async def get_context_prompt(self, user_text: str = "") -> str:
         """Автоматический recall по тексту пользователя → системный промпт."""
-        if not self._auto_recall:
+        if not self._auto_recall or not user_text:
             return (
                 "Если для ответа нужны конкретные факты — о пользователе, его жизни, "
                 "предпочтениях, людях, событиях, проектах, документах или любых других "
                 "темах из прошлых разговоров — сделай fact_recall перед ответом. "
                 "Не угадывай то, что можно найти в памяти."
             )
-        if not user_text:
-            return ""
         try:
-            return await self._recall_text(user_text[:1500], query_label="$LAST_USER_MESSAGE")
+            q_vec = await asyncio.to_thread(self.storage.encode_query, user_text[:1500])
+            resp = await recall_async(
+                user_text[:1500], q_vec, self.storage,
+                types=None,
+                max_tokens=self._recall_max_tokens,
+                budget="mid",
+                rerank_model=self._rerank_model,
+            )
+            self._current_recall_ids = {r.fact_id.split("-")[0]: r.fact_id for r in resp.results}
+
+            def _fmt(r) -> str:
+                return f"- [{r.fact_id.split('-')[0]}] {r.fact}"
+
+            obs_lines, conv_lines = [], []
+            doc_by_id: dict[str, list[str]] = {}
+            for r in resp.results:
+                if r.fact_type == "observation":
+                    obs_lines.append(_fmt(r))
+                elif r.is_real_document and r.document_id:
+                    doc_by_id.setdefault(r.document_id, []).append(f"  {_fmt(r)}")
+                else:
+                    conv_lines.append(_fmt(r))
+
+            parts = []
+            if conv_lines:
+                parts.append("Из разговоров:\n" + "\n".join(conv_lines))
+            if obs_lines:
+                parts.append("Синтезированные наблюдения:\n" + "\n".join(obs_lines))
+            for doc_id, lines in doc_by_id.items():
+                parts.append(f"Из документа [id={doc_id}]:\n" + "\n".join(lines))
+
+            if not parts:
+                self._current_recall_ids = {}
+                return ""
+
+            body = "\n\n".join(parts)
+            return (
+                f'<fact_memories query="$LAST_USER_MESSAGE">\n{body}\n</fact_memories>\n\n'
+                "Эти факты доступны только в текущем ходу. "
+                "Если ты использовал какие-то из них при формировании ответа — "
+                "вызови fact_context_used с их id ([xxxxxxxx]) сразу после ответа. "
+                "Передавай только id из блока выше, только для этого ответа. "
+                "Не вызывай если факты не пригодились."
+            )
         except Exception as e:
-            log.warning("[FactProvider] recall for context failed: %s", e, exc_info=True)
+            log.warning("[FactProvider] auto-recall failed: %s", e, exc_info=True)
             return ""
 
     # ── Tools ────────────────────────────────────────────────────────────────────
@@ -277,10 +238,64 @@ class FactProvider(BaseProvider):
         query: Annotated[str, "Поисковый запрос — утверждение или вопрос, не набор ключевых слов"],
         max_tokens: Annotated[int, "Мягкий лимит токенов в ответе (по умолчанию 10000)"] = 10_000,
         budget: Annotated[str, "Глубина поиска: low — один конкретный факт; mid — стандартный вопрос; high — нужно много фактов (история персонажа, сравнение, анализ). По умолчанию mid"] = "mid",
+        # include_chunks: bool = False,  # включить исходный чанк под каждым фактом
     ) -> dict:
         try:
-            body = await self._recall_text(query[:1500], query_label="$TOOL_QUERY", max_tokens=max_tokens, budget=budget)
-            return {"memories": body or "Ничего не найдено."}
+            q_vec = await asyncio.to_thread(self.storage.encode_query, query[:1500])
+            obs_resp, doc_resp, conv_resp = await asyncio.gather(
+                recall_async(
+                    query[:1500], q_vec, self.storage,
+                    types=["observation"],
+                    max_tokens=max_tokens // 3,
+                    budget=budget,
+                    rerank_model=self._rerank_model,
+                    include_chunks=False,
+                ),
+                recall_async(
+                    query[:1500], q_vec, self.storage,
+                    types=["world", "experience"],
+                    is_real_document=True,
+                    max_tokens=max_tokens // 3,
+                    budget=budget,
+                    rerank_model=self._rerank_model,
+                    include_chunks=False,
+                ),
+                recall_async(
+                    query[:1500], q_vec, self.storage,
+                    types=["world", "experience"],
+                    is_real_document=False,
+                    max_tokens=max_tokens // 3,
+                    budget=budget,
+                    rerank_model=self._rerank_model,
+                    include_chunks=False,
+                ),
+            )
+            seen_chunks: set[str] = set()  # нужен когда include_chunks включён
+
+            def _fmt(r) -> str:
+                line = f"- {r.fact}"
+                if r.chunk_text and r.chunk_id and r.chunk_id not in seen_chunks:
+                     seen_chunks.add(r.chunk_id)
+                     line += f"\n  [chunk: {r.chunk_text}]"
+                return line
+
+            doc_by_id: dict[str, list[str]] = {}
+            for r in doc_resp.results:
+                doc_by_id.setdefault(r.document_id, []).append(f"  {_fmt(r)}")
+
+            parts = []
+            if conv_resp.results:
+                parts.append("Из разговоров:\n" + "\n".join(_fmt(r) for r in conv_resp.results))
+            if obs_resp.results:
+                parts.append("Синтезированные наблюдения:\n" + "\n".join(_fmt(r) for r in obs_resp.results))
+            for doc_id, lines in doc_by_id.items():
+                parts.append(f"Из документа [id={doc_id}] (факты документа, не реальные события):\n" + "\n".join(lines))
+
+            if not parts:
+                return {"memories": "Ничего не найдено."}
+
+            body = "\n\n".join(parts)
+            return {"memories": f'<fact_memories query="$TOOL_QUERY">\n{body}\n</fact_memories>'}
         except Exception as e:
             log.warning("[FactProvider] recall tool failed: %s", e, exc_info=True)
             return {"error": str(e)}
@@ -353,3 +368,21 @@ class FactProvider(BaseProvider):
         except Exception as e:
             log.warning("[FactProvider] reflect failed: %s", e, exc_info=True)
             return {"error": str(e)}
+
+    @tool("Зафиксировать в истории, какие факты из автоматического контекста повлияли на ответ.")
+    async def context_used(
+        self,
+        ids: Annotated[list[str], "Список коротких id фактов (формат [xxxxxxxx] из блока <fact_memories>), которые повлияли на ответ"],
+    ) -> dict:
+        full_ids = [self._current_recall_ids[i] for i in ids if i in self._current_recall_ids]
+        self._current_recall_ids = {}
+        if not full_ids:
+            return {"used_facts": [], "warning": "переданные id не совпадают с фактами текущего хода"}
+        placeholders = ", ".join("?" for _ in full_ids)
+        rows = await asyncio.to_thread(
+            lambda: self.storage.conn.execute(
+                f"SELECT fact FROM facts WHERE fact_id IN ({placeholders})",
+                full_ids,
+            ).fetchall()
+        )
+        return {"used_facts": [r["fact"] for r in rows]}
