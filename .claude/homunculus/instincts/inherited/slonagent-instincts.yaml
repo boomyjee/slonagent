@@ -1,0 +1,707 @@
+# Instincts generated from https://github.com/boomyjee/slonagent
+# Generated: 2026-03-31T13:20:55.828Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: slonagent-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat, fix, refactor, docs, chore
+
+## Evidence
+
+- 200 commits analyzed
+- Detected conventional commit pattern
+- Examples: chore: pycache to .venv via sitecustomize, pytest cache to .venv, move IDEAS to docs/, remove redundant pyrightconfig, fix(diary): retry LLM on 503/429, send all photos as multi-collage album
+
+---
+id: slonagent-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Commit Length
+
+## Action
+
+Write moderate-length commit messages (~67 characters)
+
+## Evidence
+
+- Average commit message length: 67 chars
+- Based on 200 commits
+
+---
+id: slonagent-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: slonagent-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: slonagent-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: slonagent-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: slonagent-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: slonagent-test-types
+trigger: "when planning tests for a feature"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Test Types
+
+## Action
+
+Write unit, integration tests to match project standards
+
+## Evidence
+
+- Test types detected: unit, integration
+- Coverage config: no
+
+---
+id: slonagent-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~13x per month
+- Files: **/*.test.*
+
+---
+id: slonagent-workflow-refactoring
+trigger: "when refactoring code"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Workflow Refactoring
+
+## Action
+
+Follow the refactoring workflow:
+1. Ensure tests pass before refactor
+2. Refactor code structure
+3. Verify tests still pass
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: src/**/*
+
+---
+id: slonagent-workflow-diary-enrichment-feature-or-fix
+trigger: "when doing diary enrichment feature or fix"
+confidence: 0.8
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Workflow Diary Enrichment Feature Or Fix
+
+## Action
+
+Follow the diary-enrichment-feature-or-fix workflow:
+1. Edit scripts/diary_enchiment/__main__.py to implement feature or fix.
+2. Optionally edit scripts/diary_enchiment/validate.py for validation-related changes.
+3. Commit with a message prefixed by feat(diary), fix(diary), ui(diary), or prompt(diary).
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~6x per month
+- Files: scripts/diary_enchiment/__main__.py, scripts/diary_enchiment/validate.py
+
+---
+id: slonagent-workflow-agent-py-feature-or-fix
+trigger: "when doing agent py feature or fix"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Workflow Agent Py Feature Or Fix
+
+## Action
+
+Follow the agent-py-feature-or-fix workflow:
+1. Edit agent.py to implement the new feature or fix.
+2. Optionally edit related files in src/skills/ or src/transport/ for supporting changes.
+3. Commit with a message prefixed by feat(agent), fix, or refactor(agent).
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: agent.py, src/skills/, src/transport/
+
+---
+id: slonagent-workflow-transport-telegram-feature-or-fix
+trigger: "when doing transport telegram feature or fix"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Workflow Transport Telegram Feature Or Fix
+
+## Action
+
+Follow the transport-telegram-feature-or-fix workflow:
+1. Edit src/transport/telegram.py to add feature or fix.
+2. Optionally update agent.py or related transport files for integration.
+3. Commit with a message prefixed by fix(telegram), feat, or similar.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: src/transport/telegram.py
+
+---
+id: slonagent-workflow-fact-provider-feature-or-fix
+trigger: "when doing fact provider feature or fix"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Workflow Fact Provider Feature Or Fix
+
+## Action
+
+Follow the fact-provider-feature-or-fix workflow:
+1. Edit src/memory/providers/fact/ (e.g., __init__.py, retain.py, recall.py) to implement feature or fix.
+2. Optionally add or update scripts (e.g., scripts/retain_diary.py, scripts/migrate_fact_sources.py) for migrations or new flows.
+3. Commit with a message prefixed by feat(retain), feat(recall), fix, etc.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: src/memory/providers/fact/__init__.py, src/memory/providers/fact/retain.py, src/memory/providers/fact/recall.py
+
+---
+id: slonagent-workflow-readme-or-ideas-docs-update
+trigger: "when doing readme or ideas docs update"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Workflow Readme Or Ideas Docs Update
+
+## Action
+
+Follow the readme-or-ideas-docs-update workflow:
+1. Edit README.md or IDEAS.md with new documentation or ideas.
+2. Commit with a message prefixed by docs or docs(ideas).
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: README.md, IDEAS.md
+
+---
+id: slonagent-workflow-llm-provider-migration-or-refactor
+trigger: "when doing llm provider migration or refactor"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/boomyjee/slonagent
+---
+
+# Slonagent Workflow Llm Provider Migration Or Refactor
+
+## Action
+
+Follow the llm-provider-migration-or-refactor workflow:
+1. Edit requirements.txt and .config.sample.json for new provider.
+2. Update all provider usages in src/memory/providers/, src/skills/, src/transport/, and tests.
+3. Commit with a message indicating migration or refactor.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: requirements.txt, .config.sample.json, src/memory/providers/
+
+---
+id: slonagent-instinct-file-naming-camelcase
+trigger: "When creating or renaming a source file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct File Naming Camelcase
+
+## Action
+
+Name the file using camelCase (e.g., myFile.py)
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.files
+
+---
+id: slonagent-instinct-function-naming-camelcase
+trigger: "When defining a function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Function Naming Camelcase
+
+## Action
+
+Name the function using camelCase (e.g., processInput)
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.functions
+
+---
+id: slonagent-instinct-class-naming-pascalcase
+trigger: "When defining a class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Class Naming Pascalcase
+
+## Action
+
+Name the class using PascalCase (e.g., MyClass)
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.classes
+
+---
+id: slonagent-instinct-constant-naming-screaming-snake-case
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Constant Naming Screaming Snake Case
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE (e.g., MAX_SIZE)
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.constants
+
+---
+id: slonagent-instinct-import-style-relative
+trigger: "When importing modules within the package"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Import Style Relative
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in codeStyle.importStyle
+
+---
+id: slonagent-instinct-export-style-named
+trigger: "When exporting functions or classes"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Export Style Named
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in codeStyle.exportStyle
+
+---
+id: slonagent-instinct-test-location-separate
+trigger: "When adding or organizing tests"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Test Location Separate
+
+## Action
+
+Place test files in a separate 'tests' directory
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation
+
+---
+id: slonagent-instinct-test-types-unit-integration
+trigger: "When writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Test Types Unit Integration
+
+## Action
+
+Write both unit and integration tests as appropriate
+
+## Evidence
+
+- Pattern in testing.testTypes
+
+---
+id: slonagent-instinct-test-file-pattern
+trigger: "When naming a test file"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Test File Pattern
+
+## Action
+
+Use the pattern '*.test.ts' for test files
+
+## Evidence
+
+- Pattern in testing.filePattern
+
+---
+id: slonagent-instinct-git-commit-conventional
+trigger: "When writing a commit message"
+confidence: 0.95
+domain: git
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Git Commit Conventional
+
+## Action
+
+Use Conventional Commits format with prefixes: feat, fix, refactor, docs, chore
+
+## Evidence
+
+- Pattern in commits.prefixes
+- Examples in commits.examples
+
+---
+id: slonagent-instinct-git-commit-prefix-scope
+trigger: "When the change is specific to a module or feature"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Git Commit Prefix Scope
+
+## Action
+
+Use a scope in the commit prefix, e.g., feat(agent):, fix(diary):
+
+## Evidence
+
+- Examples in commits.examples
+
+---
+id: slonagent-instinct-git-commit-length
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Git Commit Length
+
+## Action
+
+Keep the commit message concise, around 67 characters on average
+
+## Evidence
+
+- Pattern in commits.averageLength
+
+---
+id: slonagent-instinct-diary-enrichment-workflow
+trigger: "When someone wants to add, fix, or improve diary enrichment logic or UI"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Diary Enrichment Workflow
+
+## Action
+
+Edit scripts/diary_enchiment/__main__.py (and optionally validate.py), commit with feat(diary), fix(diary), ui(diary), or prompt(diary) prefix
+
+## Evidence
+
+- Workflow: diary-enrichment-feature-or-fix
+- Commits with feat(diary), fix(diary), etc.
+
+---
+id: slonagent-instinct-agent-py-feature-or-fix-workflow
+trigger: "When someone wants to change core agent behavior, tool execution, or add new agent features"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Agent Py Feature Or Fix Workflow
+
+## Action
+
+Edit agent.py (and optionally src/skills/ or src/transport/), commit with feat(agent), fix, or refactor(agent) prefix
+
+## Evidence
+
+- Workflow: agent-py-feature-or-fix
+- Commits with feat(agent), fix, refactor(agent)
+
+---
+id: slonagent-instinct-transport-telegram-feature-or-fix-workflow
+trigger: "When someone wants to improve Telegram bot integration or fix related issues"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Transport Telegram Feature Or Fix Workflow
+
+## Action
+
+Edit src/transport/telegram.py (and optionally related transport files), commit with fix(telegram), feat, or similar prefix
+
+## Evidence
+
+- Workflow: transport-telegram-feature-or-fix
+- Commits with fix(telegram), feat
+
+---
+id: slonagent-instinct-fact-provider-feature-or-fix-workflow
+trigger: "When someone wants to improve memory/fact extraction, recall, or retention"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Fact Provider Feature Or Fix Workflow
+
+## Action
+
+Edit src/memory/providers/fact/ (and optionally related scripts), commit with feat(retain), feat(recall), fix, etc. prefix
+
+## Evidence
+
+- Workflow: fact-provider-feature-or-fix
+- Commits with feat(retain), feat(recall), fix
+
+---
+id: slonagent-instinct-readme-or-ideas-docs-update-workflow
+trigger: "When someone wants to document new features, update architecture explanations, or log new ideas"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Readme Or Ideas Docs Update Workflow
+
+## Action
+
+Edit README.md or IDEAS.md, commit with docs or docs(ideas) prefix
+
+## Evidence
+
+- Workflow: readme-or-ideas-docs-update
+- Commits with docs, docs(ideas)
+
+---
+id: slonagent-instinct-llm-provider-migration-or-refactor-workflow
+trigger: "When someone wants to switch LLM providers or refactor all LLM-related code"
+confidence: 0.8
+domain: workflow
+source: repo-analysis
+source_repo: boomyjee/slonagent
+---
+
+# Slonagent Instinct Llm Provider Migration Or Refactor Workflow
+
+## Action
+
+Edit requirements.txt, .config.sample.json, and update all provider usages in src/memory/providers/, src/skills/, src/transport/, and tests; commit with migration or refactor message
+
+## Evidence
+
+- Workflow: llm-provider-migration-or-refactor
+- Commits indicating migration or refactor
+
