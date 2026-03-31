@@ -5,7 +5,7 @@ log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser
+from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from agent import Skill, tool
 from src.transport.base import BaseTransport
 
@@ -164,6 +164,20 @@ class TelegramSkill(Skill):
         else:
             media = [InputMediaPhoto(media=FSInputFile(p)) for p in host_paths]
             await self.transport.bot.send_media_group(self.transport.chat_id, media, message_thread_id=self.transport.thread_id)
+        return {"status": "ok"}
+
+    @tool("Предложить пользователю варианты ответа в виде кнопок. Пользователь нажимает — его выбор приходит как обычное сообщение.")
+    async def suggest_options(
+        self,
+        text: Annotated[str, "Текст сообщения перед кнопками"],
+        options: Annotated[list[str], "Варианты ответа (каждый станет кнопкой)"],
+    ):
+        kb = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text=opt)] for opt in options],
+            one_time_keyboard=True,
+            resize_keyboard=True,
+        )
+        await self.transport._send(_markdown_to_html(text), parse_mode="HTML", reply_markup=kb)
         return {"status": "ok"}
 
     @tool("Скачать файл, отправленный пользователем, в рабочую директорию. Путь назначения должен быть внутри /workspace/.")
