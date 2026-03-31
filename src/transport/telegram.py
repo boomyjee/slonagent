@@ -5,7 +5,7 @@ log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, InlineKeyboardMarkup, InlineKeyboardButton
 from agent import Skill, tool
 from src.transport.base import BaseTransport
 
@@ -166,17 +166,23 @@ class TelegramSkill(Skill):
             await self.transport.bot.send_media_group(self.transport.chat_id, media, message_thread_id=self.transport.thread_id)
         return {"status": "ok"}
 
-    @tool("Предложить пользователю варианты ответа в виде кнопок. Пользователь нажимает — его выбор приходит как обычное сообщение.")
-    async def suggest_options(
+    @tool(
+        "Предложить пользователю варианты ответа в виде кнопок под сообщением. "
+        "Пользователь нажимает — его выбор приходит как обычное сообщение. "
+        "ВАЖНО: текст каждой кнопки не должен превышать 57 байт в UTF-8 "
+        "(~28 кириллических символов или ~57 латинских). Если вариант длиннее — сократи его."
+    )
+    async def suggest_user_answers(
         self,
         text: Annotated[str, "Текст сообщения перед кнопками"],
-        options: Annotated[list[str], "Варианты ответа (каждый станет кнопкой)"],
+        options: Annotated[list[str], "Варианты ответа. Каждый не длиннее 57 байт в UTF-8"],
     ):
-        kb = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text=opt)] for opt in options],
-            one_time_keyboard=True,
-            resize_keyboard=True,
-        )
+        too_long = [opt for opt in options if len(f"answer:{opt}".encode()) > 64]
+        if too_long:
+            return {"error": f"Слишком длинные варианты (>57 байт): {too_long}. Сократи их и вызови снова."}
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=opt, callback_data=f"answer:{opt}") for opt in options]
+        ])
         await self.transport._send(_markdown_to_html(text), parse_mode="HTML", reply_markup=kb)
         return {"status": "ok"}
 

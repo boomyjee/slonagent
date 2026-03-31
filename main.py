@@ -159,7 +159,6 @@ async def run_telegram():
         await agent.transport.handle_message(message)
 
     async def on_callback_query(callback: CallbackQuery):
-        if callback.data not in ("new_agent_clean", "new_agent_clone"): return
         if not callback.from_user or callback.from_user.id not in allowed_user_ids: return
 
         chat_id = callback.message.chat.id
@@ -167,13 +166,22 @@ async def run_telegram():
 
         await callback.answer()
         await callback.message.edit_reply_markup(reply_markup=None)
-        status = await callback.message.answer("⏳ Создаю агента...")
 
-        copy_from = main_agent if callback.data == "new_agent_clone" else None
-        await make_agent(chat_id, thread_id, force_create=True, copy_memory_from=copy_from)
+        if callback.data.startswith("answer:"):
+            text = callback.data[len("answer:"):]
+            agent = await make_agent(chat_id, thread_id, force_create=False)
+            if agent:
+                await callback.message.answer(text)
+                await agent.transport.process_message(content_parts=[{"type": "text", "text": text}])
+            return
 
-        label = "✅ Клон создан" if callback.data == "new_agent_clone" else "✅ Агент создан"
-        await status.edit_text(label)
+        if callback.data in ("new_agent_clean", "new_agent_clone"):
+            status = await callback.message.answer("⏳ Создаю агента...")
+            copy_from = main_agent if callback.data == "new_agent_clone" else None
+            await make_agent(chat_id, thread_id, force_create=True, copy_memory_from=copy_from)
+
+            label = "✅ Клон создан" if callback.data == "new_agent_clone" else "✅ Агент создан"
+            await status.edit_text(label)
 
     dp.message()(on_message)
     dp.callback_query()(on_callback_query)

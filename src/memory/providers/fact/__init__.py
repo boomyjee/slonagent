@@ -377,7 +377,7 @@ class FactProvider(BaseProvider):
         full_ids = [self._current_recall_ids[i] for i in ids if i in self._current_recall_ids]
         self._current_recall_ids = {}
         if not full_ids:
-            return {"used_facts": [], "warning": "переданные id не совпадают с фактами текущего хода"}
+            return {"error": "переданные id не совпадают с фактами текущего хода"}
         placeholders = ", ".join("?" for _ in full_ids)
         rows = await asyncio.to_thread(
             lambda: self.storage.conn.execute(
