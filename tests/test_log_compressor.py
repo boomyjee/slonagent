@@ -293,3 +293,161 @@ def _make_response(text: str):
     resp = MagicMock()
     resp.choices = [choice]
     return resp
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# _optimize_for_context — items collapsed preservation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestOptimizeForContextCollapsed:
+
+    def test_preserves_items_collapsed_marker(self):
+        text = "* [72 items collapsed - ID: b1fa] some summary"
+        result = _optimize_for_context(text)
+        assert "72 items collapsed" in result
+
+    def test_removes_regular_semantic_tags(self):
+        result = _optimize_for_context("* [label, context] some observation")
+        assert "[label, context]" not in result
+
+    def test_keeps_checkmark_emoji(self):
+        result = _optimize_for_context("* ✅ Task done")
+        assert "✅" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# _split_recent — tool-pair boundary
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSplitRecentToolPair:
+
+    def _make_compressor(self, recent_tokens=99999, min_recent_turns=0):
+        return LogCompressor(
+            model_name="test", api_key="test", base_url="http://test",
+            recent_tokens=recent_tokens,
+            min_recent_turns=min_recent_turns,
+            compress_after_tokens=1,
+            reflect_after_tokens=999999,
+        )
+
+    def test_tool_turn_not_first_in_recent(self):
+        """recent не должен начинаться с tool-тура без парного assistant перед ним."""
+        turns = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "1", "content": "result"},
+            {"role": "assistant", "content": "done"},
+        ]
+        c = self._make_compressor(recent_tokens=1, min_recent_turns=0)
+        to_obs, recent = c._split_recent(turns)
+        assert not (recent and isinstance(recent[0], dict) and recent[0].get("role") == "tool")
+
+    def test_tool_turns_moved_to_observe(self):
+        """Если граница режет между assistant(tool_calls) и tool — tool уходит в to_observe."""
+        tool_turn = {"role": "tool", "tool_call_id": "1", "content": "x" * 200}
+        turns = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            tool_turn,
+            {"role": "user", "content": "x" * 200},
+            {"role": "assistant", "content": "x" * 200},
+        ]
+        c = self._make_compressor(recent_tokens=120, min_recent_turns=0)
+        to_obs, recent = c._split_recent(turns)
+        if recent and recent[0].get("role") == "tool":
+            pytest.fail("recent starts with tool turn")
+        assert to_obs + recent == turns
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# compress — edge cases
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestLogCompressorEdgeCases:
+
+    def _make_compressor(self, tmp_path, reflect_after=999999):
+        agent = make_agent(tmp_path)
+        c = LogCompressor(
+            model_name="test", api_key="test", base_url="http://test",
+            recent_tokens=100,
+            min_recent_turns=1,
+            compress_after_tokens=1,
+            reflect_after_tokens=reflect_after,
+        )
+        c.register(agent)
+        return c
+
+    def _mock_llm(self, c, response_text: str):
+        c._client.chat.completions.create = AsyncMock(return_value=_make_response(response_text))
+
+    @pytest.mark.asyncio
+    async def test_observer_empty_returns_original_turns(self, tmp_path):
+        """Если observer вернул пустую строку — turns не меняются."""
+        c = self._make_compressor(tmp_path)
+        self._mock_llm(c, "")
+        turns = make_turns(10, chars=500)
+        result = await c.compress(turns)
+        assert result == turns
+
+    @pytest.mark.asyncio
+    async def test_reflector_triggered_when_obs_exceed_threshold(self, tmp_path):
+        """Рефлектор вызывается когда observations превышают reflect_after_tokens."""
+        # reflect_after_tokens=1 — любые observations превысят порог
+        c = self._make_compressor(tmp_path, reflect_after=1)
+
+        # observer возвращает большой блок (~100 токенов)
+        big_obs = "<observations>\n* 🔴 (10:00) " + "x" * 400 + "\n</observations>"
+        # reflector возвращает маленький — гарантированно меньше по токенам
+        small_reflected = "<observations>\n* 🔴 (10:00) condensed\n</observations>"
+
+        call_count = 0
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return _make_response(big_obs if call_count == 1 else small_reflected)
+
+        c._client.chat.completions.create = side_effect
+        result = await c.compress(make_turns(10, chars=500))
+
+        assert call_count == 2
+        om = next(t for t in result if isinstance(t, dict) and t.get("_observation_message"))
+        assert "condensed" in om["_raw_observations"]
+
+    @pytest.mark.asyncio
+    async def test_reflector_escalates_compression_level(self, tmp_path):
+        """Если reflector не сжимает — уровень растёт до тех пор пока не достигнет 4."""
+        c = self._make_compressor(tmp_path, reflect_after=1)
+
+        # observer даёт 400 символов → ~100 токенов
+        big_obs = "* 🔴 (10:00) " + "x" * 400
+        obs_response = f"<observations>\n{big_obs}\n</observations>"
+
+        # reflector всегда возвращает такой же размер → не сжимает → уровень растёт
+        call_count = 0
+
+        async def side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return _make_response(obs_response)
+
+        c._client.chat.completions.create = side_effect
+        await c.compress(make_turns(10, chars=500))
+
+        # 1 вызов observer + 5 вызовов reflector (уровни 0→1→2→3→4, на 4 останавливается)
+        assert call_count == 6
+
+    @pytest.mark.asyncio
+    async def test_compress_no_to_observe_returns_original(self, tmp_path):
+        """Если все turns попали в recent — turns не меняются."""
+        c = LogCompressor(
+            model_name="test", api_key="test", base_url="http://test",
+            recent_tokens=999999,
+            min_recent_turns=0,
+            compress_after_tokens=1,
+            reflect_after_tokens=999999,
+        )
+        c.register(make_agent(tmp_path))
+        turns = make_turns(4, chars=10)
+        result = await c.compress(turns)
+        assert result == turns
