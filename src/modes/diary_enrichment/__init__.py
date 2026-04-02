@@ -57,12 +57,19 @@ class EnrichmentSkill(Skill):
         "Для каждого дня передаётся ПОЛНЫЙ текст дня с [ID:Category:Name] маркерами. "
         "Первый ID каждого дня — обязательно [ID:Loc:...]."
     )
-    async def enrich_diary(self, days: Annotated[list, "Массив {date, text} с аннотированным текстом"]) -> dict:
+    async def enrich_diary(self, days: Annotated[str, 'JSON массив объектов [{"date": "YYYY.MM.DD", "text": "полный аннотированный текст дня"}]'] = "") -> dict:
         transport = self.agent.transport
         week = self.week
 
         if self.glossary_rejected:
             return {"error": "enrich_diary отклонён: изменение глоссария было отклонено. Исправь глоссарий и повтори."}
+
+        # Parse days from JSON string
+        if isinstance(days, str):
+            try:
+                days = json.loads(days)
+            except json.JSONDecodeError:
+                return {"error": "days must be a JSON array of {date, text} objects"}
 
         # Normalize: dict → list
         if isinstance(days, dict):
