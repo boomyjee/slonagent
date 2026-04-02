@@ -5,6 +5,9 @@ class BaseTransport:
     def set_agent(self, agent):
         self.agent = agent
 
+    def get_skill(self):
+        return None
+
     async def send_message(self, text: str, stream_id=None):
         return stream_id
 

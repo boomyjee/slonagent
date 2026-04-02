@@ -37,6 +37,7 @@ class AnecdoteLoopSkill(Skill):
             memory_providers=[],
             skills=[TellJokeSkill()],
         )
+        await sub.memory.add_turn({"role": "user", "content": "Расскажи анекдот."})
 
         while True:
             tool_calls, _ = await sub.llm(tool_choice="telljoke_tell_joke")

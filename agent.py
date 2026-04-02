@@ -180,12 +180,18 @@ class Agent:
         agent._config = cfg
         return agent
 
+    def add_transport_skill(self):
+        skill = self.transport.get_skill() if self.transport else None
+        if skill and skill not in self.skills:
+            skill.register(self)
+            self.skills.insert(0, skill)
+
     async def spawn_subagent(self, name: str, **cfg_overrides) -> "Agent":
         subagent_dir = os.path.join(self.agent_dir, "memory", "subagents", name)
         os.makedirs(subagent_dir, exist_ok=True)
         cfg_overrides.setdefault("transport", self.transport)
         agent = Agent.from_config(self._config, agent_dir=subagent_dir, **cfg_overrides)
-        await agent.start()
+        await agent.start(run_loop=False)
         self.transport.set_agent(agent)
         return agent
 
@@ -407,7 +413,7 @@ class Agent:
                 if attempt + 1 == max_retries:
                     raise
                 wait = delay * 2 ** attempt
-                logging.warning("[agent] LLM %s error, retry %d/%d in %ds: %s", label, attempt + 1, max_retries, wait, e)
+                logging.warning("[agent] LLM %s error, retry %d/%d in %ds: %s", self.model_name, attempt + 1, max_retries, wait, e)
                 await asyncio.sleep(wait)
 
     async def next_message(self) -> tuple[list, any]:
@@ -426,10 +432,11 @@ class Agent:
         logging.info("[agent] incoming: %r", user_query)
         return content_parts, user_message_id
 
-    async def start(self):
+    async def start(self, run_loop=True):
         for skill in self.skills:
             await skill.start()
-        asyncio.create_task(self.loop())
+        if run_loop:
+            asyncio.create_task(self.loop())
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
         fmt = mime_type.split("/")[-1]
@@ -523,6 +530,7 @@ class Agent:
 
 
     async def loop(self):
+        self.add_transport_skill()
         while True:
             content_parts, user_message_id = await self.next_message()
             self._stop_event.clear()

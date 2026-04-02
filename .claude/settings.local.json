@@ -5,7 +5,8 @@
       "Bash(.venv/Scripts/python.exe src/skills/sandbox/container_lib/runner.py \"memory/workspace/tools/mipt_board.py\" --introspect)",
       "Bash(.venv/Scripts/python.exe -c ':*)",
       "Bash(cd *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(.venv/Scripts/python.exe start.bat --cli)"
     ]
   }
 }

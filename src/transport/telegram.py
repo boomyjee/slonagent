@@ -241,10 +241,11 @@ class TelegramTransport(BaseTransport):
                 self._typing_task.cancel()
                 self._typing_task = None
 
+    def get_skill(self):
+        return self._skill
+
     def set_agent(self, agent):
         self.agent = agent
-        self._skill.register(agent)
-        agent.skills.insert(0, self._skill)
 
         async def update_commands():
             all_commands = {
