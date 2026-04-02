@@ -295,15 +295,19 @@ class Agent:
                     system_parts.append(skill_context)
                     await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
             self._system_instruction = "\n\n".join(system_parts)
+            self._tools = []
+            for skill in self.skills:
+                for decl in skill.get_tools():
+                    fn = decl["function"]
+                    extra = await skill.get_tool_prompt(fn["name"])
+                    if extra:
+                        decl = {"type": "function", "function": {**fn, "description": fn["description"] + "\n\n---\n" + extra}}
+                    self._tools.append(decl)
+            if self._tools:
+                tool_lines = [f"{d['function']['name']}: {d['function']['description'].splitlines()[0][:100]}" for d in self._tools]
+                await self.transport.send_system_prompt("[Tools]\n" + "\n".join(tool_lines))
         contents = self.strip_contents_private(await self.memory.get_contents())
-        tools = []
-        for skill in self.skills:
-            for decl in skill.get_tools():
-                fn = decl["function"]
-                extra = await skill.get_tool_prompt(fn["name"])
-                if extra:
-                    decl = {"type": "function", "function": {**fn, "description": fn["description"] + "\n\n---\n" + extra}}
-                tools.append(decl)
+        tools = self._tools
         messages = ([{"role": "system", "content": self._system_instruction}] if self._system_instruction else []) + contents
         logging.info("[agent] → LLM %s", self.model_name)
         max_retries, delay = 5, 0.5

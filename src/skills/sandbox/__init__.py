@@ -1,4 +1,4 @@
-import asyncio, base64, json, os, re, logging, subprocess, sys
+import ast, asyncio, base64, json, os, re, logging, subprocess
 from typing import Annotated
 from agent import Skill, tool
 
@@ -32,6 +32,8 @@ class SandboxSkill(Skill):
     def get_tools(self) -> list:
         return self._tools + self._scan_script_tools()
 
+    _AST_TYPES = {"str": "string", "int": "integer", "float": "number", "bool": "boolean"}
+
     def _scan_script_tools(self) -> list:
         self._skill_script_map = {}
         result = []
@@ -39,34 +41,107 @@ class SandboxSkill(Skill):
             if not fname.endswith(".py"):
                 continue
             script_path = os.path.join(self.tools_dir, fname)
-            for t in self._introspect_skill_script(script_path):
+            for t in self._introspect_ast(script_path):
+                t["function"]["name"] = "sandbox_" + t["function"]["name"]
                 self._skill_script_map[t["function"]["name"]] = script_path
                 result.append(t)
         return result
 
+    def _introspect_ast(self, path: str) -> list:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                tree = ast.parse(f.read())
+        except SyntaxError:
+            return []
+
+        tools = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if not any(
+                (isinstance(b, ast.Name) and b.id == "Skill") or
+                (isinstance(b, ast.Attribute) and b.attr == "Skill")
+                for b in node.bases
+            ):
+                continue
+            prefix = node.name.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider").lower()
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                desc = self._get_tool_desc(item)
+                if desc is None:
+                    continue
+                props, required = self._parse_params(item)
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": f"{prefix}_{item.name}",
+                        "description": desc,
+                        "parameters": {"type": "object", "properties": props, "required": required},
+                    }
+                })
+        return tools
+
+    @staticmethod
+    def _get_tool_desc(func: ast.FunctionDef) -> str | None:
+        for dec in func.decorator_list:
+            if isinstance(dec, ast.Call):
+                fn = dec.func
+                if (isinstance(fn, ast.Name) and fn.id == "tool") or \
+                   (isinstance(fn, ast.Attribute) and fn.attr == "tool"):
+                    if dec.args and isinstance(dec.args[0], ast.Constant):
+                        return dec.args[0].value
+        return None
+
+    def _parse_params(self, func: ast.FunctionDef) -> tuple[dict, list]:
+        props = {}
+        required = []
+        args = func.args
+        defaults_offset = len(args.args) - len(args.defaults)
+        for i, arg in enumerate(args.args):
+            if arg.arg == "self":
+                continue
+            annotation = arg.annotation
+            schema = self._annotation_to_schema(annotation)
+            props[arg.arg] = schema
+            if i < defaults_offset:
+                required.append(arg.arg)
+        return props, required
+
+    def _annotation_to_schema(self, node) -> dict:
+        if node is None:
+            return {"type": "string"}
+        # Annotated[type, "desc"]
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "Annotated":
+            elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            base = elts[0]
+            desc = elts[1].value if len(elts) > 1 and isinstance(elts[1], ast.Constant) else None
+            schema = self._base_type_schema(base)
+            if desc:
+                schema["description"] = desc
+            return schema
+        return self._base_type_schema(node)
+
+    def _base_type_schema(self, node) -> dict:
+        if isinstance(node, ast.Name):
+            return {"type": self._AST_TYPES.get(node.id, "string")}
+        # list[str] etc
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "list":
+            item_type = "string"
+            if isinstance(node.slice, ast.Name):
+                item_type = self._AST_TYPES.get(node.slice.id, "string")
+            return {"type": "array", "items": {"type": item_type}}
+        return {"type": "string"}
+
     def _lib_dir(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "container_lib")
-
-    def _introspect_skill_script(self, path: str) -> list:
-        try:
-            runner = os.path.join(self._lib_dir(), "runner.py")
-            env = {**os.environ, "PYTHONPATH": self._lib_dir()}
-            result = subprocess.run(
-                [sys.executable, runner, path, "--introspect"],
-                capture_output=True, text=True, encoding="utf-8", env=env, timeout=10,
-            )
-            if result.returncode == 0:
-                return json.loads(result.stdout).get("tools", [])
-        except Exception as e:
-            logging.warning("[sandbox] introspect failed for %s: %s", path, e)
-        return []
 
     async def dispatch_tool_call(self, tool_call: dict) -> dict:
         name = tool_call["function"]["name"]
         if name in self._skill_script_map:
             script_path = self._skill_script_map[name]
             args = json.loads(tool_call["function"].get("arguments") or "{}")
-            return await self._dispatch_skill_script(script_path, name, args)
+            return await self._dispatch_skill_script(script_path, name.removeprefix("sandbox_"), args)
         return await super().dispatch_tool_call(tool_call)
 
     async def _dispatch_skill_script(self, script_path, tool_name, args):
@@ -153,7 +228,7 @@ class SandboxSkill(Skill):
         lines.append(
             "Python-скрипты в /workspace/tools/ автоматически становятся инструментами.\n"
             "Определи Skill-подклассы — они будут найдены автоматически:\n"
-            "  from slonagent import Skill, tool\n"
+            "  from agent import Skill, tool\n"
             "  class MySkill(Skill):\n"
             "      @tool('Описание')\n"
             "      async def my_tool(self, arg: Annotated[str, 'Desc']) -> dict:\n"
