@@ -200,7 +200,6 @@ class Agent:
         cfg_overrides.setdefault("transport", self.transport)
         agent = Agent.from_config(self._config, agent_dir=subagent_dir, **cfg_overrides)
         await agent.start(run_loop=False)
-        self.transport.set_agent(agent)
 
         async def _propagate_stop():
             await agent._stop_event.wait()

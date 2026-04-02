@@ -158,7 +158,13 @@ class SandboxSkill(Skill):
             *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
 
-        _ALLOWED = {"agent.transport.send_message", "agent.transport.send_thinking", "agent.next_message"}
+        _ALLOWED = {
+            "agent.transport.send_message", 
+            "agent.transport.send_thinking", 
+            "agent.transport.send_processing", 
+            "agent.spawn_subagent",
+            "agent.next_message", 
+        }
 
         proc.stdin.write(json.dumps({"method": "call", "args": [tool_name], "kwargs": args}).encode() + b"\n")
         await proc.stdin.drain()
