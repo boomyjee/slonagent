@@ -3,7 +3,9 @@
     "allow": [
       "Bash(.venv/Scripts/python.exe src/skills/sandbox/container_lib/runner.py \"memory/workspace/tools/get_user.py\" --introspect)",
       "Bash(.venv/Scripts/python.exe src/skills/sandbox/container_lib/runner.py \"memory/workspace/tools/mipt_board.py\" --introspect)",
-      "Bash(.venv/Scripts/python.exe -c ':*)"
+      "Bash(.venv/Scripts/python.exe -c ':*)",
+      "Bash(cd * && git *)",
+      "Bash(git *)"
     ]
   }
 }
