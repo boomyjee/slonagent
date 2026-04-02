@@ -23,5 +23,8 @@ class BaseTransport:
     async def process_message(self, content_parts: list, user_message_id=None):
         await self.agent.process_message(content_parts=content_parts, user_message_id=user_message_id)
 
+    async def send_processing(self, active: bool):
+        pass
+
     async def inject_message(self, text: str):
         pass

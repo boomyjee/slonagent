@@ -1,4 +1,4 @@
-import asyncio, base64, json, os, re, logging, subprocess
+import asyncio, base64, json, os, re, logging, subprocess, sys
 from typing import Annotated
 from agent import Skill, tool
 
@@ -19,7 +19,7 @@ class SandboxSkill(Skill):
         self.image = image
         self.default_timeout = default_timeout
         self.runtime = runtime
-        self._script_map: dict[str, tuple[str, str]] = {}
+        self._skill_script_map: dict[str, str] = {}
 
     async def start(self):
         self.workspace_dir = self.workspace_dir or os.path.join(self.agent.memory.memory_dir, "workspace")
@@ -33,52 +33,84 @@ class SandboxSkill(Skill):
         return self._tools + self._scan_script_tools()
 
     def _scan_script_tools(self) -> list:
-        self._script_map = {}
+        self._skill_script_map = {}
         result = []
         for fname in sorted(os.listdir(self.tools_dir)):
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in (".py", ".sh"): continue
-            name = os.path.splitext(fname)[0]
-            tool_name = f"script_{name}"
+            if not fname.endswith(".py"):
+                continue
             script_path = os.path.join(self.tools_dir, fname)
-            self._script_map[tool_name] = (script_path, ext)
-            result.append({"type": "function", "function": {
-                "name": tool_name,
-                "description": self._read_script_description(script_path) or f"Скрипт {fname}",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"args": {"type": "string", "description": "Аргументы командной строки"}},
-                    "required": [],
-                },
-            }})
+            for t in self._introspect_skill_script(script_path):
+                self._skill_script_map[t["function"]["name"]] = script_path
+                result.append(t)
         return result
 
-    @staticmethod
-    def _read_script_description(path: str) -> str:
-        lines = []
+    def _lib_dir(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "container_lib")
+
+    def _introspect_skill_script(self, path: str) -> list:
         try:
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    s = line.strip()
-                    if s.startswith("#!"): continue
-                    if s.startswith("#"): lines.append(s.lstrip("#").strip())
-                    elif s:                 
-                        break
-        except Exception:
-            pass
-        return "\n".join(lines)
+            runner = os.path.join(self._lib_dir(), "runner.py")
+            env = {**os.environ, "PYTHONPATH": self._lib_dir()}
+            result = subprocess.run(
+                [sys.executable, runner, path, "--introspect"],
+                capture_output=True, text=True, encoding="utf-8", env=env, timeout=10,
+            )
+            if result.returncode == 0:
+                return json.loads(result.stdout).get("tools", [])
+        except Exception as e:
+            logging.warning("[sandbox] introspect failed for %s: %s", path, e)
+        return []
 
     async def dispatch_tool_call(self, tool_call: dict) -> dict:
         name = tool_call["function"]["name"]
-        if name in self._script_map:
-            script_path, ext = self._script_map[name]
-            fname = os.path.basename(script_path)
-            args = json.loads(tool_call["function"].get("arguments") or "{}").get("args", "")
-            cmd = f"{'python' if ext == '.py' else 'bash'} /workspace/tools/{fname}"
-            if args:
-                cmd += f" {args}"
-            return await self.exec(command=cmd)
+        if name in self._skill_script_map:
+            script_path = self._skill_script_map[name]
+            args = json.loads(tool_call["function"].get("arguments") or "{}")
+            return await self._dispatch_skill_script(script_path, name, args)
         return await super().dispatch_tool_call(tool_call)
+
+    async def _dispatch_skill_script(self, script_path, tool_name, args):
+        try:
+            await self._ensure_container()
+        except Exception as e:
+            return {"error": f"Не удалось запустить контейнер: {e}"}
+
+        fname = os.path.basename(script_path)
+        cmd = [self.runtime, "exec", "-i", "-e", "PYTHONPATH=/slonagent", "-w", "/workspace",
+               self.container_name, "python", "/slonagent/runner.py", f"/workspace/tools/{fname}"]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+
+        _ALLOWED = {"agent.transport.send_message", "agent.transport.send_thinking", "agent.next_message"}
+
+        proc.stdin.write(json.dumps({"method": "call", "args": [tool_name], "kwargs": args}).encode() + b"\n")
+        await proc.stdin.drain()
+
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                stderr = (await proc.stderr.read()).decode()
+                return {"error": f"Script exited without result. stderr: {stderr}"}
+
+            msg = json.loads(line.decode())
+
+            if msg["method"] == "result":
+                proc.stdin.close()
+                await proc.wait()
+                return msg["args"][0] if msg["args"] else {}
+
+            if msg["method"] not in _ALLOWED:
+                resp = json.dumps({"error": f"method not allowed: {msg['method']}"})
+            else:
+                obj = self
+                for attr in msg["method"].split("."):
+                    obj = getattr(obj, attr)
+                result = await obj(*msg.get("args", []), **msg.get("kwargs", {}))
+                resp = json.dumps(result if isinstance(result, (dict, list)) else {"result": result})
+            proc.stdin.write(resp.encode() + b"\n")
+            await proc.stdin.drain()
 
     def _mounts(self) -> dict[str, str]:
         from src.skills.config import ConfigSkill
@@ -119,11 +151,13 @@ class SandboxSkill(Skill):
             "  /config write sandbox.folders[] <абсолютный путь к папке>"
         )
         lines.append(
-            "Скрипты в /workspace/tools/ (.py, .sh) автоматически становятся инструментами (префикс script_).\n"
-            "Если уже есть подходящий script_* инструмент — используй его вместо исполнения кода напрямую.\n"
-            "При создании скрипта пиши в шапке комментарии с описанием и форматом аргументов:\n"
-            "  # Что делает скрипт\n"
-            "  # args: <arg1> <arg2> — описание аргументов"
+            "Python-скрипты в /workspace/tools/ автоматически становятся инструментами.\n"
+            "Определи Skill-подклассы — они будут найдены автоматически:\n"
+            "  from slonagent import Skill, tool\n"
+            "  class MySkill(Skill):\n"
+            "      @tool('Описание')\n"
+            "      async def my_tool(self, arg: Annotated[str, 'Desc']) -> dict:\n"
+            "          return {'result': 'ok'}"
         )
         return "\n".join(lines)
 
@@ -134,6 +168,44 @@ class SandboxSkill(Skill):
     def stop(self):
         subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
         logging.info("[exec] Контейнер %s остановлен", self.container_name)
+
+    def _volume_args(self):
+        lib_dir = self._lib_dir()
+        args = ["-v", f"{self.workspace_dir}:/workspace", "-v", f"{lib_dir}:/slonagent:ro"]
+        for host, container in self._mounts().items():
+            args += ["-v", f"{host}:{container}:ro"]
+        return args
+
+    async def _ensure_container(self):
+        volume_args = self._volume_args()
+        desired_destinations = {"/workspace", "/slonagent"} | set(self._mounts().values())
+        env_image = f"{self.container_name}_env"
+
+        inspect = await self._run(
+            [self.runtime, "inspect", "--format",
+             "{{.State.Running}}\n{{range .Mounts}}{{.Destination}}\n{{end}}",
+             self.container_name],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        if inspect.returncode != 0:
+            img = await self._run([self.runtime, "image", "exists", env_image], capture_output=True)
+            image = env_image if img.returncode == 0 else self.image
+            await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], check=True)
+            logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
+        else:
+            lines = inspect.stdout.strip().splitlines()
+            running = lines[0] == "true"
+            actual_destinations = {l.strip() for l in lines[1:] if l.strip()}
+
+            if not running:
+                await self._run([self.runtime, "start", self.container_name], check=True)
+                logging.info("[exec] Контейнер %s запущен", self.container_name)
+            elif actual_destinations != desired_destinations:
+                logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
+                await self._run([self.runtime, "commit", self.container_name, env_image], check=True)
+                await self._run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
+                await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
+                logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
 
     @tool(
         "Выполнить команду внутри Docker-контейнера. "
@@ -149,44 +221,12 @@ class SandboxSkill(Skill):
         if timeout is None:
             timeout = self.default_timeout
 
-        mounts = self._mounts()
-        volume_args = ["-v", f"{self.workspace_dir}:/workspace"]
-        for host, container in mounts.items():
-            volume_args += ["-v", f"{host}:{container}:ro"]
-
-        desired_destinations = {"/workspace"} | set(mounts.values())
-        env_image = f"{self.container_name}_env"
-
         try:
-            inspect = await self._run(
-                [self.runtime, "inspect", "--format",
-                 "{{.State.Running}}\n{{range .Mounts}}{{.Destination}}\n{{end}}",
-                 self.container_name],
-                capture_output=True, text=True, encoding="utf-8",
-            )
-            if inspect.returncode != 0:
-                img = await self._run([self.runtime, "image", "exists", env_image], capture_output=True)
-                image = env_image if img.returncode == 0 else self.image
-                await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], check=True)
-                logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
-            else:
-                lines = inspect.stdout.strip().splitlines()
-                running = lines[0] == "true"
-                actual_destinations = {l.strip() for l in lines[1:] if l.strip()}
-
-                if not running:
-                    await self._run([self.runtime, "start", self.container_name], check=True)
-                    logging.info("[exec] Контейнер %s запущен", self.container_name)
-                elif actual_destinations != desired_destinations:
-                    logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
-                    await self._run([self.runtime, "commit", self.container_name, env_image], check=True)
-                    await self._run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
-                    await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
-                    logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
+            await self._ensure_container()
         except Exception as e:
             return {"error": f"Не удалось запустить контейнер: {e}"}
 
-        docker_cmd = [self.runtime, "exec", "-w", workdir, self.container_name, "bash", "-lc", command]
+        docker_cmd = [self.runtime, "exec", "-e", "PYTHONPATH=/slonagent", "-w", workdir, self.container_name, "bash", "-lc", command]
         logging.info("[exec] Запуск команды: %s", command)
 
         try:
@@ -207,7 +247,7 @@ class SandboxSkill(Skill):
             err = f"Ошибка при запуске {self.runtime}: {e}"
             logging.error("[exec] %s", err)
             return {"error": err}
-        
+
         stdout = proc.stdout
         stderr = proc.stderr
 

@@ -1,7 +1,7 @@
 import warnings
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from agent import Agent
@@ -22,13 +22,13 @@ def _warn(msg, category=UserWarning, stacklevel=1, source=None, **kw):
     return _original_warn(msg, category, stacklevel, source, **kw)
 warnings.warn = _warn
 
-import asyncio, importlib, json, logging, os, sys
+import asyncio, json, logging, os, sys
 from src.skills.config import _format_json
 
 with open(".config.json", encoding="utf-8") as f: config = json.load(f)
 os.environ.update(config.get("env", {}))
 
-def resolve(v, instantiate=True):
+def resolve(v):
     if isinstance(v, str) and v.startswith("$"):
         obj = config
         try:
@@ -38,17 +38,10 @@ def resolve(v, instantiate=True):
             raise KeyError(f"Не найдена ссылка в конфиге: {v}")
         return obj
     if isinstance(v, dict):
-        if instantiate and '__class__' in v: return _instantiate(v)
-        return {k: resolve(val, instantiate) for k, val in v.items()}
+        return {k: resolve(val) for k, val in v.items()}
     if isinstance(v, list):
-        return [resolve(i, instantiate) for i in v]
+        return [resolve(i) for i in v]
     return v
-
-def _instantiate(cfg: dict, cls=None):
-    if cls is None:
-        module_path, cls_name = cfg["__class__"].rsplit(".", 1)
-        cls = getattr(importlib.import_module(module_path), cls_name)
-    return cls(**{k: resolve(v) for k, v in cfg.items() if k != "__class__"})
 
 _PID_PATH = ".agent.pid"
 
@@ -72,7 +65,7 @@ _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 async def run_cli():
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
     transport = CliTransport()
-    agent = Agent(**resolve(config["agent"]), agent_dir=os.getcwd(), transport=transport)
+    agent = Agent.from_config(resolve(config["agent"]), agent_dir=os.getcwd(), transport=transport)
     await agent.start()
 
     print("CLI режим. Введите сообщение (Ctrl+C для выхода).")
@@ -109,7 +102,7 @@ async def run_telegram():
             if not os.path.exists(config_path):
                 os.makedirs(agent_dir, exist_ok=True)
                 with open(config_path, "w", encoding="utf-8") as f:
-                    merged = {**config["agent"], **resolve(config.get("fork_agent", {}), instantiate=False)}
+                    merged = {**config["agent"], **resolve(config.get("fork_agent", {}))}
                     fork_config = {}
                     if "sandbox" in config:
                         fork_config["sandbox"] = config["sandbox"]
@@ -119,7 +112,7 @@ async def run_telegram():
                 agent_cfg = json.load(f)["agent"]
 
         transport = WrappedTG(**config["telegram"]["transport"], bot=bot, chat_id=chat_id, thread_id=thread_id, agent_id=agent_id)
-        agent = Agent(**resolve(agent_cfg), agent_dir=agent_dir, transport=transport)
+        agent = Agent.from_config(resolve(agent_cfg), agent_dir=agent_dir, transport=transport)
         if copy_memory_from:
             agent.memory.copy_from(copy_memory_from.memory)
         await agent.start()
@@ -127,14 +120,6 @@ async def run_telegram():
         return agent
 
     main_agent = await make_agent(allowed_user_ids[0], None, force_create=True)
-
-    commands = [
-        BotCommand(command=cmd, description=desc)
-        for skill in main_agent.skills
-        for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
-    ]
-    await bot.set_my_commands(commands)
-    logging.info("[telegram] registered %d commands", len(commands))
 
     async def on_message(message: Message):
         if not message.from_user or message.from_user.id not in allowed_user_ids:

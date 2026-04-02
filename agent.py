@@ -8,6 +8,19 @@ from openai import AsyncOpenAI
 from src.memory.memory import Memory
 
 
+async def stoppable(coro, stop_event: asyncio.Event):
+    task = asyncio.create_task(coro)
+    stop_task = asyncio.create_task(stop_event.wait())
+    await asyncio.wait({task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    stop_task.cancel()
+    if not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 
 
 def tool(description: str):
@@ -154,6 +167,28 @@ class AgentSkill(Skill):
 
 
 class Agent:
+    @classmethod
+    def from_config(cls, cfg: dict, **overrides):
+        import importlib
+        def inst(v):
+            if isinstance(v, list): return [inst(i) for i in v]
+            if not isinstance(v, dict): return v
+            if "__class__" not in v: return {k: inst(val) for k, val in v.items()}
+            mod, name = v["__class__"].rsplit(".", 1)
+            return getattr(importlib.import_module(mod), name)(**{k: inst(val) for k, val in v.items() if k != "__class__"})
+        agent = cls(**{**inst(cfg), **overrides})
+        agent._config = cfg
+        return agent
+
+    async def spawn_subagent(self, name: str, **cfg_overrides) -> "Agent":
+        subagent_dir = os.path.join(self.agent_dir, "memory", "subagents", name)
+        os.makedirs(subagent_dir, exist_ok=True)
+        cfg_overrides.setdefault("transport", self.transport)
+        agent = Agent.from_config(self._config, agent_dir=subagent_dir, **cfg_overrides)
+        await agent.start()
+        self.transport.set_agent(agent)
+        return agent
+
     def __init__(self, model_name: str, api_key: str, base_url: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
         self.model_name = model_name
         self.api_key = api_key
@@ -180,11 +215,12 @@ class Agent:
             http_client=http_client,
             max_retries=0,
         )
-        self._process_message_lock = asyncio.Lock()
-        self._pending_messages: list = []
+        self._message_queue: asyncio.Queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
         self._restrictions_file = os.path.join(memory_dir, ".restrictions.json")
         self._restrictions: dict = self._load_restrictions()
+        self._current_content_parts: list = []
+        self._system_instruction: str | None = None
 
     def _load_restrictions(self) -> dict:
         try:
@@ -249,14 +285,37 @@ class Agent:
         return result
 
 
-    async def _llm_stream(self, contents, tools, system_instruction, label: str = ""):
-        messages = ([{"role": "system", "content": system_instruction}] if system_instruction else []) + contents
+    async def llm(self, tool_choice: str = None):
+        if self._system_instruction is None:
+            user_query = " ".join(p.get("text", "") for p in self._current_content_parts if isinstance(p, dict) and "text" in p).strip()
+            system_parts = []
+            for skill in self.skills:
+                skill_context = await skill.get_context_prompt(user_query)
+                if skill_context:
+                    system_parts.append(skill_context)
+                    await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
+            self._system_instruction = "\n\n".join(system_parts)
+        contents = self.strip_contents_private(await self.memory.get_contents())
+        tools = []
+        for skill in self.skills:
+            for decl in skill.get_tools():
+                fn = decl["function"]
+                extra = await skill.get_tool_prompt(fn["name"])
+                if extra:
+                    decl = {"type": "function", "function": {**fn, "description": fn["description"] + "\n\n---\n" + extra}}
+                tools.append(decl)
+        messages = ([{"role": "system", "content": self._system_instruction}] if self._system_instruction else []) + contents
+        logging.info("[agent] → LLM %s", self.model_name)
         max_retries, delay = 5, 0.5
         for attempt in range(max_retries):
             try:
                 kwargs: dict = {"model": self.model_name, "messages": messages, "stream": True, "temperature": 1.0}
                 if tools:
                     kwargs["tools"] = tools
+                    if tool_choice in ("auto", "required"):
+                        kwargs["tool_choice"] = tool_choice
+                    elif tool_choice:
+                        kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
                 kwargs["extra_body"] = {"extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
 
                 stream = await self.client.chat.completions.create(**kwargs)
@@ -337,6 +396,7 @@ class Agent:
                         tc_dict["extra_content"] = {"google": {"thought_signature": call["thought_signature"]}}
                     tool_calls.append(tc_dict)
 
+                logging.info("[agent] ← LLM %s", self.model_name)
                 return tool_calls, text
             except Exception as e:
                 messages = self.apply_error_restriction(self.model_name, e, messages)
@@ -346,9 +406,26 @@ class Agent:
                 logging.warning("[agent] LLM %s error, retry %d/%d in %ds: %s", label, attempt + 1, max_retries, wait, e)
                 await asyncio.sleep(wait)
 
+    async def next_message(self) -> tuple[list, any]:
+        content_parts, user_message_id = await self._message_queue.get()
+        batch = []
+        while not self._message_queue.empty():
+            batch.append(self._message_queue.get_nowait())
+        if batch:
+            logging.info("[agent] merging %d queued messages", len(batch))
+            all_items = [(content_parts, user_message_id)] + batch
+            content_parts = [p for i, (parts, _) in enumerate(all_items) for p in ([{"type": "text", "text": "\n"}] if i > 0 else []) + list(parts)]
+            user_message_id = next((mid for _, mid in all_items if mid is not None), None)
+        self._current_content_parts = content_parts
+        self._system_instruction = None
+        user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
+        logging.info("[agent] incoming: %r", user_query)
+        return content_parts, user_message_id
+
     async def start(self):
         for skill in self.skills:
             await skill.start()
+        asyncio.create_task(self.loop())
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
         fmt = mime_type.split("/")[-1]
@@ -402,121 +479,68 @@ class Agent:
                 if result:
                     await self.transport.send_message(result)
                 return
+        await self._message_queue.put((content_parts, user_message_id))
 
-        if self._process_message_lock.locked():
-            logging.info("[agent] message queued (will be batched)")
-            self._pending_messages.append((content_parts, user_message_id))
-            return
+    async def dispatch_tool_calls(self, tool_calls: list) -> list[dict]:
+        tool_to_skill = {decl["function"]["name"]: skill for skill in self.skills for decl in skill.get_tools()}
+        extra_parts = []
+        tool_turns = []
+        results = []
+        for fc in tool_calls:
+            name = fc["function"]["name"]
+            args = json.loads(fc["function"].get("arguments") or "{}")
+            logging.info("Инструмент: %s", name)
+            skill = tool_to_skill.get(name)
+            if not skill:
+                logging.warning("Tool %s not found in skills", name)
+                tool_turns.append({"role": "tool", "tool_call_id": fc["id"], "name": name,
+                                   "content": json.dumps({"error": f"Tool {name} not found"})})
+                results.append({"error": f"Tool {name} not found"})
+                continue
 
-        async with self._process_message_lock:
-            await self._run_message(content_parts, user_message_id)
-            while self._pending_messages:
-                batch = self._pending_messages[:]
-                self._pending_messages.clear()
-                logging.info("[agent] processing batch of %d queued messages", len(batch))
-                merged_parts = [p for i, (parts, _) in enumerate(batch) for p in ([{"type": "text", "text": "\n"}] if i > 0 else []) + list(parts)]
-                merged_id = next((mid for _, mid in batch if mid is not None), None)
-                await self._run_message(merged_parts, merged_id)
+            await self.transport.on_tool_call(name, args)
+            result = await skill.dispatch_tool_call(fc)
+            if self.transport.agent is not self:
+                self.transport.set_agent(self)
+            await self.transport.on_tool_result(name, result)
+            extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
+            tool_turns.append({
+                "role": "tool", "tool_call_id": fc["id"], "name": name,
+                "content": json.dumps(result if isinstance(result, dict) else {"result": result}, ensure_ascii=False),
+            })
+            results.append(result if isinstance(result, dict) else {"result": result})
 
-    async def _build_llm_context(self, user_query: str, send_prompts: bool = False) -> tuple[list, dict, str]:
-        tools = []
-        tool_to_skill = {}
-        system_parts = []
-        tools_info = []
+        await self.memory.add_turn({"role": "assistant", "content": None, "tool_calls": tool_calls})
+        for tool_turn in tool_turns:
+            await self.memory.add_turn(tool_turn)
+        if extra_parts:
+            await self.memory.add_turn({"role": "user", "content": extra_parts})
+        return results
 
-        def truncate(s: str, n: int) -> str:
-            return s[:n] + "..." if len(s) > n else s
 
-        for skill in self.skills:
-            for decl in skill.get_tools():
-                fn = decl["function"]
-                extra = await skill.get_tool_prompt(fn["name"])
-                if extra:
-                    decl = {"type": "function", "function": {**fn, "description": fn["description"] + "\n\n---\n" + extra}}
-                tool_to_skill[decl["function"]["name"]] = skill
-                tools.append(decl)
-                tools_info.append(f"{decl['function']['name']}: {truncate(decl['function']['description'].splitlines()[0], 100)}")
+    async def loop(self):
+        while True:
+            content_parts, user_message_id = await self.next_message()
+            self._stop_event.clear()
+            await self.transport.send_processing(True)
 
-            skill_context = await skill.get_context_prompt(user_query)
-            if skill_context:
-                system_parts.append(skill_context)
-                if send_prompts:
-                    await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
+            async def run_message():
+                try:
+                    await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
+                    tool_calls, text = await self.llm()
+                    iteration = 0
+                    while tool_calls and iteration < self.max_iterations:
+                        await self.dispatch_tool_calls(tool_calls)
+                        iteration += 1
+                        tool_calls, text = await self.llm()
+                    if tool_calls:
+                        logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
+                        await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
+                    await self.memory.add_turn({"role": "assistant", "content": text or ""})
+                except Exception as e:
+                    logging.warning("Ошибка агента: %s", e, exc_info=True)
+                    await self.transport.send_message(f"Ошибка: {e}")
+                finally:
+                    await self.transport.send_processing(False)
 
-        if send_prompts and tools_info:
-            await self.transport.send_system_prompt("[Инструменты модели]\n" + "\n".join(tools_info))
-
-        return tools, tool_to_skill, "\n\n".join(system_parts)
-
-    async def _run_message(self, content_parts: list, user_message_id=None):
-        user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
-        logging.info("[agent] incoming: %r", user_query)
-
-        self._stop_event.clear()
-        await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
-
-        tools, tool_to_skill, system_instruction = await self._build_llm_context(user_query, send_prompts=True)
-
-        try:
-            logging.info("[agent] → LLM %s (tools=%d)", self.model_name, len(tools))
-            tool_calls, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), tools, system_instruction)
-            logging.info("[agent] ← LLM")
-
-            if self._stop_event.is_set(): logging.info("[agent] stopped by user, response not saved"); return
-
-            iteration = 0
-            while tool_calls and iteration < self.max_iterations:
-                extra_parts = []
-                tool_turns = []
-                for fc in tool_calls:
-                    name = fc["function"]["name"]
-                    args = json.loads(fc["function"].get("arguments") or "{}")
-                    logging.info("Инструмент: %s", name)
-                    skill = tool_to_skill.get(name)
-                    if not skill:
-                        logging.warning("Tool %s not found in skills", name)
-                        tool_turns.append({"role": "tool", "tool_call_id": fc["id"], "name": name,
-                                           "content": json.dumps({"error": f"Tool {name} not found"})})
-                        continue
-
-                    await self.transport.on_tool_call(name, args)
-                    tool_task = asyncio.create_task(skill.dispatch_tool_call(fc))
-                    tool_stop_task = asyncio.create_task(self._stop_event.wait())
-                    await asyncio.wait({tool_task, tool_stop_task}, return_when=asyncio.FIRST_COMPLETED)
-                    tool_stop_task.cancel()
-                    if self._stop_event.is_set():
-                        tool_task.cancel()
-                        logging.info("[agent] tool %s cancelled by /stop", name)
-                        return
-                    result = tool_task.result()
-                    await self.transport.on_tool_result(name, result)
-                    extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
-                    tool_turns.append({
-                        "role": "tool", "tool_call_id": fc["id"], "name": name,
-                        "content": json.dumps(result if isinstance(result, dict) else {"result": result}, ensure_ascii=False),
-                    })
-
-                await self.memory.add_turn({"role": "assistant", "content": None, "tool_calls": tool_calls})
-                for tool_turn in tool_turns:
-                    await self.memory.add_turn(tool_turn)
-
-                if extra_parts:
-                    await self.memory.add_turn({"role": "user", "content": extra_parts})
-
-                tools, tool_to_skill, system_instruction = await self._build_llm_context(user_query)
-                iteration += 1
-                logging.info("[agent] → LLM iteration %d", iteration)
-                tool_calls, text = await self._llm_stream(self.strip_contents_private(await self.memory.get_contents()), tools, system_instruction, str(iteration))
-                logging.info("[agent] ← LLM iteration %d", iteration)
-
-                if self._stop_event.is_set(): logging.info("[agent] stopped by user during iter %d, response not saved", iteration); return
-
-            if tool_calls:
-                logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
-                await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
-
-            await self.memory.add_turn({"role": "assistant", "content": text or ""})
-
-        except Exception as e:
-            logging.warning("Ошибка LLM: %s", e, exc_info=True)
-            await self.transport.send_message(f"Ошибка LLM: {e}")
+            await stoppable(run_message(), self._stop_event)

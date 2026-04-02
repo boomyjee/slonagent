@@ -5,7 +5,7 @@ log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat
 from agent import Skill, tool
 from src.transport.base import BaseTransport
 
@@ -207,12 +207,13 @@ class TelegramSkill(Skill):
 
 
 class TelegramTransport(BaseTransport):
-    def __init__(self, bot: Bot, chat_id: int, thread_id: int | None = None, verbose: bool = True):
+    def __init__(self, bot: Bot, chat_id: int, thread_id: int | None = None, verbose: bool = True, agent_id: str = ""):
         self.bot = bot
         self.chat_id = chat_id
         self.thread_id = thread_id
         self.thread_name: str | None = None
         self.agent = None
+        self.agent_id = agent_id
         self._no_link_preview = LinkPreviewOptions(is_disabled=True)
         self._skill = TelegramSkill(self)
         self.verbose = verbose
@@ -221,11 +222,45 @@ class TelegramTransport(BaseTransport):
         self._pending_messages: list[Message] = []
         self._flush_task: asyncio.Task | None = None
         self._pending_answer = {}
+        self._typing_task: asyncio.Task | None = None
+
+    async def send_processing(self, active: bool):
+        if active:
+            if self._typing_task:
+                return
+            async def _typing_loop():
+                try:
+                    while True:
+                        await self.bot.send_chat_action(chat_id=self.chat_id, action="typing", message_thread_id=self.thread_id)
+                        await asyncio.sleep(4)
+                except asyncio.CancelledError:
+                    pass
+            self._typing_task = asyncio.create_task(_typing_loop())
+        else:
+            if self._typing_task:
+                self._typing_task.cancel()
+                self._typing_task = None
 
     def set_agent(self, agent):
         self.agent = agent
         self._skill.register(agent)
         agent.skills.insert(0, self._skill)
+
+        async def update_commands():
+            all_commands = {
+                cmd: desc
+                for skill in agent.skills
+                for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
+            }
+            if self.chat_id < 0:
+                all_commands = {k: v for k, v in all_commands.items() if k == "stop"}
+            commands = [BotCommand(command=cmd, description=desc) for cmd, desc in all_commands.items()]
+            try:
+                await self.bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=self.chat_id))
+            except Exception as e:
+                log.warning("[telegram] set_my_commands failed: %s", e)
+            log.info("[telegram] set %d commands for %s", len(commands), self.agent_id or self.chat_id)
+        asyncio.create_task(update_commands())
 
     async def _tg_retry(self, fn):
         for attempt in range(3):
@@ -372,18 +407,6 @@ class TelegramTransport(BaseTransport):
             await self.bot.download_file((await self.bot.get_file(file_id)).file_path, buf)
             return buf.getvalue()
 
-        async def _typing_loop():
-            try:
-                while True:
-                    await self.bot.send_chat_action(chat_id=self.chat_id, action="typing", message_thread_id=self.thread_id)
-                    await asyncio.sleep(4)
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                log.debug("[transport] typing loop stopped for %s: %s", self.chat_id, e)
-
-        typing_task = asyncio.create_task(_typing_loop())
-
         content_parts = []
 
         user_id = first.from_user.id if first.from_user else None
@@ -481,17 +504,10 @@ class TelegramTransport(BaseTransport):
                 content_parts.append({"type": "text", "text": f"<attached_file {attrs} />"})
 
         if not content_parts:
-            typing_task.cancel()
             return
 
-        try:
-            await self.process_message(
-                content_parts=content_parts,
-                user_message_id=first.message_id,
-            )
-        except Exception as e:
-            logging.exception("Error processing message")
-            await self._send(f"Произошла ошибка при обработке: {e}")
-        finally:
-            typing_task.cancel()
+        await self.process_message(
+            content_parts=content_parts,
+            user_message_id=first.message_id,
+        )
 
