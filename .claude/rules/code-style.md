@@ -1,6 +1,5 @@
 ---
 description: Принципы написания кода в этом проекте
-alwaysApply: true
 ---
 
 # Принципы кода
@@ -10,12 +9,12 @@ alwaysApply: true
 Если данные уже в нужном формате — передавай как есть. Не превращай структуры в текст только чтобы вставить в строку.
 
 ```python
-# ❌ BAD — сериализуем messages в текст, чтобы вставить в prompt
+# BAD — сериализуем messages в текст, чтобы вставить в prompt
 dialog_text = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
 prompt = f"Диалог:\n{dialog_text}"
 contents = [{"role": "user", "parts": [{"text": prompt}]}]
 
-# ✅ GOOD — передаём messages напрямую как contents
+# GOOD — передаём messages напрямую как contents
 contents = [*messages, {"role": "user", "parts": [{"text": "Вызови save_memory."}]}]
 ```
 

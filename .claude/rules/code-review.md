@@ -1,6 +1,5 @@
 ---
 description: Code review principles — how to write clean Python code in this project
-alwaysApply: true
 ---
 
 # Принципы написания кода
@@ -10,10 +9,10 @@ alwaysApply: true
 Если функция уже есть — сделай публичной и используй. Не копируй.
 
 ```python
-# ❌ BAD — своя копия strip-логики в file.py
+# BAD — своя копия strip-логики в file.py
 {k: v for k, v in p.items() if not k.startswith("_")}
 
-# ✅ GOOD — переиспользуем существующую
+# GOOD — переиспользуем существующую
 contents = Agent.strip_contents_private(pending)
 ```
 
@@ -22,24 +21,24 @@ contents = Agent.strip_contents_private(pending)
 Если данные уже в нужном формате — передавай как есть.
 
 ```python
-# ❌ BAD — форматируем turns в текст чтобы вставить в промпт
+# BAD — форматируем turns в текст чтобы вставить в промпт
 conversation = "\n".join(f"[{t['role']}]: ..." for t in turns)
 prompt = f"История:\n{conversation}"
 contents = [{"role": "user", "parts": [{"text": prompt}]}]
 
-# ✅ GOOD — передаём turns напрямую
+# GOOD — передаём turns напрямую
 contents = [*turns, {"role": "user", "parts": [{"text": instruction}]}]
 ```
 
 ## Каждый метод делает одно
 
 ```python
-# ❌ BAD — _summarize обновляет статистику И генерирует текст
+# BAD — _summarize обновляет статистику И генерирует текст
 async def _summarize(self, name, contents):
     entry["total_calls"] += stats["count"]   # не сюда
     response = await llm(...)
 
-# ✅ GOOD — статистика обновляется в _consolidate, _summarize только генерирует
+# GOOD — статистика обновляется в _consolidate, _summarize только генерирует
 async def _consolidate(self, pending):
     entry["total_calls"] += batch["count"]   # здесь
     await self._summarize(name, contents)
@@ -51,13 +50,13 @@ async def _summarize(self, name, contents):
 ## Пиши сразу в нужную структуру
 
 ```python
-# ❌ BAD — промежуточный dict
+# BAD — промежуточный dict
 batch = {}
 batch.setdefault(name, {})["count"] += 1
 for name, b in batch.items():
     entry["total_calls"] += b["count"]
 
-# ✅ GOOD — сразу в целевую структуру
+# GOOD — сразу в целевую структуру
 entry = self._tool_stats.setdefault(name, {"total_calls": 0})
 entry["total_calls"] += 1
 ```

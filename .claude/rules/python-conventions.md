@@ -1,7 +1,7 @@
 ---
 description: Python-конвенции проекта
-alwaysApply: true
 ---
+
 # Python-конвенции проекта
 
 ## Структура пакетов
@@ -11,10 +11,10 @@ alwaysApply: true
 **Исключение:** если папка представляет пакет с одним главным публичным классом, создаём `__init__.py` и помещаем главный класс **прямо в него** — чтобы сохранить единообразный синтаксис импорта:
 
 ```python
-# ✅ GOOD — папка fact/ с __init__.py, класс определён внутри него
+# GOOD — папка fact/ с __init__.py, класс определён внутри него
 from src.memory.providers.fact import FactProvider
 
-# ❌ BAD — класс в отдельном файле, реэкспорт через __init__
+# BAD — класс в отдельном файле, реэкспорт через __init__
 from src.memory.providers.fact.provider import FactProvider
 ```
 
@@ -35,11 +35,11 @@ from src.memory.providers.fact.provider import FactProvider
 Используем абсолютные импорты от корня проекта (где лежит `main.py`):
 
 ```python
-# ✅ GOOD
+# GOOD
 from src.memory.base import BaseProvider
 from memory import Memory
 
-# ❌ BAD
+# BAD
 from .base import BaseProvider
 ```
 
@@ -48,9 +48,9 @@ from .base import BaseProvider
 Если метод начинается с `_`, но используется из другого класса/модуля — убираем `_`:
 
 ```python
-# ❌ BAD — приватный метод, но зовём снаружи
+# BAD — приватный метод, но зовём снаружи
 Memory._count_tokens(turns)
 
-# ✅ GOOD — убрали _ раз метод публичный
+# GOOD — убрали _ раз метод публичный
 Memory.count_tokens(turns)
 ```

@@ -1,6 +1,5 @@
 ---
 description: Актуальные названия моделей Gemini
-alwaysApply: true
 ---
 
 # Gemini — актуальные модели (2026)

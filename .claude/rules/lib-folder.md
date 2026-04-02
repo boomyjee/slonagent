@@ -1,6 +1,5 @@
 ---
 description: Назначение папки lib/ в проекте
-alwaysApply: true
 ---
 
 # Папка lib/

@@ -1,6 +1,5 @@
 ---
 description: Запуск программы и окружение
-alwaysApply: true
 ---
 
 # Запуск программы
@@ -19,11 +18,4 @@ start.bat --cli
 Перед запуском убедиться, что активировано `.venv`:
 ```
 .venv\Scripts\activate
-```
-
-## __pycache__
-
-При проблемах с импортами или странном поведении — удалить `__pycache__`:
-```
-Get-ChildItem -Recurse -Filter __pycache__ | Remove-Item -Recurse -Force
 ```
