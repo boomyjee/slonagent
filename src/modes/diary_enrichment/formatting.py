@@ -51,13 +51,13 @@ def feedback_note(feedback: list[str]) -> str:
 
 def format_enrich_proposal(week: list[DiaryDay], proposed_days: dict[str, str], glossary: Glossary) -> str:
     glossary_dict = glossary.read_dict()
-    lines = ["**Предлагаемое обогащение:**\n"]
+    lines = ["📝 **Предлагаемое обогащение:**\n"]
     for day in week:
         annotated = proposed_days.get(day.date_str)
         if not annotated:
             continue
         text_body = annotated.removeprefix(day.date_str).lstrip()
-        lines.append(f"**{day.date_str}** {highlight_ids(text_body)}")
+        lines.append(f"📖 **{day.date_str}** {highlight_ids(text_body)}")
         used: list[tuple[str, str]] = []
         seen: set[str] = set()
         for m in _ID_RE.finditer(annotated):
@@ -70,14 +70,14 @@ def format_enrich_proposal(week: list[DiaryDay], proposed_days: dict[str, str], 
         if used:
             lines.append("")
             for id_full, desc in used:
-                lines.append(f"  `{id_full}` -- {desc}")
+                lines.append(f"• `{id_full}` — {desc}")
         lines.append("")
     return "\n".join(lines) + _APPROVE_HINT
 
 
 def format_glossary_add_proposal(id_key: str, description: str) -> str:
     return (
-        f"**Добавить в глоссарий:**\n"
+        f"📖 **Добавить в глоссарий:**\n"
         f"`ID:{id_key}: {description}`"
         + _APPROVE_HINT
     )
@@ -85,7 +85,7 @@ def format_glossary_add_proposal(id_key: str, description: str) -> str:
 
 def format_glossary_update_proposal(id_key: str, old_desc: str, new_desc: str) -> str:
     return (
-        f"**Изменить в глоссарии:**\n"
+        f"📖 **Изменить в глоссарии:**\n"
         f"`ID:{id_key}`\n"
         f"Было: {old_desc}\n"
         f"Станет: {new_desc}"

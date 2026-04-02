@@ -119,19 +119,6 @@ async def run_telegram():
         agents[agent_id] = agent
         return agent
 
-    if "--run-tool" in sys.argv:
-        idx = sys.argv.index("--run-tool")
-        agent_id = sys.argv[idx + 1]
-        tool_name = sys.argv[idx + 2]
-        tool_args = sys.argv[idx + 3] if idx + 3 < len(sys.argv) else "{}"
-        if agent_id == "main":
-            chat_id, thread_id = allowed_user_ids[0], None
-        else:
-            parts = agent_id.split("_", 1)
-            chat_id, thread_id = int(parts[0]), int(parts[1])
-        agent = await make_agent(chat_id, thread_id, force_create=True)
-        await agent.dispatch_tool_calls([{"id": f"run_{tool_name}", "function": {"name": tool_name, "arguments": tool_args}}])
-
     main_agent = await make_agent(allowed_user_ids[0], None, force_create=True)
 
     async def on_message(message: Message):
