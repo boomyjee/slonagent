@@ -8,6 +8,12 @@ from openai import AsyncOpenAI
 from src.memory.memory import Memory
 
 
+class BadFinishReason(Exception):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"LLM finished with: {reason}")
+
+
 async def stoppable(coro, stop_event: asyncio.Event):
     task = asyncio.create_task(coro)
     stop_task = asyncio.create_task(stop_event.wait())
@@ -19,6 +25,8 @@ async def stoppable(coro, stop_event: asyncio.Event):
             await task
         except asyncio.CancelledError:
             pass
+        return None
+    return task.result()
 
 
 
@@ -193,6 +201,12 @@ class Agent:
         agent = Agent.from_config(self._config, agent_dir=subagent_dir, **cfg_overrides)
         await agent.start(run_loop=False)
         self.transport.set_agent(agent)
+
+        async def _propagate_stop():
+            await agent._stop_event.wait()
+            self._tool_stop_event.set()
+        asyncio.create_task(_propagate_stop())
+
         return agent
 
     def __init__(self, model_name: str, api_key: str, base_url: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
@@ -223,6 +237,7 @@ class Agent:
         )
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
+        self._tool_stop_event = asyncio.Event()
         self._restrictions_file = os.path.join(memory_dir, ".restrictions.json")
         self._restrictions: dict = self._load_restrictions()
         self._current_content_parts: list = []
@@ -392,6 +407,10 @@ class Agent:
                 if thinking_id is not None:
                     await self.transport.send_thinking(thinking_text, thinking_id, final=True)
 
+                finish_reason = chunk.choices[0].finish_reason if chunk and chunk.choices else None
+                if finish_reason and finish_reason not in ("stop", "tool_calls"):
+                    raise BadFinishReason(finish_reason)
+
                 tool_calls = []
                 for idx in sorted(accumulated_calls):
                     call = accumulated_calls[idx]
@@ -408,6 +427,8 @@ class Agent:
 
                 logging.info("[agent] ← LLM %s", self.model_name)
                 return tool_calls, text
+            except BadFinishReason:
+                raise
             except Exception as e:
                 messages = self.apply_error_restriction(self.model_name, e, messages)
                 if attempt + 1 == max_retries:
@@ -510,7 +531,10 @@ class Agent:
                 continue
 
             await self.transport.on_tool_call(name, args)
-            result = await skill.dispatch_tool_call(fc)
+            self._tool_stop_event.clear()
+            result = await stoppable(skill.dispatch_tool_call(fc), self._tool_stop_event)
+            if result is None:
+                result = {"error": "прервано пользователем"}
             if self.transport.agent is not self:
                 self.transport.set_agent(self)
             await self.transport.on_tool_result(name, result)

@@ -15,7 +15,7 @@ class AnecdoteLoopSkill(Skill):
                 super().__init__()
                 self.count = 0
 
-            @tool("Рассказать анекдот пользователю")
+            @tool("Рассказать анекдот пользователю, в ответе придет оценка юзера от 1 до 10")
             async def tell_joke(self, text: Annotated[str, "Текст анекдота"]) -> dict:
                 self.count += 1
                 await self.agent.transport.send_message(f"*Анекдот №{self.count}*\n\n{text}")
