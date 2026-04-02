@@ -38,12 +38,21 @@ class AnecdoteLoopSkill(Skill):
             skills=[TellJokeSkill()],
         )
         await sub.memory.add_turn({"role": "user", "content": "Расскажи анекдот."})
+        ratings = []
 
         while True:
+            await sub.transport.send_processing(True)
             tool_calls, _ = await sub.llm(tool_choice="telljoke_tell_joke")
+            await sub.transport.send_processing(False)
             results = await sub.dispatch_tool_calls(tool_calls)
 
+            for r in results:
+                if r.get("rating"):
+                    ratings.append(r["rating"])
+
             if any(r.get("stop") for r in results):
+                avg = sum(ratings) / len(ratings) if ratings else 0
                 await self.agent.transport.send_message("Рад был повеселить!")
-                return {"status": "завершено"}
+                await sub.transport.send_processing(True)
+                return {"total": len(ratings), "average_rating": round(avg, 1)}
 
