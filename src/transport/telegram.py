@@ -286,6 +286,13 @@ class TelegramTransport(BaseTransport):
         """Process send/edit queue with rate limiting."""
         while True:
             item = await self._queue.get()
+            # Skip stale edits — if queue has a newer edit for same message, skip this one
+            if item["kind"] == "edit" and any(
+                q["kind"] == "edit" and q["msg"].message_id == item["msg"].message_id
+                for q in self._queue._queue
+            ):
+                item["future"].set_result(item["msg"])
+                continue
             future = item["future"]
             try:
                 future.set_result(await self._exec_item(item))
@@ -301,6 +308,7 @@ class TelegramTransport(BaseTransport):
                 future.set_exception(e)
             await asyncio.sleep(1)
 
+
     def _ensure_queue(self):
         if not self._queue_task or self._queue_task.done():
             self._queue_task = asyncio.create_task(self._queue_worker())
@@ -314,15 +322,6 @@ class TelegramTransport(BaseTransport):
     async def _edit(self, msg: Message, text: str, **kwargs) -> Message:
         self._ensure_queue()
         future = asyncio.get_event_loop().create_future()
-        # Coalesce: replace pending edit for same message
-        new_queue = asyncio.Queue()
-        while not self._queue.empty():
-            item = self._queue.get_nowait()
-            if item["kind"] == "edit" and item["msg"].message_id == msg.message_id:
-                item["future"].set_result(msg)  # resolve old future
-            else:
-                new_queue.put_nowait(item)
-        self._queue = new_queue
         self._queue.put_nowait({"kind": "edit", "msg": msg, "text": text, "kwargs": kwargs, "future": future})
         return await future
     
