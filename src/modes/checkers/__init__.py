@@ -22,6 +22,27 @@ async def start_tunnel(port: int, subdomain: str, sish_domain: str, sish_port: i
     return url, conn
 
 
+class CommentatorSkill(Skill):
+    def __init__(self, transport, server):
+        super().__init__()
+        self._transport = transport
+        self._server = server
+
+    async def get_context_prompt(self, user_text: str = "") -> str:
+        return "Ты комментатор партии в русские шашки. Комментируй ходы коротко (1-2 предложения), с юмором или драматизмом."
+
+    @tool("Прокомментировать ходы белых и чёрных")
+    async def comment(
+        self,
+        white_comment: Annotated[str, "Комментарий к ходу белых"],
+        black_comment: Annotated[str, "Комментарий к ходу чёрных"],
+    ) -> dict:
+        await self._transport.send_message(f"⚪ {white_comment}")
+        await self._transport.send_message(f"⚫ {black_comment}")
+        await self._server.send_comment(f"⚪ {white_comment}\n⚫ {black_comment}")
+        return {"status": "ok"}
+
+
 class CheckersSkill(Skill):
     def __init__(self, port: int = 3100, sish_port: int = 2222, sish_domain: str = "", sish_key: str = ""):
         super().__init__()
@@ -33,24 +54,24 @@ class CheckersSkill(Skill):
     @tool("Запустить игру в шашки через веб-интерфейс в Telegram")
     async def start_checkers(self) -> dict:
         transport = self.agent.transport
+        import random, string
+        session_id = ''.join(random.choices(string.ascii_lowercase, k=6))
         server = CheckersServer(self._port)
         await server.start()
 
         # Start tunnel
-        tunnel_conn = None
         try:
             url, tunnel_conn = await asyncio.wait_for(
-                start_tunnel(self._port, "checkers", self._sish_domain, self._sish_port, self._sish_key),
+                start_tunnel(self._port, f"checkers-{session_id}", self._sish_domain, self._sish_port, self._sish_key),
                 timeout=10,
             )
         except Exception as e:
-            log.warning("[checkers] tunnel failed: %s, falling back to localhost", e, exc_info=True)
-            await transport.send_message(f"Туннель не удался: {e}, открываю локально")
-            url = f"http://localhost:{self._port}"
+            await transport.send_message(f"Не удалось запустить туннель: {e}")
+            return {"error": str(e)}
 
-        # Send link (Web App button for Telegram, plain URL otherwise)
+        # Send Web App button
         from src.transport.telegram import TelegramTransport
-        if isinstance(transport, TelegramTransport) and url.startswith("https://"):
+        if isinstance(transport, TelegramTransport):
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="🎮 Играть в шашки", web_app=WebAppInfo(url=url))
@@ -62,14 +83,12 @@ class CheckersSkill(Skill):
         else:
             await transport.send_message(f"🎮 Шашки готовы: {url}")
 
-        # Commentator subagent — persists across moves to see game history
+        # Commentator subagent
         commentator = await self.agent.spawn_subagent(
-            "checkers_commentator", memory_providers=[], skills=[],
+            "checkers_commentator", memory_providers=[],
+            skills=[CommentatorSkill(transport, server)],
         )
         commentator.memory.clear()
-        await commentator.memory.add_turn({"role": "user", "content":
-            "Ты комментатор партии в русские шашки. Комментируй ходы коротко (1-2 предложения), с юмором или драматизмом."
-        })
 
         # Game loop
         moves_played = 0
@@ -129,7 +148,7 @@ class CheckersSkill(Skill):
         return {"status": "game_over", "moves": moves_played}
 
     async def _comment_moves(self, server, commentator, white_desc: str, black_desc: str, move_num: int):
-        """Ask LLM to comment on both moves in one call."""
+        """Ask LLM to comment on both moves via tool call."""
         try:
             board_str = self._board_to_text(server.board)
             prompt = (
@@ -137,13 +156,14 @@ class CheckersSkill(Skill):
                 f"Белые: {white_desc}\n"
                 f"Чёрные: {black_desc}\n"
                 f"Позиция после:\n{board_str}\n"
-                f"Напиши два коротких комментария — один про ход белых, другой про ход чёрных."
+                f"Вызови comment чтобы прокомментировать оба хода."
             )
             await commentator.memory.add_turn({"role": "user", "content": prompt})
-            _, text = await commentator.llm()
-            if text:
+            tool_calls, text = await commentator.llm(tool_choice="commentator_comment")
+            if tool_calls:
+                await commentator.dispatch_tool_calls(tool_calls)
+            elif text:
                 await commentator.memory.add_turn({"role": "assistant", "content": text})
-                await server.send_comment(text)
         except Exception as e:
             log.warning("[checkers] LLM comment failed: %s", e)
             await self.agent.transport.send_message(f"Не удалось сгенерировать комментарий: {e}")

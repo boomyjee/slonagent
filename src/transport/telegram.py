@@ -4,7 +4,7 @@ import base64, io, os, re, asyncio, logging, json, mimetypes
 log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter, TelegramServerError
 from aiogram.types import Message, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat
 from agent import Skill, tool
 from src.transport.base import BaseTransport
@@ -289,9 +289,10 @@ class TelegramTransport(BaseTransport):
             future = item["future"]
             try:
                 future.set_result(await self._exec_item(item))
-            except TelegramRetryAfter as e:
-                log.warning("Flood control, waiting %s sec", e.retry_after)
-                await asyncio.sleep(e.retry_after)
+            except (TelegramRetryAfter, TelegramServerError) as e:
+                wait = e.retry_after if isinstance(e, TelegramRetryAfter) else 5
+                log.warning("Telegram error, waiting %s sec: %s", wait, e)
+                await asyncio.sleep(wait)
                 try:
                     future.set_result(await self._exec_item(item))
                 except Exception as e2:
