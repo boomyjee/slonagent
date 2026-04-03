@@ -21,6 +21,20 @@ async def start_tunnel(port, subdomain, sish_domain, sish_port, sish_key):
     return url, conn
 
 
+class FinishSkill(Skill):
+    """Subagent skill — allows LLM to finish coding mode and return result."""
+    def __init__(self):
+        super().__init__()
+        self.finished = False
+        self.result = ""
+
+    @tool("Завершить кодинг режим и вернуть результат основному агенту")
+    async def finish(self, result: Annotated[str, "Краткий итог что было сделано"]) -> dict:
+        self.finished = True
+        self.result = result
+        return {"status": "finishing"}
+
+
 class CodingModeSkill(Skill):
     def __init__(self, port: int = 3200, sish_port: int = 2222, sish_domain: str = "", sish_key: str = ""):
         super().__init__()
@@ -30,22 +44,38 @@ class CodingModeSkill(Skill):
         self._sish_key = sish_key
 
     @tool("Запустить кодинг режим с веб-интерфейсом для работы с кодом")
-    async def start_coding(self, project_path: Annotated[str, "Путь к проекту (например /workspace или /mnt/c/dev/myproject)"] = "/workspace") -> dict:
+    async def start_coding(
+        self,
+        task: Annotated[str, "Задача для кодинг-агента"] = "",
+        project_path: Annotated[str, "Путь к проекту (например /workspace или /mnt/c/dev/myproject)"] = "/workspace",
+    ) -> dict:
         transport = self.agent.transport
 
         from src.skills.coding import CodingSkill
         from src.skills.sandbox import SandboxSkill
         from src.skills.web import WebSkill
 
-        # Spawn subagent first — server needs its resolve_path
+        # Shared workspace with parent
+        parent_sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         parent_web = next((s for s in self.agent.skills if isinstance(s, WebSkill)), None)
+        workspace_dir = parent_sandbox.workspace_dir if parent_sandbox else None
+
+        finish_skill = FinishSkill()
         sub = await self.agent.spawn_subagent(
             "coding_mode",
             memory_providers=[],
-            skills=[CodingSkill(), SandboxSkill(), WebSkill(parent_web.api_key if parent_web else "")],
+            skills=[
+                CodingSkill(),
+                SandboxSkill(workspace_dir=workspace_dir),
+                WebSkill(parent_web.api_key if parent_web else ""),
+                finish_skill,
+            ],
         )
         sub.memory.clear()
-        await sub.memory.add_turn({"role": "user", "content": f"Project root: {project_path}"})
+        initial = f"Project root: {project_path}"
+        if task:
+            initial += f"\n\nTask: {task}"
+        await sub.memory.add_turn({"role": "user", "content": initial})
 
         sub_sandbox = next(s for s in sub.skills if isinstance(s, SandboxSkill))
         server = CodingServer(self._port, sub_sandbox.resolve_path, project_path)
@@ -96,11 +126,17 @@ class CodingModeSkill(Skill):
                     await sub.dispatch_tool_calls(tool_calls)
                     await server.send_event("files_changed")
 
+                    if finish_skill.finished:
+                        break
+
                     tool_calls, text = await sub.llm()
                     if text:
                         await server.send_chat(text)
+
+                if finish_skill.finished:
+                    break
         finally:
             if tunnel_conn:
                 tunnel_conn.close()
 
-        return {"status": "done"}
+        return {"result": finish_skill.result} if finish_skill.finished else {"status": "interrupted"}
