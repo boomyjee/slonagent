@@ -54,3 +54,4 @@ scripts/diary_enrichment/.config.json
 scripts/diary_enrichment/memory/
 scripts/diary_enrichment_old/
 scripts/test_mode/.config.json
+scripts/test_mode/memory/
