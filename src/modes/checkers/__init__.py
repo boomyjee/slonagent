@@ -17,7 +17,7 @@ async def start_tunnel(port: int, subdomain: str, sish_domain: str, sish_port: i
         sish_domain, sish_port, known_hosts=None, client_keys=[key], username="tunnel",
     )
     await conn.forward_remote_port(subdomain, 80, "localhost", port)
-    url = f"https://{subdomain}.{sish_domain}"
+    url = f"https://{subdomain}.{sish_domain}:8443"
     log.info("[checkers] tunnel URL: %s", url)
     return url, conn
 
@@ -44,7 +44,8 @@ class CheckersSkill(Skill):
                 timeout=10,
             )
         except Exception as e:
-            log.warning("[checkers] tunnel failed: %s, falling back to localhost", e)
+            log.warning("[checkers] tunnel failed: %s, falling back to localhost", e, exc_info=True)
+            await transport.send_message(f"Туннель не удался: {e}, открываю локально")
             url = f"http://localhost:{self._port}"
 
         # Send link (Web App button for Telegram, plain URL otherwise)
@@ -89,21 +90,17 @@ class CheckersSkill(Skill):
                 moves_played += 1
                 move_desc = server.board.describe_move(fr, fc, chain, captured)
 
-                # Send updated state to frontend
-                await server._send_state(last_move={"from": [fr, fc], "to": list(chain[-1])})
+                # Show user's move immediately, opponent thinking
+                await server._send_state(last_move={"from": [fr, fc], "to": list(chain[-1])}, your_turn=False)
 
-                # Check if black has moves
+                # Check if black lost
                 if server.board.count(2) == 0 or not server.board.get_all_moves(2):
                     server.game_over = True
                     await server._send_state(comment="Вы победили!")
                     await transport.send_message("🏆 Вы победили в шашки!")
                     break
 
-                # LLM comments on user's move
-                await self._comment_move(server, commentator, move_desc, moves_played)
-
-                # AI move
-                await asyncio.sleep(0.5)
+                # AI move (instant)
                 result = ai_move(server.board)
                 if result is None:
                     server.game_over = True
@@ -111,16 +108,19 @@ class CheckersSkill(Skill):
                     await transport.send_message("🏆 Вы победили — у соперника нет ходов!")
                     break
 
-                ai_from, ai_chain, ai_captured = result
-                ai_desc = server.board.describe_move(ai_from[0], ai_from[1], ai_chain, ai_captured)
-                await server._send_state(last_move={"from": list(ai_from), "to": list(ai_chain[-1])})
+                ai_from, ai_chain, _ = result
+                ai_desc = server.board.describe_move(ai_from[0], ai_from[1], ai_chain, [])
 
-                # Check if white has moves
+                # Check if white lost
                 if server.board.count(1) == 0 or not server.board.get_all_moves(1):
                     server.game_over = True
-                    await server._send_state(comment="Вы проиграли!")
+                    await server._send_state(last_move={"from": list(ai_from), "to": list(ai_chain[-1])}, comment="Вы проиграли!")
                     await transport.send_message("Вы проиграли в шашки. Реванш?")
                     break
+
+                # LLM comments on both moves, then show AI move + your turn
+                await self._comment_moves(server, commentator, move_desc, ai_desc, moves_played)
+                await server._send_state(last_move={"from": list(ai_from), "to": list(ai_chain[-1])})
 
         finally:
             if tunnel_conn:
@@ -128,18 +128,25 @@ class CheckersSkill(Skill):
 
         return {"status": "game_over", "moves": moves_played}
 
-    async def _comment_move(self, server, commentator, move_desc: str, move_num: int):
-        """Ask LLM to comment on the user's move."""
-        board_str = self._board_to_text(server.board)
-        prompt = (
-            f"Ход #{move_num} белых: {move_desc}.\n"
-            f"Позиция:\n{board_str}"
-        )
-        await commentator.memory.add_turn({"role": "user", "content": prompt})
-        _, text = await commentator.llm()
-        if text:
-            await commentator.memory.add_turn({"role": "assistant", "content": text})
-            await server.send_comment(text)
+    async def _comment_moves(self, server, commentator, white_desc: str, black_desc: str, move_num: int):
+        """Ask LLM to comment on both moves in one call."""
+        try:
+            board_str = self._board_to_text(server.board)
+            prompt = (
+                f"Ход #{move_num}.\n"
+                f"Белые: {white_desc}\n"
+                f"Чёрные: {black_desc}\n"
+                f"Позиция после:\n{board_str}\n"
+                f"Напиши два коротких комментария — один про ход белых, другой про ход чёрных."
+            )
+            await commentator.memory.add_turn({"role": "user", "content": prompt})
+            _, text = await commentator.llm()
+            if text:
+                await commentator.memory.add_turn({"role": "assistant", "content": text})
+                await server.send_comment(text)
+        except Exception as e:
+            log.warning("[checkers] LLM comment failed: %s", e)
+            await self.agent.transport.send_message(f"Не удалось сгенерировать комментарий: {e}")
 
     def _board_to_text(self, board: Board) -> str:
         symbols = {0: ".", 1: "w", 2: "b", 3: "W", 4: "B"}

@@ -39,7 +39,7 @@ ws.onmessage = e => {
         selected = null;
         if (gameOver) statusEl.textContent = 'Игра окончена!';
         else if (Object.keys(validMoves).length > 0) statusEl.textContent = 'Ваш ход (белые)';
-        else statusEl.textContent = 'Ожидание...';
+        else statusEl.textContent = 'Ход соперника...';
         if (msg.comment) commentEl.textContent = msg.comment;
         draw();
     } else if (msg.type === 'comment') {
@@ -89,7 +89,7 @@ function draw() {
 }
 
 canvas.addEventListener('click', e => {
-    if (gameOver) return;
+    if (gameOver || Object.keys(validMoves).length === 0) return;
     const rect = canvas.getBoundingClientRect();
     const c = Math.floor((e.clientX - rect.left) / CELL);
     const r = Math.floor((e.clientY - rect.top) / CELL);
@@ -109,7 +109,9 @@ canvas.addEventListener('click', e => {
         if (match) {
             ws.send(JSON.stringify({ type: 'move', from: selected, chain: match }));
             selected = null;
-            statusEl.textContent = 'Ожидание ответа...';
+            validMoves = {};
+            statusEl.textContent = 'Ход соперника...';
+            draw();
         } else if (validMoves[key]) {
             selected = [r, c];
             draw();

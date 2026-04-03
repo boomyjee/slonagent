@@ -1,13 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/Scripts/python.exe src/skills/sandbox/container_lib/runner.py \"memory/workspace/tools/get_user.py\" --introspect)",
-      "Bash(.venv/Scripts/python.exe src/skills/sandbox/container_lib/runner.py \"memory/workspace/tools/mipt_board.py\" --introspect)",
-      "Bash(.venv/Scripts/python.exe -c ':*)",
-      "Bash(cd *)",
-      "Bash(git *)",
-      "Bash(.venv/Scripts/python.exe start.bat --cli)",
-      "Bash(.venv/Scripts/python.exe scripts/diary_enrichment/validate.py 2021)"
+      "Bash(*)"
     ]
   }
 }

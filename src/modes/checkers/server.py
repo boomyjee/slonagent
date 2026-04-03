@@ -46,11 +46,11 @@ class CheckersServer:
             except WebSocketDisconnect:
                 self.ws = None
 
-    async def _send_state(self, last_move=None, comment=None):
+    async def _send_state(self, last_move=None, comment=None, your_turn=True):
         if not self.ws:
             return
         valid_moves = {}
-        if not self.game_over:
+        if not self.game_over and your_turn:
             raw = self.board.get_all_moves(1)
             valid_moves = {f"{r},{c}": chains for (r, c), chains in raw.items()}
         msg = {
@@ -83,7 +83,18 @@ class CheckersServer:
         import uvicorn
         config = uvicorn.Config(self.app, host="0.0.0.0", port=self.port, log_level="warning")
         server = uvicorn.Server(config)
-        asyncio.create_task(server.serve())
-        while not server.started:
+        self._server = server
+
+        async def _serve():
+            try:
+                await server.serve()
+            except SystemExit:
+                pass
+
+        asyncio.create_task(_serve())
+        for _ in range(50):
+            if server.started:
+                log.info("[checkers] server started on port %d", self.port)
+                return
             await asyncio.sleep(0.1)
-        log.info("[checkers] server started on port %d", self.port)
+        raise RuntimeError(f"Failed to start server on port {self.port}")
