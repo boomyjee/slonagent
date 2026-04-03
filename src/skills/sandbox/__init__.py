@@ -408,6 +408,23 @@ class SandboxSkill(Skill):
         except Exception as e:
             return {"error": str(e)}
 
+    @tool("Создать новый файл или полностью перезаписать существующий.")
+    def write(
+        self,
+        path: Annotated[str, "Путь к файлу."],
+        content: Annotated[str, "Содержимое файла."],
+    ):
+        host_path = self.resolve_path(path)
+        if host_path is None:
+            return {"error": f"Доступ запрещён: {path}"}
+        try:
+            os.makedirs(os.path.dirname(host_path), exist_ok=True)
+            with open(host_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {"status": "ok", "path": path}
+        except Exception as e:
+            return {"error": str(e)}
+
     @tool("Поиск текста по файлам (regex). Возвращает совпавшие строки с номерами.")
     def grep(
         self,

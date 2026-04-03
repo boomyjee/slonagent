@@ -73,7 +73,7 @@
             {"__class__": "src.skills.sandbox.SandboxSkill"},
             {"__class__": "src.skills.skill_writer.SkillWriterSkill"},
             {"__class__": "src.skills.nano_banana.NanoBananaSkill", "api_key": "$keys.gemini"},
-            {"__class__": "src.skills.brave_search.BraveSearchSkill", "api_key": "$keys.brave"},
+            {"__class__": "src.skills.web.WebSkill", "api_key": "$keys.brave"},
             {"__class__": "src.skills.cron.CronSkill"}
         ]
     }
