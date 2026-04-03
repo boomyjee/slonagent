@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(*)"
+      "Bash(*)",
+      "WebSearch",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)"
     ]
   }
 }

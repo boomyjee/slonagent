@@ -345,49 +345,127 @@ class SandboxSkill(Skill):
 
         return {**res, "stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
 
-    @tool("Прочитать текстовый файл из workspace.")
-    def read_file(
-        self,
-        path: Annotated[str, "Путь к файлу внутри контейнера (например /workspace/notes.txt)."],
-        offset: Annotated[int, "Начальная строка (1-based). По умолчанию 1."] = 1,
-        limit: Annotated[int, "Максимальное число строк. По умолчанию 1000."] = 1000,
-    ):
+    _IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp"}
+    _IMAGE_MIME = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                   "gif": "image/gif", "webp": "image/webp"}
+
+    def _check_path(self, path: str) -> tuple[str | None, dict | None]:
         host_path = self.resolve_path(path)
         if host_path is None:
-            return {"error": f"Доступ запрещён: {path}"}
+            return None, {"error": f"Доступ запрещён: {path}"}
         if not os.path.exists(host_path):
-            return {"error": f"Файл не найден: {path}"}
+            return None, {"error": f"Файл не найден: {path}"}
+        return host_path, None
+
+    @tool("Прочитать файл. Текстовые файлы возвращают содержимое, изображения передаются в LLM для анализа.")
+    def read(
+        self,
+        path: Annotated[str, "Путь к файлу (например /workspace/notes.txt или /mnt/c/project/main.py)."],
+        offset: Annotated[int, "Начальная строка (1-based). По умолчанию 1."] = 1,
+        limit: Annotated[int, "Максимальное число строк. По умолчанию 2000."] = 2000,
+    ):
+        host_path, err = self._check_path(path)
+        if err:
+            return err
+        ext = os.path.splitext(host_path)[1].lower().lstrip(".")
+        if ext in self._IMAGE_EXTS:
+            with open(host_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            mime = self._IMAGE_MIME.get(ext, "image/jpeg")
+            return {"_parts": [{"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}
         try:
             with open(host_path, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
             start = max(0, offset - 1)
             chunk = lines[start:start + limit]
-            return {
-                "content": "".join(chunk),
-                "total_lines": len(lines),
-                "returned_lines": len(chunk),
-                "offset": start + 1,
-            }
+            return {"content": "".join(chunk), "total_lines": len(lines), "returned_lines": len(chunk), "offset": start + 1}
         except Exception as e:
             return {"error": str(e)}
 
-    @tool("Посмотреть изображение из workspace — передаёт его в LLM для анализа.")
-    def view_image(
+    @tool("Заменить текст в файле. old_string должен быть уникальным фрагментом файла.")
+    def edit(
         self,
-        path: Annotated[str, "Путь к изображению внутри контейнера (например /workspace/photo.png)."],
+        path: Annotated[str, "Путь к файлу."],
+        old_string: Annotated[str, "Текст для замены (должен быть уникальным в файле)."],
+        new_string: Annotated[str, "Новый текст."],
+        replace_all: Annotated[bool, "Заменить все вхождения (по умолчанию false)."] = False,
     ):
-        host_path = self.resolve_path(path)
-        if host_path is None:
-            return {"error": f"Доступ запрещён: {path}"}
-        if not os.path.exists(host_path):
-            return {"error": f"Файл не найден: {path}"}
+        host_path, err = self._check_path(path)
+        if err:
+            return err
+        try:
+            with open(host_path, encoding="utf-8") as f:
+                content = f.read()
+            count = content.count(old_string)
+            if count == 0:
+                return {"error": "old_string не найден в файле"}
+            if count > 1 and not replace_all:
+                return {"error": f"old_string найден {count} раз — используй replace_all=true или передай более длинный фрагмент"}
+            new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+            with open(host_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            return {"status": "ok", "replacements": count if replace_all else 1}
+        except Exception as e:
+            return {"error": str(e)}
 
-        ext = os.path.splitext(host_path)[1].lower().lstrip(".")
-        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/jpeg")
+    @tool("Поиск текста по файлам (regex). Возвращает совпавшие строки с номерами.")
+    def grep(
+        self,
+        pattern: Annotated[str, "Регулярное выражение для поиска."],
+        path: Annotated[str, "Путь к файлу или директории."],
+        glob_filter: Annotated[str, "Фильтр файлов, например *.py (опционально)."] = "",
+        max_results: Annotated[int, "Максимум результатов. По умолчанию 50."] = 50,
+    ):
+        import re, fnmatch
+        host_path, err = self._check_path(path)
+        if err:
+            return err
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            return {"error": f"Невалидный regex: {e}"}
+        results = []
+        files = []
+        if os.path.isfile(host_path):
+            files = [host_path]
+        else:
+            for root, _, fnames in os.walk(host_path):
+                for fn in fnames:
+                    if glob_filter and not fnmatch.fnmatch(fn, glob_filter):
+                        continue
+                    files.append(os.path.join(root, fn))
+        for fpath in files:
+            try:
+                with open(fpath, encoding="utf-8", errors="replace") as f:
+                    for i, line in enumerate(f, 1):
+                        if regex.search(line):
+                            rel = os.path.relpath(fpath, host_path) if os.path.isdir(host_path) else os.path.basename(fpath)
+                            results.append(f"{rel}:{i}: {line.rstrip()}")
+                            if len(results) >= max_results:
+                                return {"matches": results, "truncated": True}
+            except (UnicodeDecodeError, PermissionError):
+                continue
+        return {"matches": results, "truncated": False}
 
-        with open(host_path, "rb") as f:
-            img_bytes = f.read()
-
-        b64 = base64.b64encode(img_bytes).decode()
-        return {"_parts": [{"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}
+    @tool("Найти файлы по glob-паттерну.")
+    def glob(
+        self,
+        pattern: Annotated[str, "Glob-паттерн, например **/*.py или *.txt."],
+        path: Annotated[str, "Директория для поиска."],
+    ):
+        import fnmatch
+        host_path, err = self._check_path(path)
+        if err:
+            return err
+        if not os.path.isdir(host_path):
+            return {"error": f"Не директория: {path}"}
+        matches = []
+        for root, dirs, fnames in os.walk(host_path):
+            # Skip hidden dirs
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for fn in fnames:
+                rel = os.path.relpath(os.path.join(root, fn), host_path).replace(os.sep, "/")
+                if fnmatch.fnmatch(rel, pattern):
+                    matches.append(rel)
+        matches.sort()
+        return {"files": matches[:500], "total": len(matches)}
