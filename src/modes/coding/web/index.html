@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Coding Mode</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, sans-serif; height: 100vh; display: grid; grid-template-columns: 300px 1fr; }
+
+/* File panel */
+#file-panel { border-right: 1px solid #333; display: flex; flex-direction: column; overflow: hidden; }
+#file-tree { flex: 1; overflow-y: auto; padding: 8px; font-size: 13px; }
+#file-viewer { flex: 2; overflow: auto; border-top: 1px solid #333; }
+#file-viewer pre { margin: 0; padding: 8px; font-size: 12px; }
+#file-viewer .path-bar { padding: 4px 8px; background: #222; font-size: 12px; color: #888; border-bottom: 1px solid #333; }
+
+.tree-item { padding: 3px 8px; cursor: pointer; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-item:hover { background: #2a2a4e; }
+.tree-item.dir::before { content: '📁 '; }
+.tree-item.file::before { content: '📄 '; }
+.tree-item.active { background: #333366; }
+
+/* Chat panel */
+#chat-panel { display: flex; flex-direction: column; }
+#messages { flex: 1; overflow-y: auto; padding: 12px; }
+#input-area { padding: 8px; border-top: 1px solid #333; display: flex; gap: 8px; }
+#input-area textarea { flex: 1; background: #222; color: #e0e0e0; border: 1px solid #444; border-radius: 6px; padding: 8px; font-size: 14px; resize: none; height: 60px; font-family: inherit; }
+#input-area button { background: #4466aa; color: white; border: none; border-radius: 6px; padding: 8px 16px; cursor: pointer; font-size: 14px; }
+#input-area button:hover { background: #5577bb; }
+
+.msg { margin-bottom: 12px; padding: 8px 12px; border-radius: 8px; max-width: 90%; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; line-height: 1.5; }
+.msg.user { background: #2a2a4e; margin-left: auto; }
+.msg.assistant { background: #1e3a1e; }
+.msg.tool { background: #3a2a1e; font-size: 12px; font-family: monospace; }
+.msg code { background: #333; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+.msg pre code { display: block; padding: 8px; border-radius: 4px; overflow-x: auto; background: #0d1117; }
+</style>
+</head>
+<body>
+
+<div id="file-panel">
+    <div id="file-tree"></div>
+    <div id="file-viewer">
+        <div class="path-bar" id="viewer-path">Select a file</div>
+        <pre><code id="viewer-code"></code></pre>
+    </div>
+</div>
+
+<div id="chat-panel">
+    <div id="messages"></div>
+    <div id="input-area">
+        <textarea id="chat-input" placeholder="Ask about the code..."></textarea>
+        <button id="send-btn">Send</button>
+    </div>
+</div>
+
+<script>
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('chat-input');
+const sendBtn = document.getElementById('send-btn');
+const treeEl = document.getElementById('file-tree');
+const viewerPath = document.getElementById('viewer-path');
+const viewerCode = document.getElementById('viewer-code');
+
+let currentPath = '__ROOT_PATH__';
+
+// File tree
+async function loadDir(path) {
+    const r = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
+    const data = await r.json();
+    if (data.error) { treeEl.textContent = data.error; return; }
+
+    treeEl.innerHTML = '';
+    if (path !== '/workspace') {
+        const up = document.createElement('div');
+        up.className = 'tree-item dir';
+        up.textContent = '..';
+        up.onclick = () => { currentPath = path.split('/').slice(0, -1).join('/') || '/workspace'; loadDir(currentPath); };
+        treeEl.appendChild(up);
+    }
+    for (const e of data.entries) {
+        const el = document.createElement('div');
+        el.className = 'tree-item ' + (e.is_dir ? 'dir' : 'file');
+        el.textContent = e.name;
+        el.onclick = () => {
+            if (e.is_dir) { currentPath = e.path; loadDir(e.path); }
+            else { loadFile(e.path); }
+        };
+        treeEl.appendChild(el);
+    }
+}
+
+async function loadFile(path) {
+    document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active'));
+    event?.target?.classList.add('active');
+    viewerPath.textContent = path;
+    const r = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
+    const data = await r.json();
+    if (data.error) { viewerCode.textContent = data.error; return; }
+    viewerCode.textContent = data.content;
+    const ext = path.split('.').pop();
+    viewerCode.className = ext ? `language-${ext}` : '';
+    hljs.highlightElement(viewerCode);
+}
+
+// Chat
+function addMessage(role, text) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + role;
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function sendChat() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    ws.send(JSON.stringify({ type: 'chat', text }));
+    inputEl.value = '';
+}
+
+sendBtn.onclick = sendChat;
+inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+
+ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'message') {
+        addMessage(msg.role, msg.text);
+    } else if (msg.type === 'tool_call') {
+        addMessage('tool', `[${msg.name}] ${JSON.stringify(msg.args, null, 2).substring(0, 500)}`);
+    } else if (msg.type === 'files_changed') {
+        loadDir(currentPath);
+        // Reload current file if open
+        if (viewerPath.textContent !== 'Select a file') loadFile(viewerPath.textContent);
+    }
+};
+
+ws.onclose = () => addMessage('tool', '[Connection closed]');
+
+loadDir(currentPath);
+</script>
+</body>
+</html>

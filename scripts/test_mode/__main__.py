@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 
 os.chdir(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -44,7 +43,7 @@ async def main():
 
     allowed = config["telegram"]["allowed_user_ids"]
     transport = TelegramTransport(bot=bot, chat_id=allowed[0], thread_id=None, agent_id="mode", verbose=False)
-    agent = Agent.from_config(config["agent"], agent_dir=tempfile.mkdtemp(), transport=transport)
+    agent = Agent.from_config(config["agent"], agent_dir=os.path.join(os.path.dirname(__file__)), transport=transport)
     await agent.start(run_loop=False)
 
     async def on_message(message: Message):

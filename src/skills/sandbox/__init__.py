@@ -207,6 +207,8 @@ class SandboxSkill(Skill):
         return result
 
     def resolve_path(self, container_path: str) -> str | None:
+        if container_path == "/workspace":
+            return self.workspace_dir
         if container_path.startswith("/workspace/"):
             return os.path.join(self.workspace_dir, container_path[len("/workspace/"):])
         for host, container in self._mounts().items():
