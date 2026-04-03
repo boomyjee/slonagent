@@ -56,7 +56,7 @@ async def main():
             await getattr(skill, start_method)()
         else:
             print(f"Method '{start_method}' not found.")
-        dp.stop_polling()
+        await dp.stop_polling()
 
     dp.message()(on_message)
     await bot.get_updates(offset=-1)

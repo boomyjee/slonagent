@@ -259,14 +259,28 @@ class SandboxSkill(Skill):
             args += ["-v", f"{host}:{container}:ro"]
         return args
 
+    @staticmethod
+    def _norm(path: str) -> str:
+        """Normalize path for comparison: Windows→WSL mount format, lowercase."""
+        p = path.replace("\\", "/").rstrip("/").lower()
+        # Convert Windows drive path to WSL: e:/foo → /mnt/e/foo
+        if len(p) >= 2 and p[1] == ":":
+            p = f"/mnt/{p[0]}{p[2:]}"
+        return p
+
     async def _ensure_container(self):
         volume_args = self._volume_args()
-        desired_destinations = {"/workspace", "/slonagent"} | set(self._mounts().values())
+        desired_mounts = {
+            (self._norm(self.workspace_dir), "/workspace"),
+            (self._norm(self._lib_dir()), "/slonagent"),
+        }
+        for host, container in self._mounts().items():
+            desired_mounts.add((self._norm(host), container))
         env_image = f"{self.container_name}_env"
 
         inspect = await self._run(
             [self.runtime, "inspect", "--format",
-             "{{.State.Running}}\n{{range .Mounts}}{{.Destination}}\n{{end}}",
+             '{{.State.Running}}\n{{range .Mounts}}{{.Source}}\t{{.Destination}}\n{{end}}',
              self.container_name],
             capture_output=True, text=True, encoding="utf-8",
         )
@@ -278,12 +292,16 @@ class SandboxSkill(Skill):
         else:
             lines = inspect.stdout.strip().splitlines()
             running = lines[0] == "true"
-            actual_destinations = {l.strip() for l in lines[1:] if l.strip()}
+            actual_mounts = set()
+            for l in lines[1:]:
+                parts = l.strip().split("\t")
+                if len(parts) == 2:
+                    actual_mounts.add((self._norm(parts[0]), parts[1]))
 
             if not running:
                 await self._run([self.runtime, "start", self.container_name], check=True)
                 logging.info("[exec] Контейнер %s запущен", self.container_name)
-            elif actual_destinations != desired_destinations:
+            elif actual_mounts != desired_mounts:
                 logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
                 await self._run([self.runtime, "commit", self.container_name, env_image], check=True)
                 await self._run([self.runtime, "rm", "-f", self.container_name], capture_output=True)

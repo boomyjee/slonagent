@@ -60,6 +60,7 @@ class CodingModeSkill(Skill):
         parent_web = next((s for s in self.agent.skills if isinstance(s, WebSkill)), None)
         workspace_dir = parent_sandbox.workspace_dir if parent_sandbox else None
 
+        log.info("[coding] parent_sandbox=%s workspace_dir=%s", parent_sandbox, workspace_dir)
         finish_skill = FinishSkill()
         sub = await self.agent.spawn_subagent(
             "coding_mode",
