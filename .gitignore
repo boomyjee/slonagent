@@ -48,8 +48,9 @@ desktop.ini
 # Отчёты скриптов
 /*.html
 
-# diary_enrichment — личные данные и конфиг
+# scripts — личные данные и конфиги
 scripts/diary_enrichment/data/
-scripts/diary_enrichment/config*.json
+scripts/diary_enrichment/.config.json
 scripts/diary_enrichment/memory/
 scripts/diary_enrichment_old/
+scripts/test_mode/.config.json

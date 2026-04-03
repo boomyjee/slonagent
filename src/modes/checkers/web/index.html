@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Шашки</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif; color: #e0e0e0; }
+#status { margin: 12px 0; font-size: 16px; min-height: 24px; }
+canvas { border: 2px solid #444; border-radius: 4px; cursor: pointer; touch-action: none; }
+#comment { margin: 12px 0; font-style: italic; max-width: 400px; text-align: center; min-height: 20px; color: #aaa; }
+</style>
+</head>
+<body>
+<div id="status">Ваш ход (белые)</div>
+<canvas id="board" width="400" height="400"></canvas>
+<div id="comment"></div>
+
+<script>
+const CELL = 50;
+const COLORS = { light: '#f0d9b5', dark: '#b58863', selected: '#7fc97f', valid: '#7fc9c9',
+                 white: '#fff', black: '#333', whiteKing: '#ffe066', blackKing: '#666', lastMove: '#c9a97f' };
+
+let board = [], validMoves = {}, selected = null, gameOver = false, lastMove = null;
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const commentEl = document.getElementById('comment');
+
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'state') {
+        board = msg.board;
+        validMoves = msg.valid_moves || {};
+        gameOver = msg.game_over;
+        lastMove = msg.last_move || null;
+        selected = null;
+        if (gameOver) statusEl.textContent = 'Игра окончена!';
+        else if (Object.keys(validMoves).length > 0) statusEl.textContent = 'Ваш ход (белые)';
+        else statusEl.textContent = 'Ожидание...';
+        if (msg.comment) commentEl.textContent = msg.comment;
+        draw();
+    } else if (msg.type === 'comment') {
+        commentEl.textContent = msg.text;
+    }
+};
+
+function draw() {
+    const validDests = new Set();
+    if (selected) {
+        const key = selected[0] + ',' + selected[1];
+        const chains = validMoves[key] || [];
+        chains.forEach(chain => { if (chain.length > 0) validDests.add(chain[0][0] + ',' + chain[0][1]); });
+    }
+
+    for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+            const isDark = (r + c) % 2 === 1;
+            let bg = isDark ? COLORS.dark : COLORS.light;
+            if (lastMove && ((lastMove.from[0]===r && lastMove.from[1]===c) || (lastMove.to[0]===r && lastMove.to[1]===c)))
+                bg = COLORS.lastMove;
+            if (selected && selected[0]===r && selected[1]===c) bg = COLORS.selected;
+            if (validDests.has(r+','+c)) bg = COLORS.valid;
+
+            ctx.fillStyle = bg;
+            ctx.fillRect(c*CELL, r*CELL, CELL, CELL);
+
+            const p = board[r][c];
+            if (p > 0) {
+                ctx.beginPath();
+                ctx.arc(c*CELL+CELL/2, r*CELL+CELL/2, CELL*0.38, 0, Math.PI*2);
+                ctx.fillStyle = (p===1||p===3) ? COLORS.white : COLORS.black;
+                ctx.fill();
+                ctx.strokeStyle = '#888';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                if (p===3||p===4) {
+                    ctx.fillStyle = (p===3) ? COLORS.whiteKing : COLORS.blackKing;
+                    ctx.font = 'bold 18px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText('♛', c*CELL+CELL/2, r*CELL+CELL/2+1);
+                }
+            }
+        }
+    }
+}
+
+canvas.addEventListener('click', e => {
+    if (gameOver) return;
+    const rect = canvas.getBoundingClientRect();
+    const c = Math.floor((e.clientX - rect.left) / CELL);
+    const r = Math.floor((e.clientY - rect.top) / CELL);
+    if (r < 0 || r > 7 || c < 0 || c > 7) return;
+
+    const key = r + ',' + c;
+
+    if (!selected) {
+        if (validMoves[key]) {
+            selected = [r, c];
+            draw();
+        }
+    } else {
+        const selKey = selected[0] + ',' + selected[1];
+        const chains = validMoves[selKey] || [];
+        const match = chains.find(chain => chain.length > 0 && chain[0][0] === r && chain[0][1] === c);
+        if (match) {
+            ws.send(JSON.stringify({ type: 'move', from: selected, chain: match }));
+            selected = null;
+            statusEl.textContent = 'Ожидание ответа...';
+        } else if (validMoves[key]) {
+            selected = [r, c];
+            draw();
+        } else {
+            selected = null;
+            draw();
+        }
+    }
+});
+
+draw();
+</script>
+</body>
+</html>
