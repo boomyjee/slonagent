@@ -93,6 +93,12 @@ class FactProvider(BaseProvider):
         self.storage = Storage(sqlite_path, lancedb_path, self._embedding_model)
         log.info("[FactProvider] Storage initialized")
 
+    def get_tools(self) -> list:
+        tools = super().get_tools()
+        if not self._auto_recall:
+            tools = [t for t in tools if t["function"]["name"] != "fact_context_used"]
+        return tools
+
     # ── Consolidate (retain pipeline) ────────────────────────────────────────────
 
     async def _consolidate(self, pending: list) -> None:
