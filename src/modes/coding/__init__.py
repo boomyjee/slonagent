@@ -72,7 +72,6 @@ class CodingModeSkill(Skill):
                 finish_skill,
             ],
         )
-        sub.memory.clear()
         initial = f"Project root: {project_path}"
         if task:
             initial += f"\n\nTask: {task}"

@@ -4,7 +4,12 @@
       "Bash(*)",
       "WebSearch",
       "Skill(claude-api)",
-      "Skill(claude-api:*)"
+      "Skill(claude-api:*)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:registry.npmjs.org)",
+      "WebFetch(domain:api.github.com)"
     ]
   }
 }
