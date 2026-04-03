@@ -221,8 +221,10 @@ class TelegramTransport(BaseTransport):
         self._tool_call_text = ""
         self._pending_messages: list[Message] = []
         self._flush_task: asyncio.Task | None = None
-        self._pending_answer = {}
         self._typing_task: asyncio.Task | None = None
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._queue_task: asyncio.Task | None = None
+        self._last_edit_texts: dict[int, str] = {}  # msg_id → last sent text
 
     async def send_processing(self, active: bool):
         if active:
@@ -263,47 +265,69 @@ class TelegramTransport(BaseTransport):
             log.info("[telegram] set %d commands for %s", len(commands), self.agent_id or self.chat_id)
         asyncio.create_task(update_commands())
 
-    async def _tg_retry(self, fn):
-        for attempt in range(3):
+    async def _exec_item(self, item):
+        kind = item["kind"]
+        if kind == "send":
+            return await self.bot.send_message(
+                self.chat_id, item["text"],
+                message_thread_id=self.thread_id,
+                link_preview_options=self._no_link_preview,
+                **item["kwargs"],
+            )
+        elif kind == "edit":
+            msg, text = item["msg"], item["text"]
+            if self._last_edit_texts.get(msg.message_id) == text:
+                return msg
+            result = await msg.edit_text(text, link_preview_options=self._no_link_preview, **item["kwargs"])
+            self._last_edit_texts[msg.message_id] = text
+            return result
+
+    async def _queue_worker(self):
+        """Process send/edit queue with rate limiting."""
+        while True:
+            item = await self._queue.get()
+            future = item["future"]
             try:
-                return await fn()
+                future.set_result(await self._exec_item(item))
             except TelegramRetryAfter as e:
-                log.warning("Flood control, waiting %s sec (attempt %d)", e.retry_after, attempt + 1)
+                log.warning("Flood control, waiting %s sec", e.retry_after)
                 await asyncio.sleep(e.retry_after)
-        return await fn()
+                try:
+                    future.set_result(await self._exec_item(item))
+                except Exception as e2:
+                    future.set_exception(e2)
+            except Exception as e:
+                future.set_exception(e)
+            await asyncio.sleep(1)
+
+    def _ensure_queue(self):
+        if not self._queue_task or self._queue_task.done():
+            self._queue_task = asyncio.create_task(self._queue_worker())
 
     async def _send(self, text: str, **kwargs) -> Message:
-        return await self._tg_retry(lambda: self.bot.send_message(self.chat_id, text, message_thread_id=self.thread_id, link_preview_options=self._no_link_preview, **kwargs))
+        self._ensure_queue()
+        future = asyncio.get_event_loop().create_future()
+        self._queue.put_nowait({"kind": "send", "text": text, "kwargs": kwargs, "future": future})
+        return await future
 
     async def _edit(self, msg: Message, text: str, **kwargs) -> Message:
-        return await self._tg_retry(lambda: msg.edit_text(text, link_preview_options=self._no_link_preview, **kwargs))
+        self._ensure_queue()
+        future = asyncio.get_event_loop().create_future()
+        # Coalesce: replace pending edit for same message
+        new_queue = asyncio.Queue()
+        while not self._queue.empty():
+            item = self._queue.get_nowait()
+            if item["kind"] == "edit" and item["msg"].message_id == msg.message_id:
+                item["future"].set_result(msg)  # resolve old future
+            else:
+                new_queue.put_nowait(item)
+        self._queue = new_queue
+        self._queue.put_nowait({"kind": "edit", "msg": msg, "text": text, "kwargs": kwargs, "future": future})
+        return await future
     
     async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, collapsed: bool = True, prefix: str = "", max_chunks = None):
-        if messages is None: 
+        if messages is None:
             messages = []
-            await self._do_answer(text, messages, expandable, collapsed, prefix, max_chunks)
-            return messages
-
-        key = id(messages)
-        pending = self._pending_answer.get(key)
-        self._pending_answer[key] = (text, collapsed)
-        if pending:
-            return messages
-
-        THROTLE_DELAY = 2.5
-        async def _do():
-            await asyncio.sleep(THROTLE_DELAY)
-            recent_text, recent_collapsed = self._pending_answer[key]
-            self._pending_answer[key] = None
-            try:
-                await self._do_answer(recent_text, messages, expandable, recent_collapsed, prefix, max_chunks)
-            except Exception as e:
-                log.error("_answer task failed: %s", e)
-
-        asyncio.create_task(_do())
-        return messages
-    
-    async def _do_answer(self, text: str, messages: list | None = None, expandable: bool = False, collapsed: bool = True, prefix: str = "", max_chunks = None):
         if expandable:
             escaped_prefix = html.escape(prefix)
             overhead = len(escaped_prefix) + 36  # <blockquote expandable>…</blockquote>
@@ -341,6 +365,7 @@ class TelegramTransport(BaseTransport):
             except Exception:
                 pass
         del messages[len(bodies):]
+        return messages
 
     async def on_tool_call(self, name: str, args: dict):
         lines = "\n".join(f"{html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
