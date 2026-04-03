@@ -10,6 +10,7 @@ log = logging.getLogger(__name__)
 
 async def start_tunnel(port, subdomain, sish_domain, sish_port, sish_key):
     import asyncssh
+    logging.getLogger("asyncssh").setLevel(logging.WARNING)
     key = asyncssh.import_private_key(sish_key)
     conn = await asyncssh.connect(
         sish_domain, sish_port, known_hosts=None, client_keys=[key], username="tunnel",

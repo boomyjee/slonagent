@@ -5,7 +5,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 log = logging.getLogger(__name__)
@@ -61,6 +61,21 @@ class CodingServer:
                 with open(host_path, encoding="utf-8", errors="replace") as f:
                     content = f.read()
                 return JSONResponse({"path": path, "content": content})
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, 500)
+
+        @self.app.put("/api/file")
+        async def write_file(request):
+            data = await request.json()
+            path, content = data.get("path"), data.get("content")
+            host_path = self.resolve_path(path)
+            if host_path is None:
+                return JSONResponse({"error": f"Access denied: {path}"}, 403)
+            try:
+                os.makedirs(os.path.dirname(host_path), exist_ok=True)
+                with open(host_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return JSONResponse({"status": "ok"})
             except Exception as e:
                 return JSONResponse({"error": str(e)}, 500)
 

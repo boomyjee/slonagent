@@ -4,52 +4,67 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Coding Mode</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, sans-serif; height: 100vh; display: grid; grid-template-columns: 300px 1fr; }
+:root { --bg: #1e1e1e; --sidebar: #252526; --tab-bg: #2d2d2d; --tab-active: #1e1e1e; --border: #3e3e3e; --text: #cccccc; --text-dim: #888; --accent: #007acc; --chat-bg: #252526; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; height: 100vh; display: grid; grid-template-columns: 220px 4px 1fr 4px 350px; overflow: hidden; font-size: 13px; }
+.resizer { background: var(--border); cursor: col-resize; transition: background 0.15s; }
+.resizer:hover, .resizer.active { background: var(--accent); }
 
-/* File panel */
-#file-panel { border-right: 1px solid #333; display: flex; flex-direction: column; overflow: hidden; }
-#file-tree { flex: 1; overflow-y: auto; padding: 8px; font-size: 13px; }
-#file-viewer { flex: 2; overflow: auto; border-top: 1px solid #333; }
-#file-viewer pre { margin: 0; padding: 8px; font-size: 12px; }
-#file-viewer .path-bar { padding: 4px 8px; background: #222; font-size: 12px; color: #888; border-bottom: 1px solid #333; }
+/* Sidebar — file tree */
+#sidebar { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+#sidebar-header { padding: 10px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+#tree { flex: 1; overflow-y: auto; padding: 4px 0; }
+.tree-node { display: flex; align-items: center; padding: 2px 8px 2px; cursor: pointer; white-space: nowrap; user-select: none; }
+.tree-node:hover { background: #2a2d2e; }
+.tree-node.active { background: #37373d; }
+.tree-node .icon { width: 16px; text-align: center; margin-right: 4px; font-size: 12px; flex-shrink: 0; }
+.tree-node .name { overflow: hidden; text-overflow: ellipsis; }
+.tree-children { display: none; }
+.tree-children.open { display: block; }
 
-.tree-item { padding: 3px 8px; cursor: pointer; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tree-item:hover { background: #2a2a4e; }
-.tree-item.dir::before { content: '📁 '; }
-.tree-item.file::before { content: '📄 '; }
-.tree-item.active { background: #333366; }
+/* Editor area */
+#editor-area { display: flex; flex-direction: column; overflow: hidden; }
+#tabs { display: flex; background: var(--tab-bg); border-bottom: 1px solid var(--border); min-height: 35px; overflow-x: auto; }
+.tab { display: flex; align-items: center; padding: 0 12px; height: 35px; cursor: pointer; border-right: 1px solid var(--border); font-size: 13px; white-space: nowrap; color: var(--text-dim); gap: 6px; }
+.tab.active { background: var(--tab-active); color: var(--text); }
+.tab .close { font-size: 14px; opacity: 0.5; cursor: pointer; }
+.tab .close:hover { opacity: 1; }
+#editor-container { flex: 1; }
+#welcome { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 16px; }
 
 /* Chat panel */
-#chat-panel { display: flex; flex-direction: column; }
-#messages { flex: 1; overflow-y: auto; padding: 12px; }
-#input-area { padding: 8px; border-top: 1px solid #333; display: flex; gap: 8px; }
-#input-area textarea { flex: 1; background: #222; color: #e0e0e0; border: 1px solid #444; border-radius: 6px; padding: 8px; font-size: 14px; resize: none; height: 60px; font-family: inherit; }
-#input-area button { background: #4466aa; color: white; border: none; border-radius: 6px; padding: 8px 16px; cursor: pointer; font-size: 14px; }
-#input-area button:hover { background: #5577bb; }
+#chat { background: var(--chat-bg); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+#chat-header { padding: 10px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+#messages { flex: 1; overflow-y: auto; padding: 8px; }
+#input-area { padding: 8px; border-top: 1px solid var(--border); display: flex; gap: 6px; }
+#input-area textarea { flex: 1; background: #3c3c3c; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 13px; resize: none; height: 56px; font-family: inherit; outline: none; }
+#input-area textarea:focus { border-color: var(--accent); }
+#input-area button { background: var(--accent); color: white; border: none; border-radius: 4px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
 
-.msg { margin-bottom: 12px; padding: 8px 12px; border-radius: 8px; max-width: 90%; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; line-height: 1.5; }
-.msg.user { background: #2a2a4e; margin-left: auto; }
-.msg.assistant { background: #1e3a1e; }
-.msg.tool { background: #3a2a1e; font-size: 12px; font-family: monospace; }
-.msg code { background: #333; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
-.msg pre code { display: block; padding: 8px; border-radius: 4px; overflow-x: auto; background: #0d1117; }
+.msg { margin-bottom: 8px; padding: 6px 10px; border-radius: 6px; white-space: pre-wrap; word-wrap: break-word; font-size: 13px; line-height: 1.5; }
+.msg.user { background: #264f78; }
+.msg.assistant { background: #1a3a1a; }
+.msg.tool { background: #3a2a1a; font-size: 11px; font-family: 'Cascadia Code', 'Fira Code', monospace; max-height: 120px; overflow-y: auto; }
 </style>
 </head>
 <body>
 
-<div id="file-panel">
-    <div id="file-tree"></div>
-    <div id="file-viewer">
-        <div class="path-bar" id="viewer-path">Select a file</div>
-        <pre><code id="viewer-code"></code></pre>
-    </div>
+<div id="sidebar">
+    <div id="sidebar-header">Explorer</div>
+    <div id="tree"></div>
 </div>
+<div class="resizer" id="resizer-left"></div>
 
-<div id="chat-panel">
+<div id="editor-area">
+    <div id="tabs"></div>
+    <div id="welcome">Select a file to view</div>
+    <div id="editor-container" style="display:none;"></div>
+</div>
+<div class="resizer" id="resizer-right"></div>
+
+<div id="chat">
+    <div id="chat-header">Chat</div>
     <div id="messages"></div>
     <div id="input-area">
         <textarea id="chat-input" placeholder="Ask about the code..."></textarea>
@@ -57,57 +72,143 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, sans-ser
     </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
 <script>
-const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+const ROOT = '__ROOT_PATH__';
+const treeEl = document.getElementById('tree');
+const tabsEl = document.getElementById('tabs');
+const editorContainer = document.getElementById('editor-container');
+const welcomeEl = document.getElementById('welcome');
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('chat-input');
-const sendBtn = document.getElementById('send-btn');
-const treeEl = document.getElementById('file-tree');
-const viewerPath = document.getElementById('viewer-path');
-const viewerCode = document.getElementById('viewer-code');
 
-let currentPath = '__ROOT_PATH__';
+// Monaco setup
+let editor = null;
+require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs' }});
+require(['vs/editor/editor.main'], function() {
+    editor = monaco.editor.create(editorContainer, {
+        value: '',
+        language: 'plaintext',
+        theme: 'vs-dark',
+        readOnly: false,
+        minimap: { enabled: true },
+        fontSize: 13,
+        automaticLayout: true,
+        scrollBeyondLastLine: false,
+    });
+});
+
+// State
+const openTabs = []; // {path, content, model}
+let activeTab = null;
 
 // File tree
-async function loadDir(path) {
+async function loadTree(container, path, depth = 0) {
     const r = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
     const data = await r.json();
-    if (data.error) { treeEl.textContent = data.error; return; }
+    if (data.error) return;
 
-    treeEl.innerHTML = '';
-    if (path !== '/workspace') {
-        const up = document.createElement('div');
-        up.className = 'tree-item dir';
-        up.textContent = '..';
-        up.onclick = () => { currentPath = path.split('/').slice(0, -1).join('/') || '/workspace'; loadDir(currentPath); };
-        treeEl.appendChild(up);
-    }
-    for (const e of data.entries) {
-        const el = document.createElement('div');
-        el.className = 'tree-item ' + (e.is_dir ? 'dir' : 'file');
-        el.textContent = e.name;
-        el.onclick = () => {
-            if (e.is_dir) { currentPath = e.path; loadDir(e.path); }
-            else { loadFile(e.path); }
-        };
-        treeEl.appendChild(el);
+    const sorted = [...data.entries].sort((a, b) => {
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+    });
+    for (const e of sorted) {
+        const node = document.createElement('div');
+        node.className = 'tree-node';
+        node.style.paddingLeft = (12 + depth * 16) + 'px';
+
+        const icon = document.createElement('span');
+        icon.className = 'icon';
+        icon.textContent = e.is_dir ? '▶' : '';
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = e.name;
+
+        node.appendChild(icon);
+        node.appendChild(name);
+        container.appendChild(node);
+
+        if (e.is_dir) {
+            const children = document.createElement('div');
+            children.className = 'tree-children';
+            container.appendChild(children);
+            let loaded = false;
+            node.onclick = async (ev) => {
+                ev.stopPropagation();
+                const open = children.classList.toggle('open');
+                icon.textContent = open ? '▼' : '▶';
+                if (!loaded) { loaded = true; await loadTree(children, e.path, depth + 1); }
+            };
+        } else {
+            node.onclick = () => openFile(e.path, e.name);
+        }
     }
 }
 
-async function loadFile(path) {
-    document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active'));
-    event?.target?.classList.add('active');
-    viewerPath.textContent = path;
+async function openFile(path, name) {
+    let tab = openTabs.find(t => t.path === path);
+    if (tab) { activateTab(tab); return; }
+
+    // Create tab immediately with empty model
+    const ext = path.split('.').pop();
+    const langMap = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'typescript',json:'json',md:'markdown',html:'html',css:'css',yaml:'yaml',yml:'yaml',sh:'shell',bash:'shell',rs:'rust',go:'go',java:'java',rb:'ruby',c:'c',cpp:'cpp',h:'c',hpp:'cpp',toml:'ini',cfg:'ini',txt:'plaintext'};
+    const lang = langMap[ext] || 'plaintext';
+    const model = monaco.editor.createModel('Loading...', lang);
+
+    tab = { path, name, model };
+    openTabs.push(tab);
+    activateTab(tab);
+
+    // Load content async
     const r = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
     const data = await r.json();
-    if (data.error) { viewerCode.textContent = data.error; return; }
-    viewerCode.textContent = data.content;
-    const ext = path.split('.').pop();
-    viewerCode.className = ext ? `language-${ext}` : '';
-    hljs.highlightElement(viewerCode);
+    if (data.error) { model.setValue(`Error: ${data.error}`); return; }
+    model.setValue(data.content);
+}
+
+function activateTab(tab) {
+    activeTab = tab;
+    welcomeEl.style.display = 'none';
+    editorContainer.style.display = 'block';
+    editor.setModel(tab.model);
+    renderTabs();
+    // Highlight in tree
+    document.querySelectorAll('.tree-node').forEach(n => n.classList.remove('active'));
+}
+
+function closeTab(tab) {
+    const idx = openTabs.indexOf(tab);
+    if (idx === -1) return;
+    tab.model.dispose();
+    openTabs.splice(idx, 1);
+    if (activeTab === tab) {
+        if (openTabs.length > 0) {
+            activateTab(openTabs[Math.min(idx, openTabs.length - 1)]);
+        } else {
+            activeTab = null;
+            editorContainer.style.display = 'none';
+            welcomeEl.style.display = 'flex';
+        }
+    }
+    renderTabs();
+}
+
+function renderTabs() {
+    tabsEl.innerHTML = '';
+    for (const tab of openTabs) {
+        const el = document.createElement('div');
+        el.className = 'tab' + (tab === activeTab ? ' active' : '');
+        el.innerHTML = `<span>${tab.name}</span><span class="close">&times;</span>`;
+        el.querySelector('span').onclick = () => activateTab(tab);
+        el.querySelector('.close').onclick = (e) => { e.stopPropagation(); closeTab(tab); };
+        tabsEl.appendChild(el);
+    }
 }
 
 // Chat
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+
 function addMessage(role, text) {
     const el = document.createElement('div');
     el.className = 'msg ' + role;
@@ -123,7 +224,7 @@ function sendChat() {
     inputEl.value = '';
 }
 
-sendBtn.onclick = sendChat;
+document.getElementById('send-btn').onclick = sendChat;
 inputEl.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
@@ -135,15 +236,73 @@ ws.onmessage = e => {
     } else if (msg.type === 'tool_call') {
         addMessage('tool', `[${msg.name}] ${JSON.stringify(msg.args, null, 2).substring(0, 500)}`);
     } else if (msg.type === 'files_changed') {
-        loadDir(currentPath);
-        // Reload current file if open
-        if (viewerPath.textContent !== 'Select a file') loadFile(viewerPath.textContent);
+        // Reload tree
+        treeEl.innerHTML = '';
+        loadTree(treeEl, ROOT);
+        // Reload active file
+        if (activeTab) {
+            fetch(`/api/file?path=${encodeURIComponent(activeTab.path)}`)
+                .then(r => r.json())
+                .then(data => { if (!data.error) activeTab.model.setValue(data.content); });
+        }
     }
 };
 
 ws.onclose = () => addMessage('tool', '[Connection closed]');
 
-loadDir(currentPath);
+// Ctrl+S save
+document.addEventListener('keydown', async e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (!activeTab) return;
+        const content = activeTab.model.getValue();
+        const r = await fetch('/api/file', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({path: activeTab.path, content}),
+        });
+        const data = await r.json();
+        if (data.error) addMessage('tool', `Save failed: ${data.error}`);
+    }
+});
+
+loadTree(treeEl, ROOT);
+
+// Resizable panels
+function setupResizer(resizerId, side) {
+    const resizer = document.getElementById(resizerId);
+    let startX, startWidth;
+    const panel = side === 'left' ? document.getElementById('sidebar') : document.getElementById('chat');
+
+    resizer.addEventListener('mousedown', e => {
+        startX = e.clientX;
+        startWidth = panel.getBoundingClientRect().width;
+        resizer.classList.add('active');
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        e.preventDefault();
+    });
+
+    function onMove(e) {
+        const dx = e.clientX - startX;
+        const newWidth = side === 'left' ? startWidth + dx : startWidth - dx;
+        if (newWidth >= 120) {
+            document.body.style.gridTemplateColumns =
+                side === 'left'
+                    ? `${newWidth}px 4px 1fr 4px ${document.getElementById('chat').getBoundingClientRect().width}px`
+                    : `${document.getElementById('sidebar').getBoundingClientRect().width}px 4px 1fr 4px ${newWidth}px`;
+        }
+    }
+
+    function onUp() {
+        resizer.classList.remove('active');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+    }
+}
+
+setupResizer('resizer-left', 'left');
+setupResizer('resizer-right', 'right');
 </script>
 </body>
 </html>
