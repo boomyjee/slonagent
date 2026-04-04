@@ -78,7 +78,8 @@ class CodingModeSkill(Skill):
         await sub.memory.add_turn({"role": "user", "content": initial})
 
         sub_sandbox = next(s for s in sub.skills if isinstance(s, SandboxSkill))
-        server = CodingServer(self._port, sub_sandbox.resolve_path, project_path)
+        server = CodingServer(self._port, sub_sandbox.resolve_path, project_path,
+                              workspace_host_dir=sub_sandbox.workspace_dir)
         await server.start()
 
         # Tunnel
@@ -124,7 +125,6 @@ class CodingModeSkill(Skill):
                         await server.send_tool_call(name, args)
 
                     await sub.dispatch_tool_calls(tool_calls)
-                    await server.send_event("files_changed")
 
                     if finish_skill.finished:
                         break

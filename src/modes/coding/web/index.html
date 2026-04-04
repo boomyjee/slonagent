@@ -30,6 +30,9 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .tab.active { background: var(--tab-active); color: var(--text); }
 .tab .close { font-size: 14px; opacity: 0.5; cursor: pointer; }
 .tab .close:hover { opacity: 1; }
+.tab .dot { display: none; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.tab.dirty .dot { display: block; background: var(--text-dim); }
+.tab.disk-changed .dot { display: block; background: #e8a427; }
 #editor-container { flex: 1; }
 #welcome { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 16px; }
 
@@ -156,7 +159,7 @@ async function openFile(path, name) {
     const lang = langMap[ext] || 'plaintext';
     const model = monaco.editor.createModel('Loading...', lang);
 
-    tab = { path, name, model };
+    tab = { path, name, model, savedContent: '', dirty: false, diskChanged: false };
     openTabs.push(tab);
     activateTab(tab);
 
@@ -164,7 +167,13 @@ async function openFile(path, name) {
     const r = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
     const data = await r.json();
     if (data.error) { model.setValue(`Error: ${data.error}`); return; }
+    tab.savedContent = data.content;
     model.setValue(data.content);
+    model.onDidChangeContent(() => {
+        const wasDirty = tab.dirty;
+        tab.dirty = model.getValue() !== tab.savedContent;
+        if (tab.dirty !== wasDirty) renderTabs();
+    });
 }
 
 function activateTab(tab) {
@@ -198,9 +207,13 @@ function renderTabs() {
     tabsEl.innerHTML = '';
     for (const tab of openTabs) {
         const el = document.createElement('div');
-        el.className = 'tab' + (tab === activeTab ? ' active' : '');
-        el.innerHTML = `<span>${tab.name}</span><span class="close">&times;</span>`;
-        el.querySelector('span').onclick = () => activateTab(tab);
+        let cls = 'tab';
+        if (tab === activeTab) cls += ' active';
+        if (tab.diskChanged) cls += ' disk-changed';
+        else if (tab.dirty) cls += ' dirty';
+        el.className = cls;
+        el.innerHTML = `<span class="dot"></span><span>${tab.name}</span><span class="close">&times;</span>`;
+        el.querySelector('span:nth-child(2)').onclick = () => activateTab(tab);
         el.querySelector('.close').onclick = (e) => { e.stopPropagation(); closeTab(tab); };
         tabsEl.appendChild(el);
     }
@@ -236,14 +249,25 @@ ws.onmessage = e => {
     } else if (msg.type === 'tool_call') {
         addMessage('tool', `[${msg.name}] ${JSON.stringify(msg.args, null, 2).substring(0, 500)}`);
     } else if (msg.type === 'files_changed') {
-        // Reload tree
-        treeEl.innerHTML = '';
-        loadTree(treeEl, ROOT);
-        // Reload active file
-        if (activeTab) {
-            fetch(`/api/file?path=${encodeURIComponent(activeTab.path)}`)
-                .then(r => r.json())
-                .then(data => { if (!data.error) activeTab.model.setValue(data.content); });
+        const changedPaths = new Set(msg.paths || []);
+        if (msg.tree) {
+            treeEl.innerHTML = '';
+            loadTree(treeEl, ROOT);
+        }
+        for (const tab of openTabs) {
+            if (!changedPaths.has(tab.path)) continue;
+            if (tab.dirty) {
+                tab.diskChanged = true;
+                renderTabs();
+            } else {
+                fetch(`/api/file?path=${encodeURIComponent(tab.path)}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.error) return;
+                        tab.savedContent = data.content;
+                        tab.model.setValue(data.content);
+                    });
+            }
         }
     }
 };
@@ -255,6 +279,8 @@ document.addEventListener('keydown', async e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         if (!activeTab) return;
+        if (activeTab.diskChanged &&
+            !confirm('File was changed on disk. Overwrite with your version?')) return;
         const content = activeTab.model.getValue();
         const r = await fetch('/api/file', {
             method: 'PUT',
@@ -262,7 +288,11 @@ document.addEventListener('keydown', async e => {
             body: JSON.stringify({path: activeTab.path, content}),
         });
         const data = await r.json();
-        if (data.error) addMessage('tool', `Save failed: ${data.error}`);
+        if (data.error) { addMessage('tool', `Save failed: ${data.error}`); return; }
+        activeTab.savedContent = content;
+        activeTab.dirty = false;
+        activeTab.diskChanged = false;
+        renderTabs();
     }
 });
 

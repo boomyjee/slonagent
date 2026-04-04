@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from watchfiles import awatch, Change
 
 log = logging.getLogger(__name__)
 
@@ -14,14 +15,17 @@ WEB_DIR = Path(__file__).parent / "web"
 
 
 class CodingServer:
-    def __init__(self, port: int, resolve_path_fn, root_path: str = "/workspace"):
+    def __init__(self, port: int, resolve_path_fn, root_path: str = "/workspace",
+                 workspace_host_dir: str | None = None):
         self.port = port
         self.resolve_path = resolve_path_fn
         self.root_path = root_path
+        self.workspace_host_dir = workspace_host_dir
         self.app = FastAPI()
         self.ws: WebSocket | None = None
         self.chat_event = asyncio.Event()
         self.last_chat: str | None = None
+        self._watch_task: asyncio.Task | None = None
         self._setup_routes()
 
     def _setup_routes(self):
@@ -107,9 +111,35 @@ class CodingServer:
         if self.ws:
             await self.ws.send_text(json.dumps({"type": "tool_call", "name": name, "args": args}))
 
-    async def send_event(self, event: str):
+    async def send_event(self, event: str, **kwargs):
         if self.ws:
-            await self.ws.send_text(json.dumps({"type": event}))
+            await self.ws.send_text(json.dumps({"type": event, **kwargs}))
+
+    async def _watch_files(self):
+        if not self.workspace_host_dir:
+            return
+        try:
+            async for changes in awatch(self.workspace_host_dir):
+                if not self.ws:
+                    continue
+                host_base = Path(self.workspace_host_dir)
+                paths = []
+                has_create_delete = False
+                for change_type, path in changes:
+                    try:
+                        rel = "/" + Path(path).relative_to(host_base).as_posix()
+                    except ValueError:
+                        continue
+                    paths.append(rel)
+                    if change_type in (Change.added, Change.deleted):
+                        has_create_delete = True
+                if paths:
+                    await self.send_event("files_changed",
+                                          paths=paths, tree=has_create_delete)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("[coding] file watcher crashed")
 
     async def start(self):
         import uvicorn
@@ -126,6 +156,9 @@ class CodingServer:
         for _ in range(50):
             if server.started:
                 log.info("[coding] server started on port %d", self.port)
-                return
+                break
             await asyncio.sleep(0.1)
-        raise RuntimeError(f"Failed to start server on port {self.port}")
+        else:
+            raise RuntimeError(f"Failed to start server on port {self.port}")
+
+        self._watch_task = asyncio.create_task(self._watch_files())
