@@ -1,4 +1,4 @@
-import asyncio, base64, io, json, os, sys, inspect, logging
+import asyncio, base64, io, json, os, sys, inspect, logging, weakref
 import httpx
 import numpy as np
 import soundfile as sf
@@ -201,10 +201,17 @@ class Agent:
         agent = Agent.from_config(self._config, agent_dir=subagent_dir, **cfg_overrides)
         await agent.start(run_loop=False)
 
+        # Propagate subagent's stop → parent's tool_stop.
+        # Closure captures only Events (not agent) so weakref.finalize
+        # can cancel the task when agent is GC'd — no "Task was destroyed but pending" warnings.
+        stop_event = agent._stop_event
+        parent_tool_stop = self._tool_stop_event
+
         async def _propagate_stop():
-            await agent._stop_event.wait()
-            self._tool_stop_event.set()
-        asyncio.create_task(_propagate_stop())
+            await stop_event.wait()
+            parent_tool_stop.set()
+        task = asyncio.create_task(_propagate_stop())
+        weakref.finalize(agent, task.cancel)
 
         return agent
 
