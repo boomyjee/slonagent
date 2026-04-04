@@ -29,12 +29,15 @@ def make_collage(paths: list[Path], size: int = COLLAGE_SIZE) -> io.BytesIO:
     canvas = Image.new("RGB", (cols * cell, rows * cell), (0, 0, 0))
     for i, p in enumerate(paths):
         row, col = divmod(i, cols)
-        with Image.open(str(p)) as img:
-            img = ImageOps.exif_transpose(img)
-            img.thumbnail((cell, cell))
-            x = col * cell + (cell - img.width) // 2
-            y = row * cell + (cell - img.height) // 2
-            canvas.paste(img, (x, y))
+        try:
+            with Image.open(str(p)) as img:
+                img = ImageOps.exif_transpose(img)
+                img.thumbnail((cell, cell))
+                x = col * cell + (cell - img.width) // 2
+                y = row * cell + (cell - img.height) // 2
+                canvas.paste(img, (x, y))
+        except OSError:
+            continue
 
     buf = io.BytesIO()
     canvas.save(buf, format="JPEG", quality=60)
