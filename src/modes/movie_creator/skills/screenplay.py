@@ -33,19 +33,29 @@ class ScreenplaySkill(Skill):
             f"ТЕКУЩИЙ СЦЕНАРИЙ ({len(scenes)} сцен):\n{ctx}"
         )
 
-    @tool("Предложить новую сцену пользователю. Откроется окно редактирования, где он сможет поправить и сохранить.")
-    async def propose_scene(
+    @tool("Создать новую сцену. Пользователь сможет отредактировать и одобрить.")
+    async def create_scene(
         self,
         title: Annotated[str, "Название сцены"],
         location: Annotated[str, "Локация (напр. INT. КВАРТИРА - НОЧЬ)"] = "",
         text: Annotated[str, "Текст сцены (действие, диалоги)"] = "",
     ) -> dict:
-        await self.server.send_scene_proposal({
+        result = await self.server.request_approval("scene", {
             "title": title, "location": location, "text": text,
         })
-        return {"status": "proposed", "title": title}
+        if result.get("action") == "reject":
+            return {"status": "rejected", "reason": result.get("reason", "")}
+        data = result.get("data", {})
+        scene = self.project.create_scene(
+            title=data.get("title", title),
+            text=data.get("text", text),
+            location=data.get("location", location),
+        )
+        await self.server.send_event("project_updated",
+                                     project=self.project.to_dict())
+        return {"status": "created", "scene_id": scene.id}
 
-    @tool("Обновить существующую сцену по ID")
+    @tool("Обновить существующую сцену по ID. Пользователь сможет отредактировать и одобрить.")
     async def update_scene(
         self,
         scene_id: Annotated[str, "ID сцены для обновления"],
@@ -53,18 +63,19 @@ class ScreenplaySkill(Skill):
         location: Annotated[str, "Новая локация (пусто = не менять)"] = "",
         text: Annotated[str, "Новый текст (пусто = не менять)"] = "",
     ) -> dict:
-        fields = {}
-        if title:
-            fields["title"] = title
-        if location:
-            fields["location"] = location
-        if text:
-            fields["text"] = text
-        if not fields:
-            return {"error": "Nothing to update"}
-        scene = self.project.update_scene(scene_id, **fields)
+        scene = self.project.scenes.get(scene_id)
         if not scene:
             return {"error": f"Scene {scene_id} not found"}
+        proposed = {
+            "title": title or scene.title,
+            "location": location or scene.location,
+            "text": text or scene.text,
+        }
+        result = await self.server.request_approval("scene", proposed)
+        if result.get("action") == "reject":
+            return {"status": "rejected", "reason": result.get("reason", "")}
+        data = result.get("data", {})
+        self.project.update_scene(scene_id, **data)
         await self.server.send_event("project_updated",
                                      project=self.project.to_dict())
         return {"status": "updated", "scene_id": scene_id}

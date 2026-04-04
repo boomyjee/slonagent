@@ -20,9 +20,10 @@ class MovieServer:
         self.project = project
         self.app = FastAPI()
         self.ws: WebSocket | None = None
-        self.chat_queue: asyncio.Queue[str] = asyncio.Queue()
         self.active_tab: str = "screenplay"
+        self._on_chat: list = []  # callbacks
         self._on_tab_changed: list = []  # callbacks
+        self._pending_approval: asyncio.Future | None = None
         self._setup_routes()
 
     def _setup_routes(self):
@@ -75,8 +76,30 @@ class MovieServer:
             self.project.reorder_scenes(msg.get("order", []))
             await self._send_project()
 
+        elif t == "create_character":
+            d = msg.get("data", {})
+            self.project.create_character(
+                name=d.get("name", ""),
+                description=d.get("description", ""),
+                appearance=d.get("appearance", ""),
+            )
+            await self._send_project()
+
+        elif t == "update_character":
+            self.project.update_character(msg["id"], **msg.get("data", {}))
+            await self._send_project()
+
+        elif t == "delete_character":
+            self.project.delete_character(msg["id"])
+            await self._send_project()
+
+        elif t == "approval_response":
+            if self._pending_approval and not self._pending_approval.done():
+                self._pending_approval.set_result(msg)
+
         elif t == "chat":
-            await self.chat_queue.put(msg["text"])
+            for cb in self._on_chat:
+                await cb(msg["text"])
 
         elif t == "tab_changed":
             self.active_tab = msg.get("tab", "screenplay")
@@ -98,19 +121,20 @@ class MovieServer:
                 "type": "message", "role": role, "text": text,
             }))
 
-    async def send_scene_proposal(self, data: dict):
-        """AI proposes a scene — client shows edit modal."""
-        if self.ws:
-            await self.ws.send_text(json.dumps({
-                "type": "scene_proposal", "data": data,
-            }))
+    async def request_approval(self, kind: str, data: dict) -> dict:
+        """Ask user to approve/edit/reject. Returns {action, data?, reason?}."""
+        self._pending_approval = asyncio.get_event_loop().create_future()
+        await self.send_event("approval_request", kind=kind, data=data)
+        result = await self._pending_approval
+        self._pending_approval = None
+        return result
 
     async def send_event(self, event: str, **kwargs):
         if self.ws:
             await self.ws.send_text(json.dumps({"type": event, **kwargs}))
 
-    async def wait_for_chat(self) -> str:
-        return await self.chat_queue.get()
+    def on_chat(self, callback):
+        self._on_chat.append(callback)
 
     def on_tab_changed(self, callback):
         self._on_tab_changed.append(callback)

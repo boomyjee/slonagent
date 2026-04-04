@@ -4,6 +4,28 @@ import time
 from pathlib import Path
 
 
+class Character:
+    __slots__ = ("id", "name", "description", "appearance", "order")
+
+    def __init__(self, id: str = "", name: str = "", description: str = "",
+                 appearance: str = "", order: int = 0):
+        self.id = id
+        self.name = name
+        self.description = description
+        self.appearance = appearance
+        self.order = order
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "name": self.name, "description": self.description,
+            "appearance": self.appearance, "order": self.order,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Character":
+        return cls(**{k: v for k, v in d.items() if k in cls.__slots__})
+
+
 class Scene:
     __slots__ = ("id", "title", "text", "location", "characters", "order")
 
@@ -33,6 +55,7 @@ class Project:
         self.project_dir = project_dir
         self.title = title
         self.scenes: dict[str, Scene] = {}
+        self.characters: dict[str, Character] = {}
         self._next_id = 1
         self._project_path = project_dir / "project.json"
         self._history_path = project_dir / "history.jsonl"
@@ -47,6 +70,7 @@ class Project:
             "title": self.title,
             "next_id": self._next_id,
             "scenes": {k: v.to_dict() for k, v in self.scenes.items()},
+            "characters": {k: v.to_dict() for k, v in self.characters.items()},
         }
         self._project_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -60,6 +84,9 @@ class Project:
         for d in data.get("scenes", {}).values():
             scene = Scene.from_dict(d)
             proj.scenes[scene.id] = scene
+        for d in data.get("characters", {}).values():
+            char = Character.from_dict(d)
+            proj.characters[char.id] = char
         return proj
 
     def _log(self, action: str, detail: str = ""):
@@ -112,8 +139,45 @@ class Project:
     def scenes_ordered(self) -> list[Scene]:
         return sorted(self.scenes.values(), key=lambda s: s.order)
 
+    # ── characters CRUD ──
+
+    def create_character(self, name: str = "", description: str = "",
+                         appearance: str = "") -> Character:
+        cid = str(self._next_id)
+        self._next_id += 1
+        order = max((c.order for c in self.characters.values()), default=-1) + 1
+        char = Character(id=cid, name=name, description=description,
+                         appearance=appearance, order=order)
+        self.characters[cid] = char
+        self._log("create_character", cid)
+        self.save()
+        return char
+
+    def update_character(self, cid: str, **fields) -> Character | None:
+        char = self.characters.get(cid)
+        if not char:
+            return None
+        for k, v in fields.items():
+            if hasattr(char, k):
+                setattr(char, k, v)
+        self._log("update_character", cid)
+        self.save()
+        return char
+
+    def delete_character(self, cid: str) -> bool:
+        if cid not in self.characters:
+            return False
+        del self.characters[cid]
+        self._log("delete_character", cid)
+        self.save()
+        return True
+
+    def characters_ordered(self) -> list[Character]:
+        return sorted(self.characters.values(), key=lambda c: c.order)
+
     def to_dict(self) -> dict:
         return {
             "title": self.title,
             "scenes": [s.to_dict() for s in self.scenes_ordered()],
+            "characters": [c.to_dict() for c in self.characters_ordered()],
         }
