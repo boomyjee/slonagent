@@ -74,6 +74,9 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .msg.user { background: var(--accent); color: #1e1e2e; margin-left: auto; }
 .msg.assistant { background: var(--surface2); }
 .msg.tool_call { background: var(--surface3); font-size: 12px; color: var(--text-dim); border-left: 3px solid var(--accent); padding: 6px 10px; }
+.msg.approval { background: var(--warn); color: #1e1e2e; cursor: pointer; font-size: 12px; border-left: 3px solid #e0a800; padding: 6px 10px; }
+.msg.approval:hover { opacity: 0.85; }
+.msg.approval.resolved { opacity: 0.5; cursor: default; }
 .processing { padding: 8px 12px; font-size: 12px; color: var(--text-dim); animation: pulse 1.5s infinite; }
 @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
 .chat-input { display: flex; border-top: 1px solid var(--border); }
@@ -237,7 +240,7 @@ ws.onmessage = e => {
     } else if (msg.type === 'processing_done') {
         removeProcessing();
     } else if (msg.type === 'approval_request') {
-        showApproval(msg.kind, msg.data);
+        addApprovalMessage(msg.kind, msg.data);
     }
 };
 
@@ -259,6 +262,19 @@ function addToolCall(name) {
     const el = document.createElement('div');
     el.className = 'msg tool_call';
     el.textContent = '\u2699 ' + name;
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function addApprovalMessage(kind, data) {
+    const label = kind === 'scene' ? data.title || 'Scene' : data.name || 'Character';
+    const el = document.createElement('div');
+    el.className = 'msg approval';
+    el.textContent = '\u270f Approve: ' + label;
+    el.onclick = () => {
+        if (el.classList.contains('resolved')) return;
+        showApproval(kind, data, el);
+    };
     messagesEl.appendChild(el);
     messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -391,13 +407,24 @@ document.getElementById('btn-add-scene').onclick = () => {
 };
 
 // ── Approval mechanism ──
-function showApproval(kind, data) {
+let approvalChatEl = null;
+
+function showApproval(kind, data, chatEl) {
     pendingApprovalKind = kind;
+    approvalChatEl = chatEl || null;
     if (kind === 'scene') {
         showEditor(data, true);
     } else if (kind === 'character') {
         showCharEditor(data, true);
     }
+}
+
+function resolveApproval() {
+    if (approvalChatEl) {
+        approvalChatEl.classList.add('resolved');
+        approvalChatEl = null;
+    }
+    pendingApprovalKind = null;
 }
 
 function approveApproval(kind) {
@@ -418,7 +445,7 @@ function approveApproval(kind) {
         hideCharEditor();
     }
     send({ type: 'approval_response', action: 'approve', data });
-    pendingApprovalKind = null;
+    resolveApproval();
 }
 
 function rejectApproval(kind) {
@@ -426,7 +453,7 @@ function rejectApproval(kind) {
     if (kind === 'scene') hideEditor();
     else hideCharEditor();
     send({ type: 'approval_response', action: 'reject', reason });
-    pendingApprovalKind = null;
+    resolveApproval();
 }
 
 function saveScene() {
