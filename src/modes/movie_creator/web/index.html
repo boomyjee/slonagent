@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Movie Creator</title>
+<style>
+:root {
+    --bg: #1e1e2e; --surface: #252536; --surface2: #2a2a3d; --surface3: #313147;
+    --border: #333350; --text: #cdd6f4; --text-dim: #6c7086;
+    --accent: #89b4fa; --green: #a6e3a1; --warn: #f9e2af; --red: #f38ba8;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
+
+/* Header + tabs */
+.header { display: flex; align-items: center; padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--border); gap: 16px; flex-shrink: 0; }
+.header h1 { font-size: 16px; font-weight: 600; }
+.header .status { font-size: 12px; color: var(--text-dim); margin-left: auto; }
+.tabs { display: flex; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tabs .tab { padding: 10px 24px; cursor: pointer; font-size: 13px; color: var(--text-dim); border-bottom: 2px solid transparent; }
+.tabs .tab:hover { color: var(--text); }
+.tabs .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* 3-column layout */
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* Sidebar — scene list */
+.sidebar { width: 260px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar-header { display: flex; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); gap: 8px; }
+.sidebar-header span { font-size: 12px; color: var(--text-dim); text-transform: uppercase; flex: 1; }
+.scene-list { flex: 1; overflow-y: auto; }
+.scene-item { display: flex; align-items: center; padding: 10px 12px; cursor: pointer; border-bottom: 1px solid var(--border); gap: 8px; font-size: 13px; }
+.scene-item:hover { background: var(--surface2); }
+.scene-item.active { background: var(--accent); color: #1e1e2e; }
+.scene-item .num { font-size: 11px; font-weight: 600; min-width: 20px; opacity: 0.6; }
+.scene-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Center — editor/viewer */
+.center { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.center-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 14px; }
+.editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.editor-header { display: flex; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--border); gap: 10px; }
+.editor-header h2 { font-size: 16px; font-weight: 500; flex: 1; }
+.editor-body { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.field input, .field textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
+.field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); }
+.field textarea { resize: vertical; min-height: 200px; line-height: 1.6; }
+.editor-footer { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
+.editor-footer .spacer { flex: 1; }
+.btn { padding: 6px 14px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 13px; background: var(--surface2); color: var(--text); }
+.btn:hover { background: var(--surface3); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-primary { background: var(--accent); color: #1e1e2e; border-color: var(--accent); }
+.btn-primary:hover { opacity: 0.85; }
+.btn-danger { background: var(--red); color: #1e1e2e; border-color: var(--red); }
+.btn-danger:hover { opacity: 0.85; }
+
+/* Proposal banner */
+.proposal-banner { display: none; padding: 10px 20px; background: var(--warn); color: #1e1e2e; font-size: 13px; cursor: pointer; text-align: center; border-bottom: 1px solid var(--border); }
+.proposal-banner.visible { display: block; }
+
+/* Chat panel */
+.chat { width: 340px; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+.chat-header { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-dim); text-transform: uppercase; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 12px; }
+.msg { margin-bottom: 10px; font-size: 13px; line-height: 1.5; padding: 8px 12px; border-radius: 8px; max-width: 90%; white-space: pre-wrap; }
+.msg.user { background: var(--accent); color: #1e1e2e; margin-left: auto; }
+.msg.assistant { background: var(--surface2); }
+.chat-input { display: flex; border-top: 1px solid var(--border); }
+.chat-input textarea { flex: 1; background: var(--bg); color: var(--text); border: none; padding: 12px; font-size: 13px; resize: none; height: 56px; font-family: inherit; }
+.chat-input textarea:focus { outline: none; }
+.chat-input button { background: var(--accent); color: #1e1e2e; border: none; padding: 0 16px; cursor: pointer; font-size: 14px; }
+
+/* Resizers */
+.resizer { width: 4px; cursor: col-resize; flex-shrink: 0; }
+.resizer:hover, .resizer.active { background: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Movie Creator</h1>
+    <span class="status" id="conn-status">connecting...</span>
+</div>
+
+<div class="tabs" id="tabs">
+    <div class="tab active" data-tab="screenplay">Screenplay</div>
+    <div class="tab" data-tab="characters">Characters</div>
+    <div class="tab" data-tab="storyboard">Storyboard</div>
+    <div class="tab" data-tab="generation">Generation</div>
+</div>
+
+<div class="main">
+    <!-- Left: scene list -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <span>Scenes</span>
+            <button class="btn btn-sm btn-primary" id="btn-add-scene">+ Add</button>
+        </div>
+        <div class="scene-list" id="scene-list"></div>
+    </div>
+    <div class="resizer" id="resizer-left"></div>
+
+    <!-- Center: editor -->
+    <div class="center" id="center">
+        <div id="proposal-banner" class="proposal-banner" onclick="openProposal()">
+            AI proposed a new scene — click to review
+        </div>
+        <div class="center-empty" id="center-empty">Select a scene or create a new one</div>
+        <div class="editor" id="editor" style="display:none">
+            <div class="editor-header">
+                <h2 id="editor-title">Scene</h2>
+            </div>
+            <div class="editor-body">
+                <div class="field">
+                    <label>Title</label>
+                    <input type="text" id="f-title" placeholder="Scene title">
+                </div>
+                <div class="field">
+                    <label>Location</label>
+                    <input type="text" id="f-location" placeholder="INT. APARTMENT - NIGHT">
+                </div>
+                <div class="field">
+                    <label>Scene text</label>
+                    <textarea id="f-text" placeholder="Scene description and dialogue..."></textarea>
+                </div>
+            </div>
+            <div class="editor-footer">
+                <button class="btn btn-danger" id="btn-delete" onclick="deleteScene()">Delete</button>
+                <div class="spacer"></div>
+                <button class="btn" onclick="cancelEdit()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveScene()">Save</button>
+            </div>
+        </div>
+    </div>
+    <div class="resizer" id="resizer-right"></div>
+
+    <!-- Right: chat -->
+    <div class="chat">
+        <div class="chat-header">AI Assistant</div>
+        <div class="chat-messages" id="messages"></div>
+        <div class="chat-input">
+            <textarea id="chat-input" placeholder="Ask AI to create a scene..."></textarea>
+            <button id="btn-send">&#9654;</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let project = { title: '', scenes: [] };
+let selectedSceneId = null;
+let isNewScene = false;
+let pendingProposal = null;
+
+// ── WebSocket ──
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+
+ws.onopen = () => {
+    document.getElementById('conn-status').textContent = 'connected';
+    document.getElementById('conn-status').style.color = 'var(--green)';
+};
+ws.onclose = () => {
+    document.getElementById('conn-status').textContent = 'disconnected';
+    document.getElementById('conn-status').style.color = 'var(--red)';
+};
+
+ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'project_updated') {
+        project = msg.project;
+        renderSceneList();
+    } else if (msg.type === 'message') {
+        addMessage(msg.role, msg.text);
+    } else if (msg.type === 'scene_proposal') {
+        pendingProposal = msg.data;
+        document.getElementById('proposal-banner').classList.add('visible');
+    }
+};
+
+function send(msg) { ws.send(JSON.stringify(msg)); }
+
+// ── Chat ──
+const messagesEl = document.getElementById('messages');
+const chatInput = document.getElementById('chat-input');
+
+function addMessage(role, text) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + role;
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function sendChat() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    send({ type: 'chat', text });
+    addMessage('user', text);
+    chatInput.value = '';
+}
+
+document.getElementById('btn-send').onclick = sendChat;
+chatInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+
+// ── Tabs ──
+document.querySelectorAll('.tabs .tab').forEach(tab => {
+    tab.onclick = () => {
+        document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        send({ type: 'tab_changed', tab: tab.dataset.tab });
+    };
+});
+
+// ── Scene list (sidebar) ──
+const sceneListEl = document.getElementById('scene-list');
+
+function renderSceneList() {
+    sceneListEl.innerHTML = '';
+    if (project.scenes.length === 0) {
+        sceneListEl.innerHTML = '<div style="padding:20px;color:var(--text-dim);font-size:13px;text-align:center">No scenes yet</div>';
+        return;
+    }
+    project.scenes.forEach((s, i) => {
+        const item = document.createElement('div');
+        item.className = 'scene-item' + (s.id === selectedSceneId ? ' active' : '');
+        item.innerHTML = `<span class="num">${i + 1}</span><span class="name">${s.title || 'Untitled'}</span>`;
+        item.onclick = () => selectScene(s.id);
+        sceneListEl.appendChild(item);
+    });
+}
+
+// ── Scene selection & editor ──
+const centerEmpty = document.getElementById('center-empty');
+const editorEl = document.getElementById('editor');
+
+function selectScene(id) {
+    selectedSceneId = id;
+    isNewScene = false;
+    const scene = project.scenes.find(s => s.id === id);
+    if (!scene) return;
+    showEditor(scene);
+    renderSceneList();
+}
+
+function showEditor(scene) {
+    centerEmpty.style.display = 'none';
+    editorEl.style.display = 'flex';
+    document.getElementById('editor-title').textContent = isNewScene ? 'New Scene' : `Scene: ${scene.title || 'Untitled'}`;
+    document.getElementById('f-title').value = scene.title || '';
+    document.getElementById('f-location').value = scene.location || '';
+    document.getElementById('f-text').value = scene.text || '';
+    document.getElementById('btn-delete').style.display = isNewScene ? 'none' : 'block';
+}
+
+function hideEditor() {
+    editorEl.style.display = 'none';
+    centerEmpty.style.display = 'flex';
+    selectedSceneId = null;
+    isNewScene = false;
+    renderSceneList();
+}
+
+// Add new scene
+document.getElementById('btn-add-scene').onclick = () => {
+    selectedSceneId = null;
+    isNewScene = true;
+    showEditor({ title: '', location: '', text: '' });
+    renderSceneList();
+};
+
+// AI proposal
+function openProposal() {
+    if (!pendingProposal) return;
+    selectedSceneId = null;
+    isNewScene = true;
+    showEditor(pendingProposal);
+    pendingProposal = null;
+    document.getElementById('proposal-banner').classList.remove('visible');
+    document.getElementById('editor-title').textContent = 'AI Proposal';
+}
+
+function saveScene() {
+    const data = {
+        title: document.getElementById('f-title').value,
+        location: document.getElementById('f-location').value,
+        text: document.getElementById('f-text').value,
+    };
+    if (selectedSceneId && !isNewScene) {
+        send({ type: 'update_scene', id: selectedSceneId, data });
+    } else {
+        send({ type: 'create_scene', data });
+    }
+    hideEditor();
+}
+
+function cancelEdit() {
+    hideEditor();
+}
+
+function deleteScene() {
+    if (selectedSceneId && confirm('Delete this scene?')) {
+        send({ type: 'delete_scene', id: selectedSceneId });
+        hideEditor();
+    }
+}
+
+// ── Resizers ──
+function setupResizer(id, panel, side) {
+    const resizer = document.getElementById(id);
+    resizer.addEventListener('mousedown', e => {
+        const startX = e.clientX;
+        const startW = panel.getBoundingClientRect().width;
+        resizer.classList.add('active');
+        const onMove = e => panel.style.width = (startW + (side === 'left' ? (e.clientX - startX) : -(e.clientX - startX))) + 'px';
+        const onUp = () => { resizer.classList.remove('active'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+}
+setupResizer('resizer-left', document.getElementById('sidebar'), 'left');
+setupResizer('resizer-right', document.querySelector('.chat'), 'right');
+</script>
+</body>
+</html>

@@ -26,8 +26,9 @@ from aiogram.client.session.aiohttp import AiohttpSession
 
 from agent import Agent
 from src.transport.telegram import TelegramTransport
+from src.ui.dashboard import Dashboard
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
 
 
 async def main():
@@ -37,12 +38,16 @@ async def main():
 
     start_method = sys.argv[1]
 
+    dashboard = Dashboard(port=config.get("dashboard", {}).get("port", 8766))
+    await dashboard.start()
+    WrappedTG = dashboard.wrap(TelegramTransport)
+
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
     bot = Bot(token=config["telegram"]["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
     dp = Dispatcher()
 
     allowed = config["telegram"]["allowed_user_ids"]
-    transport = TelegramTransport(bot=bot, chat_id=allowed[0], thread_id=None, agent_id="mode", verbose=False)
+    transport = WrappedTG(bot=bot, chat_id=allowed[0], thread_id=None, agent_id="mode", verbose=False)
     agent = Agent.from_config(config["agent"], agent_dir=os.path.join(os.path.dirname(__file__)), transport=transport)
     await agent.start(run_loop=False)
 
