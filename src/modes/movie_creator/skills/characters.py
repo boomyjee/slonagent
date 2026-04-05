@@ -62,14 +62,8 @@ class CharactersSkill(Skill):
         })
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
-        data = result.get("data", {})
-        char = self.project.create("characters",
-            name=data.get("name", name),
-            description=data.get("description", description),
-            appearance=data.get("appearance", appearance),
-        )
-        await self.server.send_event("project_updated",
-                                     project=self.project.to_dict())
+        char = self.project.create("characters", **result.get("data", {}))
+        await self.server.send_project()
         return {"status": "created", "id": char.id, "name": char.name}
 
     @tool("Сгенерировать портрет персонажа по описанию внешности.")
@@ -98,8 +92,6 @@ class CharactersSkill(Skill):
         result = await self.server.request_approval("character", proposed)
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
-        data = result.get("data", {})
-        self.project.update("characters", character_id, **data)
-        await self.server.send_event("project_updated",
-                                     project=self.project.to_dict())
+        self.project.update("characters", character_id, **result.get("data", {}))
+        await self.server.send_project()
         return {"status": "updated", "character_id": character_id}

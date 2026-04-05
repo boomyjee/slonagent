@@ -49,7 +49,7 @@ class MovieServer:
             await ws.accept()
             self.ws = ws
             # Send initial project state
-            await self._send_project()
+            await self.send_project()
             try:
                 while True:
                     data = await ws.receive_text()
@@ -63,21 +63,21 @@ class MovieServer:
         if t in ("create_scene", "create_character"):
             collection = "scenes" if "scene" in t else "characters"
             self.project.create(collection, **msg.get("data", {}))
-            await self._send_project()
+            await self.send_project()
 
         elif t in ("update_scene", "update_character"):
             collection = "scenes" if "scene" in t else "characters"
             self.project.update(collection, msg["id"], **msg.get("data", {}))
-            await self._send_project()
+            await self.send_project()
 
         elif t in ("delete_scene", "delete_character"):
             collection = "scenes" if "scene" in t else "characters"
             self.project.delete(collection, msg["id"])
-            await self._send_project()
+            await self.send_project()
 
         elif t == "reorder_scenes":
             self.project.reorder("scenes", msg.get("order", []))
-            await self._send_project()
+            await self.send_project()
 
         elif t == "generate_portrait":
             asyncio.create_task(self.generate_portrait(msg["id"]))
@@ -97,7 +97,7 @@ class MovieServer:
 
     # ── send to client ──
 
-    async def _send_project(self):
+    async def send_project(self):
         if self.ws:
             await self.ws.send_text(json.dumps({
                 "type": "project_updated",
@@ -164,7 +164,7 @@ class MovieServer:
                         self.project.assets_dir.mkdir(parents=True, exist_ok=True)
                         (self.project.assets_dir / filename).write_bytes(img)
                         self.project.update("characters", char_id, image=filename)
-                        await self._send_project()
+                        await self.send_project()
                         return {"status": "success", "image": filename}
 
             return {"error": "No image in API response"}

@@ -45,14 +45,8 @@ class ScreenplaySkill(Skill):
         })
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
-        data = result.get("data", {})
-        scene = self.project.create("scenes",
-            title=data.get("title", title),
-            text=data.get("text", text),
-            location=data.get("location", location),
-        )
-        await self.server.send_event("project_updated",
-                                     project=self.project.to_dict())
+        scene = self.project.create("scenes", **result.get("data", {}))
+        await self.server.send_project()
         return {"status": "created", "scene_id": scene.id}
 
     @tool("Обновить существующую сцену по ID. Пользователь сможет отредактировать и одобрить.")
@@ -74,8 +68,6 @@ class ScreenplaySkill(Skill):
         result = await self.server.request_approval("scene", proposed)
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
-        data = result.get("data", {})
-        self.project.update("scenes", scene_id, **data)
-        await self.server.send_event("project_updated",
-                                     project=self.project.to_dict())
+        self.project.update("scenes", scene_id, **result.get("data", {}))
+        await self.server.send_project()
         return {"status": "updated", "scene_id": scene_id}
