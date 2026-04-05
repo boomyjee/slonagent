@@ -23,16 +23,12 @@ def UITransportWrapper(transport_class, dashboard: Dashboard):
             return await super().process_message(content_parts, user_message_id)
 
         async def send_message(self, text: str, stream_id=None):
-            stream_id = await super().send_message(text, stream_id)
-            chat_id = id(stream_id) if stream_id is not None else None
-            self.dashboard.add_chat("assistant", text, chat_id, agent_id=self.agent_id)
-            return stream_id
+            await super().send_message(text, stream_id)
+            self.dashboard.add_chat("assistant", text, stream_id, agent_id=self.agent_id)
 
         async def send_thinking(self, text: str, stream_id=None, final: bool = False):
-            stream_id = await super().send_thinking(text, stream_id, final=final)
-            thinking_id = id(stream_id) if stream_id is not None else None
-            self.dashboard.add_collapsible("[think]", text, thinking_id, agent_id=self.agent_id)
-            return stream_id
+            await super().send_thinking(text, stream_id, final=final)
+            self.dashboard.add_collapsible("[think]", text, stream_id, agent_id=self.agent_id)
 
         async def send_system_prompt(self, text: str):
             label = text.split("\n")[0].strip("[] ")[:40]

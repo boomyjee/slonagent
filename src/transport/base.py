@@ -9,13 +9,13 @@ class BaseTransport:
         return None
 
     async def send_message(self, text: str, stream_id=None):
-        return stream_id
+        pass
 
     async def send_system_prompt(self, text: str):
         pass
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
-        return stream_id
+        pass
 
     async def on_tool_call(self, name: str, args: dict):
         pass

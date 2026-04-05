@@ -225,6 +225,7 @@ class TelegramTransport(BaseTransport):
         self._queue: asyncio.Queue = asyncio.Queue()
         self._queue_task: asyncio.Task | None = None
         self._last_edit_texts: dict[int, str] = {}  # msg_id → last sent text
+        self._stream_messages: dict[int, list] = {}  # stream_id → list of Message
 
     async def send_processing(self, active: bool):
         if active:
@@ -365,7 +366,6 @@ class TelegramTransport(BaseTransport):
             except Exception:
                 pass
         del messages[len(bodies):]
-        return messages
 
     async def on_tool_call(self, name: str, args: dict):
         lines = "\n".join(f"{html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
@@ -390,7 +390,8 @@ class TelegramTransport(BaseTransport):
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
     async def send_message(self, text: str, stream_id=None):
-        return await self._answer((text or "").strip() or "[…]", messages=stream_id)
+        messages = self._stream_messages.setdefault(stream_id, []) if stream_id else None
+        await self._answer((text or "").strip() or "[…]", messages=messages)
 
     async def inject_message(self, text: str):
         sent = await self._send("[→]" + text)
@@ -400,7 +401,8 @@ class TelegramTransport(BaseTransport):
         await self._answer(text, expandable=True, prefix="🔧 ", max_chunks=1)
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
-        return await self._answer(text, expandable=True, collapsed=final, prefix="🧠 ", messages=stream_id)
+        messages = self._stream_messages.setdefault(stream_id, []) if stream_id else None
+        await self._answer(text, expandable=True, collapsed=final, prefix="🧠 ", messages=messages)
 
     async def send_code(self, lang: str, code: str):
         await self._answer(f"```{lang}\n{code}\n```")

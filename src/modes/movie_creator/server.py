@@ -115,11 +115,12 @@ class MovieServer:
                 "project": self.project.to_dict(),
             }))
 
-    async def send_chat(self, text: str, role: str = "assistant"):
+    async def send_chat(self, text: str, role: str = "assistant", stream_id=None):
         if self.ws:
-            await self.ws.send_text(json.dumps({
-                "type": "message", "role": role, "text": text,
-            }))
+            msg = {"type": "message", "role": role, "text": text}
+            if stream_id is not None:
+                msg["stream_id"] = stream_id
+            await self.ws.send_text(json.dumps(msg))
 
     async def request_approval(self, kind: str, data: dict) -> dict:
         """Ask user to approve/edit/reject. Returns {action, data?, reason?}."""

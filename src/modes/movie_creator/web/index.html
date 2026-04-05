@@ -232,7 +232,7 @@ ws.onmessage = e => {
         project = msg.project;
         renderSidebar();
     } else if (msg.type === 'message') {
-        addMessage(msg.role, msg.text);
+        addMessage(msg.role, msg.text, msg.stream_id);
     } else if (msg.type === 'tool_call') {
         addToolCall(msg.name);
     } else if (msg.type === 'processing') {
@@ -250,11 +250,20 @@ function send(msg) { ws.send(JSON.stringify(msg)); }
 const messagesEl = document.getElementById('messages');
 const chatInput = document.getElementById('chat-input');
 
-function addMessage(role, text) {
-    const el = document.createElement('div');
-    el.className = 'msg ' + role;
-    el.textContent = text;
-    messagesEl.appendChild(el);
+const streamEls = {};  // stream_id → DOM element
+
+function addMessage(role, text, streamId) {
+    let el;
+    if (streamId != null && streamEls[streamId]) {
+        el = streamEls[streamId];
+        el.textContent = text;
+    } else {
+        el = document.createElement('div');
+        el.className = 'msg ' + role;
+        el.textContent = text;
+        messagesEl.appendChild(el);
+        if (streamId != null) streamEls[streamId] = el;
+    }
     messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 

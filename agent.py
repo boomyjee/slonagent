@@ -248,6 +248,7 @@ class Agent:
         self._restrictions: dict = self._load_restrictions()
         self._current_content_parts: list = []
         self._system_instruction: str | None = None
+        self._stream_counter: int = 0
 
     def _load_restrictions(self) -> dict:
         try:
@@ -352,8 +353,10 @@ class Agent:
                 stream = await self.client.chat.completions.create(**kwargs)
                 text = ""
                 thinking_text = ""
-                thinking_id = None
-                stream_id = None
+                self._stream_counter += 1
+                thinking_id = self._stream_counter
+                self._stream_counter += 1
+                stream_id = self._stream_counter
                 accumulated_calls: dict[int, dict] = {}
 
                 async for chunk in stream:
@@ -393,17 +396,17 @@ class Agent:
                     if delta.content:
                         if is_thought:
                             thinking_text += delta.content.removeprefix("<thought>")
-                            thinking_id = await self.transport.send_thinking(thinking_text, thinking_id)
+                            await self.transport.send_thinking(thinking_text, thinking_id)
                         else:
                             content = delta.content.removeprefix("</thought>")
                             if content:
                                 text += content
-                                stream_id = await self.transport.send_message(text, stream_id)
+                                await self.transport.send_message(text, stream_id)
                     # OpenAI o1: reasoning_content, OpenRouter: reasoning
                     thought_extra = delta_extra.get("reasoning_content") or delta_extra.get("reasoning")
                     if thought_extra and isinstance(thought_extra, str):
                         thinking_text += thought_extra
-                        thinking_id = await self.transport.send_thinking(thinking_text, thinking_id)
+                        await self.transport.send_thinking(thinking_text, thinking_id)
 
                     known = {"content", "tool_calls", "role", "refusal"}
                     unexpected = (delta.model_fields_set or set()) - known

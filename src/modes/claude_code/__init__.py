@@ -28,9 +28,9 @@ class ClaudeCodeSkill(Skill):
         await transport.send_processing(True)
 
         text_buf = ""
-        text_msgs = []
+        text_stream_id = None
         thinking_buf = ""
-        thinking_msgs = []
+        thinking_stream_id = None
         tool_input_buf = ""
         tool_name = ""
         block_type = None
@@ -47,15 +47,15 @@ class ClaudeCodeSkill(Skill):
                     if block_type == "tool_use":
                         # Flush text before tool call
                         if text_buf:
-                            text_msgs = await transport.send_message(text_buf, stream_id=text_msgs)
+                            await transport.send_message(text_buf, stream_id=text_stream_id)
                             text_buf = ""
-                            text_msgs = []
+                            text_stream_id = None
                         tool_name = block.get("name", "?")
                         tool_input_buf = ""
 
                     elif block_type == "thinking":
                         thinking_buf = ""
-                        thinking_msgs = []
+                        thinking_stream_id = id(event)
 
                 elif etype == "content_block_delta":
                     delta = event.get("delta", {})
@@ -63,11 +63,13 @@ class ClaudeCodeSkill(Skill):
 
                     if dtype == "text_delta":
                         text_buf += delta.get("text", "")
-                        text_msgs = await transport.send_message(text_buf, stream_id=text_msgs)
+                        if text_stream_id is None:
+                            text_stream_id = id(delta)
+                        await transport.send_message(text_buf, stream_id=text_stream_id)
 
                     elif dtype == "thinking_delta":
                         thinking_buf += delta.get("thinking", "")
-                        thinking_msgs = await transport.send_thinking(thinking_buf, stream_id=thinking_msgs)
+                        await transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
 
                     elif dtype == "input_json_delta":
                         tool_input_buf += delta.get("partial_json", "")

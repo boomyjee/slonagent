@@ -9,6 +9,8 @@ from src.modes.movie_creator.project import Project
 from src.modes.movie_creator.server import MovieServer
 from src.modes.movie_creator.skills.characters import CharactersSkill
 from src.modes.movie_creator.skills.screenplay import ScreenplaySkill
+from src.modes.movie_creator.transport import WebTransport
+from src.transport.multi import MultiTransport
 
 log = logging.getLogger(__name__)
 
@@ -50,11 +52,16 @@ class MovieCreatorSkill(Skill):
         characters_skill = CharactersSkill(project, server)
         tab_skills = {"screenplay": screenplay_skill, "characters": characters_skill}
 
+        # Multi-transport: Telegram + web UI
+        web_transport = WebTransport(server)
+        multi = MultiTransport([transport, web_transport])
+
         # Spawn subagent with default tab skill
         sub = await self.agent.spawn_subagent(
             f"movie_{project_name}",
             memory_providers=[],
             skills=[screenplay_skill],
+            transport=multi,
         )
 
         def on_tab(tab):
@@ -68,7 +75,7 @@ class MovieCreatorSkill(Skill):
         # Web chat → show in Telegram + put in subagent queue
         async def _on_chat(text):
             await transport.inject_message(text)
-            await transport.process_message([{"type": "text", "text": text}])
+            await multi.process_message([{"type": "text", "text": text}])
 
         server.on_chat(_on_chat)
 
@@ -76,30 +83,13 @@ class MovieCreatorSkill(Skill):
         try:
             while True:
                 content_parts, _ = await sub.next_message()
-                msg = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict)).strip()
-                await server.send_chat(msg, role="user")
                 await sub.memory.add_turn({"role": "user", "content": content_parts})
 
-                async def llm_with_processing():
-                    await transport.send_processing(True)
-                    await server.send_event("processing")
-                    tc, text = await sub.llm()
-                    await transport.send_processing(False)
-                    await server.send_event("processing_done")
-                    return tc, text
-
-                tool_calls, reply = await llm_with_processing()
-
-                if reply:
-                    await server.send_chat(reply)
+                tool_calls, reply = await sub.llm()
 
                 while tool_calls:
-                    for tc in tool_calls:
-                        await server.send_event("tool_call", name=tc["function"]["name"])
                     await sub.dispatch_tool_calls(tool_calls)
-                    tool_calls, reply = await llm_with_processing()
-                    if reply:
-                        await server.send_chat(reply)
+                    tool_calls, reply = await sub.llm()
         except Exception:
             log.exception("[movie_creator] error in chat loop")
             raise
