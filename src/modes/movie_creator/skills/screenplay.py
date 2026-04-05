@@ -40,34 +40,14 @@ class ScreenplaySkill(Skill):
         location: Annotated[str, "Локация (напр. INT. КВАРТИРА - НОЧЬ)"] = "",
         text: Annotated[str, "Текст сцены (действие, диалоги)"] = "",
     ) -> dict:
-        result = await self.server.request_approval("scene", {
-            "title": title, "location": location, "text": text,
-        })
-        if result.get("action") == "reject":
-            return {"status": "rejected", "reason": result.get("reason", "")}
-        scene = self.project.create("scenes", **result.get("data", {}))
-        await self.server.send_project()
-        return {"status": "created", "scene_id": scene.id}
+        return await self.server.edit("scenes", approval=True, **locals())
 
     @tool("Обновить существующую сцену по ID. Пользователь сможет отредактировать и одобрить.")
     async def update_scene(
         self,
-        scene_id: Annotated[str, "ID сцены для обновления"],
+        id: Annotated[str, "ID сцены для обновления"],
         title: Annotated[str, "Новое название (пусто = не менять)"] = "",
         location: Annotated[str, "Новая локация (пусто = не менять)"] = "",
         text: Annotated[str, "Новый текст (пусто = не менять)"] = "",
     ) -> dict:
-        scene = self.project.scenes.get(scene_id)
-        if not scene:
-            return {"error": f"Scene {scene_id} not found"}
-        proposed = {
-            "title": title or scene.title,
-            "location": location or scene.location,
-            "text": text or scene.text,
-        }
-        result = await self.server.request_approval("scene", proposed)
-        if result.get("action") == "reject":
-            return {"status": "rejected", "reason": result.get("reason", "")}
-        self.project.update("scenes", scene_id, **result.get("data", {}))
-        await self.server.send_project()
-        return {"status": "updated", "scene_id": scene_id}
+        return await self.server.edit("scenes", approval=True, **locals())

@@ -57,41 +57,33 @@ class CharactersSkill(Skill):
         description: Annotated[str, "Описание (роль, характер, мотивация)"] = "",
         appearance: Annotated[str, "Внешность (возраст, рост, волосы, одежда)"] = "",
     ) -> dict:
-        result = await self.server.request_approval("character", {
-            "name": name, "description": description, "appearance": appearance,
-        })
-        if result.get("action") == "reject":
-            return {"status": "rejected", "reason": result.get("reason", "")}
-        char = self.project.create("characters", **result.get("data", {}))
-        await self.server.send_project()
-        return {"status": "created", "id": char.id, "name": char.name}
-
-    @tool("Сгенерировать портрет персонажа по описанию внешности.")
-    async def generate_portrait(
-        self,
-        character_id: Annotated[str, "ID персонажа"],
-    ) -> dict:
-        return await self.server.generate_portrait(character_id)
+        return await self.server.edit("characters", approval=True, **locals())
 
     @tool("Обновить существующего персонажа по ID. Пользователь сможет отредактировать и одобрить.")
     async def update_character(
         self,
-        character_id: Annotated[str, "ID персонажа"],
+        id: Annotated[str, "ID персонажа"],
         name: Annotated[str, "Новое имя (пусто = не менять)"] = "",
         description: Annotated[str, "Новое описание (пусто = не менять)"] = "",
         appearance: Annotated[str, "Новая внешность (пусто = не менять)"] = "",
     ) -> dict:
+        return await self.server.edit("characters", approval=True, **locals())
+
+    @tool("Сгенерировать портрет персонажа. Передай полный промпт для image-модели.")
+    async def generate_portrait(
+        self,
+        character_id: Annotated[str, "ID персонажа"],
+        prompt: Annotated[str, "Полный промпт для генерации (англ., описание лица/одежды/освещения)"],
+    ) -> dict:
         char = self.project.characters.get(character_id)
         if not char:
             return {"error": f"Character {character_id} not found"}
-        proposed = {
-            "name": name or char.name,
-            "description": description or char.description,
-            "appearance": appearance or char.appearance,
-        }
-        result = await self.server.request_approval("character", proposed)
+        result = await self.server.request_approval("portrait", {
+            "character_id": character_id,
+            "character_name": char.name,
+            "prompt": prompt,
+        })
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
-        self.project.update("characters", character_id, **result.get("data", {}))
-        await self.server.send_project()
-        return {"status": "updated", "character_id": character_id}
+        data = result.get("data", {})
+        return await self.server.generate_portrait(character_id, data.get("prompt", prompt))

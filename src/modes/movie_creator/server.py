@@ -37,6 +37,13 @@ class MovieServer:
             html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
             return HTMLResponse(html)
 
+        @self.app.get("/{filepath:path}.js")
+        async def js_file(filepath: str):
+            path = WEB_DIR / f"{filepath}.js"
+            if ".." in filepath or not path.exists():
+                return {"error": "not found"}, 404
+            return FileResponse(path, media_type="application/javascript")
+
         @self.app.get("/api/asset/{path:path}")
         async def get_asset(path: str):
             full = self.project.assets_dir / path
@@ -60,27 +67,19 @@ class MovieServer:
     async def _handle_message(self, msg: dict):
         t = msg.get("type")
 
-        if t in ("create_scene", "create_character"):
-            collection = "scenes" if "scene" in t else "characters"
-            self.project.create(collection, **msg.get("data", {}))
+        if t == "edit":
+            await self.edit(msg["collection"], id=msg.get("id", ""), **msg.get("data", {}))
+
+        elif t == "delete":
+            self.project.delete(msg["collection"], msg["id"])
             await self.send_project()
 
-        elif t in ("update_scene", "update_character"):
-            collection = "scenes" if "scene" in t else "characters"
-            self.project.update(collection, msg["id"], **msg.get("data", {}))
-            await self.send_project()
-
-        elif t in ("delete_scene", "delete_character"):
-            collection = "scenes" if "scene" in t else "characters"
-            self.project.delete(collection, msg["id"])
-            await self.send_project()
-
-        elif t == "reorder_scenes":
-            self.project.reorder("scenes", msg.get("order", []))
+        elif t == "reorder":
+            self.project.reorder(msg["collection"], msg.get("order", []))
             await self.send_project()
 
         elif t == "generate_portrait":
-            asyncio.create_task(self.generate_portrait(msg["id"]))
+            asyncio.create_task(self.generate_portrait(msg["id"], msg.get("prompt", "")))
 
         elif t == "approval_response":
             if self._pending_approval and not self._pending_approval.done():
@@ -121,25 +120,44 @@ class MovieServer:
         self._pending_approval = None
         return result
 
+    async def edit(self, collection: str, approval: bool = False, **fields) -> dict:
+        """Create (no id) or update (with id) entity. If approval=True — ask user first."""
+        fields.pop("self", None)
+        id = fields.pop("id", "")
+        if approval:
+            if id:
+                obj = getattr(self.project, collection).get(id)
+                if obj:
+                    fields = {k: v or getattr(obj, k, "") for k, v in fields.items()}
+            result = await self.request_approval(collection.rstrip("s"), fields)
+            if result.get("action") == "reject":
+                return {"status": "rejected", "reason": result.get("reason", "")}
+            fields = result.get("data", {})
+
+        if id:
+            self.project.update(collection, id, **fields)
+            status = "updated"
+        else:
+            obj = self.project.create(collection, **fields)
+            id = obj.id
+            status = "created"
+        await self.send_project()
+        return {"status": status, "id": id}
+
     async def send_event(self, event: str, **kwargs):
         if self.ws:
             await self.ws.send_text(json.dumps({"type": event, **kwargs}))
 
-    async def generate_portrait(self, char_id: str) -> dict:
-        """Generate character portrait via Gemini Image API."""
+    async def generate_portrait(self, char_id: str, prompt: str) -> dict:
+        """Generate character portrait via Gemini Image API. Prompt is provided by caller."""
         char = self.project.characters.get(char_id)
         if not char:
             return {"error": f"Character {char_id} not found"}
-        if not char.appearance:
-            return {"error": "No appearance description"}
+        if not prompt.strip():
+            return {"error": "Empty prompt"}
 
         await self.send_event("generating", id=char_id, asset="portrait")
 
-        prompt = (
-            f"Cinematic portrait of a film character: {char.name}. "
-            f"{char.appearance}. "
-            "Head and shoulders, cinematic lighting, film still, shallow depth of field."
-        )
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"gemini-2.5-flash-image:generateContent?key={self.api_key}"
