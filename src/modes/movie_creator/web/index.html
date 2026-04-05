@@ -48,7 +48,11 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .gen-tile { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .gen-tile.primary { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .gen-image { position: relative; width: 100%; aspect-ratio: 1; background: var(--surface3); border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-.gen-image img { width: 100%; height: 100%; object-fit: cover; }
+.gen-image img { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
+
+/* Lightbox */
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.88); display: flex; align-items: center; justify-content: center; z-index: 200; cursor: zoom-out; padding: 40px; }
+.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,0.6); }
 .gen-status { font-size: 11px; color: var(--text-dim); text-transform: uppercase; padding: 4px 8px; }
 .gen-status.queued { color: var(--text-dim); }
 .gen-status.generating { color: var(--warn); animation: pulse 1.5s infinite; }
@@ -67,7 +71,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .editor-header h2 { font-size: 16px; font-weight: 500; flex: 1; }
 .editor-body { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
 .field { display: flex; flex-direction: column; gap: 4px; }
-.field.grow { flex: 1; min-height: 0; }
+.field.grow { flex: 1 0 auto; min-height: 140px; }
 .field label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
 .field input, .field textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
 .field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); }

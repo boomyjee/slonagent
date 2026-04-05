@@ -1,6 +1,7 @@
-import { html } from '../lib.js';
+import { html, useState } from '../lib.js';
 
 export function GenerationGallery({ owner, kind, generations, onNew, onRemix, onSetPrimary, onDelete }) {
+    const [lightbox, setLightbox] = useState(null);
     const items = (generations || []).filter(g => g.kind === kind);
     const primaryFile = owner.image || '';
 
@@ -18,6 +19,7 @@ export function GenerationGallery({ owner, kind, generations, onNew, onRemix, on
                             <${GenerationTile}
                                 gen=${g}
                                 isPrimary=${!!g.file && g.file === primaryFile}
+                                onZoom=${src => setLightbox(src)}
                                 onSetPrimary=${() => onSetPrimary(g)}
                                 onRemix=${() => onRemix(g)}
                                 onDelete=${() => onDelete(g)}
@@ -25,11 +27,16 @@ export function GenerationGallery({ owner, kind, generations, onNew, onRemix, on
                         `)}
                     </div>
                 `}
+            ${lightbox ? html`
+                <div class="lightbox" onClick=${() => setLightbox(null)}>
+                    <img src=${lightbox} onClick=${e => e.stopPropagation()} />
+                </div>
+            ` : null}
         </div>
     `;
 }
 
-function GenerationTile({ gen, isPrimary, onSetPrimary, onRemix, onDelete }) {
+function GenerationTile({ gen, isPrimary, onZoom, onSetPrimary, onRemix, onDelete }) {
     const done = gen.status === 'done' && gen.file;
     const failed = gen.status === 'failed';
     const src = done ? `/api/asset/${gen.file}` : null;
@@ -38,7 +45,7 @@ function GenerationTile({ gen, isPrimary, onSetPrimary, onRemix, onDelete }) {
         <div class=${'gen-tile' + (isPrimary ? ' primary' : '')}>
             <div class="gen-image">
                 ${done
-                    ? html`<img src=${src} />`
+                    ? html`<img src=${src} onClick=${() => onZoom(src)} />`
                     : failed
                         ? html`<div class="gen-status failed" title=${gen.error || ''}>failed</div>`
                         : html`<div class=${'gen-status ' + gen.status}>${gen.status}</div>`}
