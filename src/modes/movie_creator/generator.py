@@ -26,13 +26,11 @@ class Generator:
         owner — any Entity with a `generations` dict slot.
         kind  — semantic role within owner (portrait, frame, location, ...).
         """
-        order = max((g.order for g in owner.generations.values()), default=-1) + 1
         gen = Generation(
             id=self.project.next_id(),
             kind=kind,
             media_type=media_type,
             prompt=prompt,
-            order=order,
         )
         owner.generations[gen.id] = gen
         self.project.save()

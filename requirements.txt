@@ -9,6 +9,7 @@ websockets
 soundfile
 asyncssh
 markdownify
+dacite
 
 # SemanticProvider / FactProvider
 lancedb
