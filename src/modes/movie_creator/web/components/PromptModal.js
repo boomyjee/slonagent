@@ -1,7 +1,9 @@
+// Single-field prompt modal — for image generation and similar flows.
+// Owns its own draft state. Parent passes initial text + onSubmit/onCancel.
 import { html, useState } from '../lib.js';
 
-export function GenerationModal({ title, initialPrompt, approval, onSubmit, onCancel }) {
-    const [prompt, setPrompt] = useState(initialPrompt || '');
+export function PromptModal({ title, initial, approval, onSubmit, onCancel }) {
+    const [prompt, setPrompt] = useState(initial || '');
     return html`
         <div class="modal-backdrop" onClick=${onCancel}>
             <div class="modal" onClick=${e => e.stopPropagation()}>

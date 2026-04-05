@@ -17,6 +17,17 @@ WEB_DIR = Path(__file__).parent / "web"
 
 
 class MovieServer:
+    """Path-based WebSocket API.
+
+    Every entity in the project is addressed by a path — a list of string
+    segments like ``["scenes", "3"]`` (a scene) or
+    ``["scenes", "3", "shots", "2", "generations", "5"]`` (a generation).
+    Odd-length paths point to a *container* (collection dict), even-length
+    paths point to an *entity*. This maps 1:1 to the Python data model via
+    ``Project.resolve_path`` / ``Project.resolve_entity`` — so handlers stay
+    uniform regardless of depth.
+    """
+
     def __init__(self, port: int, project: Project):
         self.port = port
         self.project = project
@@ -25,8 +36,8 @@ class MovieServer:
         self.ws: WebSocket | None = None
         self.active_tab: str = "screenplay"
         self.active_scope: dict = {}  # tab-specific context, e.g. {"scene_id": "1"}
-        self._on_chat: list = []  # callbacks
-        self._on_tab_changed: list = []  # callbacks
+        self._on_chat: list = []
+        self._on_tab_changed: list = []
         self._pending_approval: asyncio.Future | None = None
         self._setup_routes()
 
@@ -56,7 +67,6 @@ class MovieServer:
         async def websocket_endpoint(ws: WebSocket):
             await ws.accept()
             self.ws = ws
-            # Send initial project state
             await self.send_project()
             try:
                 while True:
@@ -70,21 +80,31 @@ class MovieServer:
 
     async def _handle_message(self, msg: dict):
         t = msg.get("type")
+        path = msg.get("path") or []
 
-        if t == "edit":
-            await self.edit(msg["collection"], {"id": msg.get("id", ""), **msg.get("data", {})})
+        if t == "create":
+            # path = container path (odd length), e.g. ["scenes"] or ["scenes","7","shots"]
+            container, cls = self.project.resolve_path(path)
+            if container is not None:
+                self.project.create(container, cls, **msg.get("data", {}))
+                await self.send_project()
+
+        elif t == "update":
+            # path = entity path (even length)
+            container, _ = self.project.resolve_path(path[:-1])
+            if container is not None and path[-1] in container:
+                self.project.update(container, path[-1], **msg.get("data", {}))
+                await self.send_project()
 
         elif t == "delete":
-            self.project.delete(msg["collection"], msg["id"])
-            await self.send_project()
-
-        elif t == "reorder":
-            self.project.reorder(msg["collection"], msg.get("order", []))
-            await self.send_project()
+            container, _ = self.project.resolve_path(path[:-1])
+            if container is not None and path[-1] in container:
+                self.project.delete(container, path[-1])
+                await self.send_project()
 
         elif t == "generate":
-            owner = getattr(self.project, msg["collection"]).get(msg["id"])
-            if owner:
+            owner = self.project.resolve_entity(path)
+            if owner is not None:
                 asyncio.create_task(self.generator.enqueue(
                     owner,
                     msg.get("kind", "portrait"),
@@ -93,22 +113,11 @@ class MovieServer:
                 ))
 
         elif t == "set_primary":
-            owner = getattr(self.project, msg["collection"]).get(msg["id"])
-            if owner:
-                gen = next(
-                    (g for g in getattr(owner, "generations", [])
-                     if g.id == msg["generation_id"] and g.file),
-                    None,
-                )
-                if gen:
-                    owner.image = gen.file
-                    self.project.save()
-                    await self.send_project()
-
-        elif t == "delete_generation":
-            owner = getattr(self.project, msg["collection"]).get(msg["id"])
-            if owner and hasattr(owner, "generations"):
-                owner.generations = [g for g in owner.generations if g.id != msg["generation_id"]]
+            # path = generation path, e.g. ["characters","3","generations","5"]
+            gen = self.project.resolve_entity(path)
+            owner = self.project.resolve_entity(path[:-2])
+            if gen and owner and getattr(gen, "file", ""):
+                owner.image = gen.file
                 self.project.save()
                 await self.send_project()
 
@@ -146,6 +155,10 @@ class MovieServer:
                 msg["final"] = True
             await self.ws.send_text(json.dumps(msg))
 
+    async def send_event(self, event: str, **kwargs):
+        if self.ws:
+            await self.ws.send_text(json.dumps({"type": event, **kwargs}))
+
     async def request_approval(self, kind: str, data: dict) -> dict:
         """Ask user to approve/edit/reject. Returns {action, data?, reason?}."""
         self._pending_approval = asyncio.get_event_loop().create_future()
@@ -154,33 +167,46 @@ class MovieServer:
         self._pending_approval = None
         return result
 
-    async def edit(self, collection: str, fields: dict, approval: bool = False) -> dict:
-        """Create (no id) or update (with id) entity. If approval=True — ask user first."""
-        fields = {k: v for k, v in fields.items() if k != "self"}
-        id = fields.pop("id", "")
+    async def edit(self, path: list, fields: dict, approval: bool = False) -> dict:
+        """Create or update an entity at ``path``. Odd-length path = create in
+        that container, even-length path = update existing entity.
+
+        If ``approval=True``, shows the user an editable form first; for updates
+        the user sees current values merged with any non-empty overrides from
+        ``fields`` (so AI can pass empty strings for "don't change").
+        """
+        fields = {k: v for k, v in fields.items() if k != "self" and not k.startswith("_")}
+        is_create = len(path) % 2 == 1
+
         if approval:
-            if id:
-                obj = getattr(self.project, collection).get(id)
-                if obj:
-                    fields = {k: v or getattr(obj, k, "") for k, v in fields.items()}
-            result = await self.request_approval(collection.rstrip("s"), fields)
+            if not is_create:
+                obj = self.project.resolve_entity(path)
+                if obj is not None:
+                    # For update approvals: fall back to current value when AI passed ""
+                    fields = {k: (v if v else getattr(obj, k, "")) for k, v in fields.items()}
+            # kind label derived from container segment (e.g. "scenes" → "scene")
+            container_seg = path[-1] if is_create else path[-2]
+            kind = container_seg.rstrip("s")
+            result = await self.request_approval(kind, {"path": path, "fields": fields})
             if result.get("action") == "reject":
                 return {"status": "rejected", "reason": result.get("reason", "")}
-            fields = result.get("data", {})
+            fields = result.get("data", {}) or {}
+            fields = {k: v for k, v in fields.items() if not k.startswith("_")}
 
-        if id:
-            self.project.update(collection, id, **fields)
-            status = "updated"
+        if is_create:
+            container, cls = self.project.resolve_path(path)
+            if container is None:
+                return {"status": "error", "error": f"invalid path {path}"}
+            obj = self.project.create(container, cls, **fields)
+            await self.send_project()
+            return {"status": "created", "id": obj.id}
         else:
-            obj = self.project.create(collection, **fields)
-            id = obj.id
-            status = "created"
-        await self.send_project()
-        return {"status": status, "id": id}
-
-    async def send_event(self, event: str, **kwargs):
-        if self.ws:
-            await self.ws.send_text(json.dumps({"type": event, **kwargs}))
+            container, _ = self.project.resolve_path(path[:-1])
+            if container is None or path[-1] not in container:
+                return {"status": "error", "error": f"not found {path}"}
+            self.project.update(container, path[-1], **fields)
+            await self.send_project()
+            return {"status": "updated", "id": path[-1]}
 
     def on_chat(self, callback):
         self._on_chat.append(callback)

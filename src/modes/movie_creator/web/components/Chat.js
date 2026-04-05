@@ -34,9 +34,13 @@ export function Chat({ messages, onSend, onApprovalClick, rootRef }) {
                     if (m.kind === 'tool') return html`<div class="msg tool_call">\u2699 ${m.name}</div>`;
                     if (m.kind === 'processing') return html`<div class="processing">AI is thinking...</div>`;
                     if (m.kind === 'approval') {
-                        const label = m.approvalKind === 'scene' ? (m.data.title || 'Scene')
-                            : m.approvalKind === 'character' ? (m.data.name || 'Character')
+                        // Entity approvals wrap payload in {path, fields}; tool approvals are flat.
+                        const fields = m.data.fields || m.data;
+                        const label = m.approvalKind === 'scene' ? (fields.title || 'Scene')
+                            : m.approvalKind === 'character' ? (fields.name || 'Character')
+                            : m.approvalKind === 'shot' ? ((fields.description || '').slice(0, 40) || 'Shot')
                             : m.approvalKind === 'portrait' ? `Portrait: ${m.data.character_name || ''}`
+                            : m.approvalKind === 'shots_bulk' ? `Storyboard (${(m.data.text || '').split('---').filter(s => s.trim()).length} shots)`
                             : m.approvalKind;
                         return html`
                             <div

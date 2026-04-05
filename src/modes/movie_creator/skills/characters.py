@@ -32,7 +32,11 @@ class CharactersSkill(Skill):
         description: Annotated[str, "Описание (роль, характер, мотивация)"] = "",
         appearance: Annotated[str, "Внешность (возраст, рост, волосы, одежда)"] = "",
     ) -> dict:
-        return await self.server.edit("characters", locals(), approval=True)
+        return await self.server.edit(
+            ["characters"],
+            {"name": name, "description": description, "appearance": appearance},
+            approval=True,
+        )
 
     @tool("Обновить существующего персонажа по ID. Пользователь сможет отредактировать и одобрить.")
     async def update_character(
@@ -42,7 +46,11 @@ class CharactersSkill(Skill):
         description: Annotated[str, "Новое описание (пусто = не менять)"] = "",
         appearance: Annotated[str, "Новая внешность (пусто = не менять)"] = "",
     ) -> dict:
-        return await self.server.edit("characters", locals(), approval=True)
+        return await self.server.edit(
+            ["characters", id],
+            {"name": name, "description": description, "appearance": appearance},
+            approval=True,
+        )
 
     @tool("Сгенерировать портрет персонажа. Передай полный промпт для image-модели. "
           "Генерация добавится в очередь — результат появится в галерее персонажа.")

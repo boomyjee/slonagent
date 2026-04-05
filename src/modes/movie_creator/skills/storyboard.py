@@ -21,8 +21,7 @@ class StoryboardSkill(Skill):
         current_scene = self.project.scenes.get(scene_id) if scene_id else None
         current_block = ""
         if current_scene:
-            scene_shots = [s for s in self.project.shots.values() if s.scene_id == scene_id]
-            shots_dump = self.project.dump(scene_shots)
+            shots_dump = self.project.dump(current_scene.shots)
             current_block = (
                 f"\n\nТЕКУЩАЯ ВЫБРАННАЯ СЦЕНА: id={current_scene.id}\n"
                 f"КАДРЫ ЭТОЙ СЦЕНЫ:\n{shots_dump}"
@@ -47,7 +46,11 @@ class StoryboardSkill(Skill):
         scene_id: Annotated[str, "ID сцены, к которой относится кадр"],
         description: Annotated[str, "Описание кадра — крупность, действие, камера, диалог в одном тексте"],
     ) -> dict:
-        return await self.server.edit("shots", locals(), approval=True)
+        return await self.server.edit(
+            ["scenes", scene_id, "shots"],
+            {"description": description},
+            approval=True,
+        )
 
     @tool(
         "Предложить сразу несколько кадров для сцены. Пользователь увидит все описания в одном окне, "
@@ -65,11 +68,14 @@ class StoryboardSkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         text = result.get("data", {}).get("text", "")
+        container, cls = self.project.resolve_path(["scenes", scene_id, "shots"])
+        if container is None:
+            return {"status": "error", "error": f"scene {scene_id} not found"}
         ids = []
         for desc in text.split(SHOT_SEPARATOR):
             desc = desc.strip()
             if desc:
-                obj = self.project.create("shots", scene_id=scene_id, description=desc)
+                obj = self.project.create(container, cls, description=desc)
                 ids.append(obj.id)
         await self.server.send_project()
         return {"status": "created", "ids": ids, "count": len(ids)}
@@ -77,7 +83,12 @@ class StoryboardSkill(Skill):
     @tool("Обновить описание существующего кадра. Пользователь сможет отредактировать и одобрить.")
     async def update_shot(
         self,
-        id: Annotated[str, "ID кадра для обновления"],
+        scene_id: Annotated[str, "ID сцены"],
+        id: Annotated[str, "ID кадра"],
         description: Annotated[str, "Новое описание кадра"],
     ) -> dict:
-        return await self.server.edit("shots", locals(), approval=True)
+        return await self.server.edit(
+            ["scenes", scene_id, "shots", id],
+            {"description": description},
+            approval=True,
+        )

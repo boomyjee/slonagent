@@ -28,11 +28,13 @@ class Entity:
             setattr(self, slot, val)
 
     def to_dict(self) -> dict:
+        """Serialize nested children as ordered dicts keyed by id (insertion order = .order)."""
         result = {}
         for s in self.__slots__:
             v = getattr(self, s)
             if s in self._nested and isinstance(v, dict):
-                v = [x.to_dict() for x in sorted(v.values(), key=lambda x: x.order)]
+                ordered = sorted(v.values(), key=lambda x: x.order)
+                v = {x.id: x.to_dict() for x in ordered}
             result[s] = v
         return result
 
@@ -42,8 +44,8 @@ class Entity:
 
 
 class Generation(Entity):
-    __slots__ = ("id", "kind", "media_type", "prompt", "file", "status", "error")
-    _defaults = {"media_type": "image", "status": "queued"}
+    __slots__ = ("id", "kind", "media_type", "prompt", "file", "status", "error", "order")
+    _defaults = {"media_type": "image", "status": "queued", "order": 0}
 
 
 class Shot(Entity):
@@ -99,7 +101,9 @@ class Project:
         proj = cls(project_dir, title=data.get("title", ""))
         proj._next_id = data.get("next_id", 1)
         for name, entity_cls in cls._entity_types.items():
-            for d in data.get(name, {}).values():
+            raw = data.get(name, {})
+            items = raw.values() if isinstance(raw, dict) else raw
+            for d in items:
                 obj = entity_cls.from_dict(d)
                 getattr(proj, name)[obj.id] = obj
         return proj
@@ -206,7 +210,8 @@ class Project:
         )
 
     def to_dict(self) -> dict:
+        """Client-facing shape: top-level entities as ordered dicts keyed by id."""
         result = {"title": self.title}
         for name in self._entity_types:
-            result[name] = [x.to_dict() for x in self.ordered(getattr(self, name))]
+            result[name] = {x.id: x.to_dict() for x in self.ordered(getattr(self, name))}
         return result

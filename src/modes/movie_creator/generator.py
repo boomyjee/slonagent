@@ -1,5 +1,5 @@
 """Media generation queue + worker. Handles image (and later video) generations
-attached to any owner entity that has a `generations` slot (list of dicts)."""
+attached to any owner entity that has a `generations` slot (dict of id → Generation)."""
 import asyncio
 import base64
 import logging
@@ -21,18 +21,20 @@ class Generator:
         self._worker: asyncio.Task | None = None
 
     async def enqueue(self, owner, kind: str, prompt: str, media_type: str = "image") -> str:
-        """Append a queued Generation to owner.generations and schedule processing.
+        """Insert a queued Generation into owner.generations dict and schedule processing.
 
-        owner — any Entity with a `generations` list slot.
-        kind  — semantic role within owner (portrait, extra, location, ...).
+        owner — any Entity with a `generations` dict slot.
+        kind  — semantic role within owner (portrait, frame, location, ...).
         """
+        order = max((g.order for g in owner.generations.values()), default=-1) + 1
         gen = Generation(
             id=self.project.next_id(),
             kind=kind,
             media_type=media_type,
             prompt=prompt,
+            order=order,
         )
-        owner.generations.append(gen)
+        owner.generations[gen.id] = gen
         self.project.save()
         await self.notify()
 
@@ -50,7 +52,7 @@ class Generator:
                 log.exception("[movie] generator worker error")
 
     async def _process(self, owner, gen_id: str):
-        gen = next((g for g in owner.generations if g.id == gen_id), None)
+        gen = owner.generations.get(gen_id)
         if not gen:
             return
         gen.status = "generating"

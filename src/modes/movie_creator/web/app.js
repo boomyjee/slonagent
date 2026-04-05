@@ -1,24 +1,38 @@
-// Movie Creator — Preact app entry
-import { render, html, useState, useEffect, useRef, SCHEMAS, TAB_COLLECTION, defaultGenerationPrompt, createWS } from './lib.js';
+// Movie Creator — Preact app entry.
+//
+// State model (intentionally flat):
+//   project     — single source of truth, streamed from server on every change
+//   tab         — current UI tab
+//   selected    — { scenes: id|'__new__'|null, characters: id|'__new__'|null }
+//                 controls what the center pane renders
+//   approval    — AI proposal currently shown in center (overrides selected)
+//                 { kind, data, idx }
+//   promptModal — single-field prompt modal (generation or approval); owns nothing
+//   bulkModal   — bulk shots proposal modal
+//   messages    — chat/approval/tool log
+//
+// No resolveEditing(), no edits-merge. Forms own their own draft internally.
+// Galleries read straight from live project state, so external updates
+// (AI-produced generations) flow in without touching any form.
+import { render, html, useState, useEffect, useRef, createWS } from './lib.js';
 import { Resizer } from './components/Resizer.js';
-import { EntityList } from './components/EntityList.js';
-import { EntityEditor } from './components/EntityEditor.js';
+import { SceneList } from './components/SceneList.js';
+import { CharacterList } from './components/CharacterList.js';
+import { SceneView } from './components/SceneView.js';
+import { CharacterView } from './components/CharacterView.js';
 import { StoryboardView } from './components/StoryboardView.js';
-import { GenerationModal } from './components/GenerationModal.js';
+import { ApprovalView } from './components/ApprovalView.js';
+import { PromptModal } from './components/PromptModal.js';
 import { BulkShotsModal } from './components/BulkShotsModal.js';
 import { Chat } from './components/Chat.js';
 
 function App() {
     const [connected, setConnected] = useState(false);
-    const [project, setProject] = useState({ title: '', scenes: [], characters: [] });
+    const [project, setProject] = useState({ title: '', scenes: {}, characters: {} });
     const [tab, setTab] = useState('screenplay');
     const [selected, setSelected] = useState({ scenes: null, characters: null });
-    // editing: { collection, id, isNew, approval?, edits, chatIdx? }
-    //   - existing entity: id set, edits = user field overrides
-    //   - new entity: id=null, isNew=true, edits = full form
-    //   - approval: id=null, approval=true, edits = AI proposal
-    const [editing, setEditing] = useState(null);
-    const [genModal, setGenModal] = useState(null);
+    const [approval, setApproval] = useState(null);
+    const [promptModal, setPromptModal] = useState(null);
     const [bulkModal, setBulkModal] = useState(null);
     const [messages, setMessages] = useState([]);
     const wsRef = useRef(null);
@@ -55,21 +69,28 @@ function App() {
         } else if (msg.type === 'processing_done') {
             setMessages(prev => prev.filter(m => m.kind !== 'processing'));
         } else if (msg.type === 'approval_request') {
-            setMessages(prev => [...prev, { kind: 'approval', approvalKind: msg.kind, data: msg.data, resolved: false, idx: prev.length }]);
+            setMessages(prev => [...prev, {
+                kind: 'approval',
+                approvalKind: msg.kind,
+                data: msg.data,
+                resolved: false,
+                idx: prev.length,
+            }]);
         }
     }
 
-    // Resolve live editing data — merge project base with local edits
-    function resolveEditing() {
-        if (!editing) return null;
-        if (editing.isNew || editing.approval) return editing.edits;
-        const base = (project[editing.collection] || []).find(x => x.id === editing.id) || {};
-        return { ...base, ...editing.edits };
+    function markResolved(idx) {
+        if (idx == null) return;
+        setMessages(prev => prev.map((m, i) => i === idx ? { ...m, resolved: true } : m));
     }
+
+    function askReason() { return prompt('Reason (optional):') || ''; }
+
+    // ── selection ──
 
     function switchTab(newTab) {
         setTab(newTab);
-        setEditing(null);
+        setApproval(null);
         send({ type: 'tab_changed', tab: newTab });
         if (newTab === 'storyboard') {
             send({ type: 'scope_changed', scope: { scene_id: selected.scenes || '' } });
@@ -78,185 +99,176 @@ function App() {
         }
     }
 
-    function openEntity(collection, item) {
-        setSelected(s => ({ ...s, [collection]: item.id }));
+    function selectEntity(collection, id) {
+        setSelected(s => ({ ...s, [collection]: id }));
         if (tab === 'storyboard' && collection === 'scenes') {
-            send({ type: 'scope_changed', scope: { scene_id: item.id } });
-            setEditing(null);
-            return;
+            send({ type: 'scope_changed', scope: { scene_id: id } });
         }
-        setEditing({ collection, id: item.id, isNew: false, edits: {} });
     }
 
-    function openNewEntity(collection) {
-        const blank = {};
-        (SCHEMAS[collection].fields || []).forEach(f => blank[f.name] = '');
-        setEditing({ collection, id: null, isNew: true, edits: blank });
+    function addNew(collection) {
+        setSelected(s => ({ ...s, [collection]: '__new__' }));
     }
 
-    function onFieldChange(name, value) {
-        setEditing(e => e && ({ ...e, edits: { ...e.edits, [name]: value } }));
+    function closeCenter(collection) {
+        setSelected(s => ({ ...s, [collection]: null }));
     }
 
-    function saveEntity() {
-        if (!editing) return;
-        const data = resolveEditing();
-        const { id, order, generations, ...fields } = data;
-        if (editing.approval) {
-            send({ type: 'approval_response', action: 'approve', data: fields });
-            markApprovalResolved(editing.chatIdx);
-        } else {
-            send({
-                type: 'edit',
-                collection: editing.collection,
-                id: editing.isNew ? '' : editing.id,
-                data: fields,
-            });
-        }
-        setEditing(null);
-    }
-
-    function rejectEntity() {
-        if (!editing || !editing.approval) return;
-        const reason = prompt('Reason (optional):') || '';
-        send({ type: 'approval_response', action: 'reject', reason });
-        markApprovalResolved(editing.chatIdx);
-        setEditing(null);
-    }
-
-    function deleteEntity() {
-        if (!editing || editing.isNew) return;
-        if (!confirm(`Delete this ${SCHEMAS[editing.collection].label.toLowerCase()}?`)) return;
-        send({ type: 'delete', collection: editing.collection, id: editing.id });
-        setEditing(null);
-    }
-
-    function markApprovalResolved(idx) {
-        if (idx == null) return;
-        setMessages(prev => prev.map((m, i) => i === idx ? { ...m, resolved: true } : m));
-    }
+    // ── approvals ──
 
     function handleApprovalClick(msgItem) {
         if (msgItem.resolved) return;
         const kind = msgItem.approvalKind;
+
         if (kind === 'portrait') {
-            setGenModal({
-                collection: 'characters',
-                kind: 'portrait',
-                ownerId: msgItem.data.character_id,
-                ownerName: msgItem.data.character_name,
-                initialPrompt: msgItem.data.prompt,
+            setPromptModal({
+                title: `Portrait: ${msgItem.data.character_name || ''}`,
+                initial: msgItem.data.prompt || '',
                 approval: true,
-                chatIdx: msgItem.idx,
+                onSubmit: prompt => {
+                    send({
+                        type: 'approval_response',
+                        action: 'approve',
+                        data: {
+                            prompt,
+                            character_id: msgItem.data.character_id,
+                            character_name: msgItem.data.character_name,
+                        },
+                    });
+                    markResolved(msgItem.idx);
+                    setPromptModal(null);
+                },
+                onCancel: () => {
+                    send({ type: 'approval_response', action: 'reject', reason: askReason() });
+                    markResolved(msgItem.idx);
+                    setPromptModal(null);
+                },
             });
-        } else if (kind === 'shots_bulk') {
+            return;
+        }
+
+        if (kind === 'shots_bulk') {
             setBulkModal({
-                sceneId: msgItem.data.scene_id,
                 initialText: msgItem.data.text || '',
-                chatIdx: msgItem.idx,
+                onApprove: text => {
+                    send({
+                        type: 'approval_response',
+                        action: 'approve',
+                        data: { text, scene_id: msgItem.data.scene_id },
+                    });
+                    markResolved(msgItem.idx);
+                    setBulkModal(null);
+                },
+                onReject: () => {
+                    send({ type: 'approval_response', action: 'reject', reason: askReason() });
+                    markResolved(msgItem.idx);
+                    setBulkModal(null);
+                },
             });
-        } else {
-            const collection = kind === 'scene' ? 'scenes' : 'characters';
-            setEditing({
-                collection,
-                id: null,
-                isNew: true,
-                approval: true,
-                edits: { ...msgItem.data },
-                chatIdx: msgItem.idx,
-            });
+            return;
         }
+
+        // scene / character / shot — entity form shown in center
+        setApproval({ kind, data: msgItem.data.fields || msgItem.data, idx: msgItem.idx });
     }
 
-    function submitGeneration(prompt) {
-        if (genModal.approval) {
-            send({
-                type: 'approval_response',
-                action: 'approve',
-                data: { prompt, character_id: genModal.ownerId, character_name: genModal.ownerName },
-            });
-            markApprovalResolved(genModal.chatIdx);
-        } else {
-            send({
-                type: 'generate',
-                collection: genModal.collection,
-                id: genModal.ownerId,
-                kind: genModal.kind,
-                prompt,
-            });
-        }
-        setGenModal(null);
+    function approveEntity(data) {
+        send({ type: 'approval_response', action: 'approve', data });
+        if (approval) markResolved(approval.idx);
+        setApproval(null);
     }
 
-    function cancelGeneration() {
-        if (genModal.approval) {
-            const reason = prompt('Reason (optional):') || '';
-            send({ type: 'approval_response', action: 'reject', reason });
-            markApprovalResolved(genModal.chatIdx);
-        }
-        setGenModal(null);
-    }
-
-    function approveBulkShots(text) {
-        send({
-            type: 'approval_response',
-            action: 'approve',
-            data: { text, scene_id: bulkModal.sceneId },
-        });
-        markApprovalResolved(bulkModal.chatIdx);
-        setBulkModal(null);
-    }
-
-    function rejectBulkShots() {
-        const reason = prompt('Reason (optional):') || '';
-        send({ type: 'approval_response', action: 'reject', reason });
-        markApprovalResolved(bulkModal.chatIdx);
-        setBulkModal(null);
-    }
-
-    function newGeneration(collection, owner) {
-        const schema = SCHEMAS[collection];
-        setGenModal({
-            collection,
-            kind: schema.gallery,
-            ownerId: owner.id,
-            ownerName: owner[schema.titleField] || schema.emptyTitle,
-            initialPrompt: defaultGenerationPrompt(collection, owner),
-            approval: false,
-        });
-    }
-
-    function remixGeneration(collection, owner, gen) {
-        const schema = SCHEMAS[collection];
-        setGenModal({
-            collection,
-            kind: schema.gallery,
-            ownerId: owner.id,
-            ownerName: owner[schema.titleField] || schema.emptyTitle,
-            initialPrompt: gen.prompt,
-            approval: false,
-        });
-    }
-
-    function setPrimary(collection, owner, gen) {
-        send({ type: 'set_primary', collection, id: owner.id, generation_id: gen.id });
-    }
-
-    function deleteGeneration(collection, owner, gen) {
-        if (!confirm('Delete this generation?')) return;
-        send({ type: 'delete_generation', collection, id: owner.id, generation_id: gen.id });
+    function rejectEntity() {
+        send({ type: 'approval_response', action: 'reject', reason: askReason() });
+        if (approval) markResolved(approval.idx);
+        setApproval(null);
     }
 
     function sendChat(text) { send({ type: 'chat', text }); }
 
-    const collection = TAB_COLLECTION[tab];
-    const schema = collection && SCHEMAS[collection];
-    const items = collection ? (project[collection] || []) : [];
-    const editingData = resolveEditing();
-    const selectedScene = tab === 'storyboard' && selected.scenes
-        ? (project.scenes || []).find(s => s.id === selected.scenes) : null;
-    const sceneShots = selectedScene
-        ? (project.shots || []).filter(s => s.scene_id === selectedScene.id) : [];
+    // ── render ──
+
+    let sidebarView = null;
+    if (tab === 'screenplay' || tab === 'storyboard') {
+        sidebarView = html`<${SceneList}
+            scenes=${project.scenes}
+            selectedId=${selected.scenes}
+            onSelect=${id => selectEntity('scenes', id)}
+            onAdd=${tab === 'screenplay' ? () => addNew('scenes') : null}
+        />`;
+    } else if (tab === 'characters') {
+        sidebarView = html`<${CharacterList}
+            characters=${project.characters}
+            selectedId=${selected.characters}
+            onSelect=${id => selectEntity('characters', id)}
+            onAdd=${() => addNew('characters')}
+        />`;
+    }
+
+    let centerView;
+    if (approval) {
+        centerView = html`<${ApprovalView}
+            key=${'approval-' + approval.idx}
+            kind=${approval.kind}
+            data=${approval.data}
+            onApprove=${approveEntity}
+            onReject=${rejectEntity}
+        />`;
+    } else if (tab === 'screenplay') {
+        const sel = selected.scenes;
+        if (sel === '__new__') {
+            centerView = html`<${SceneView}
+                key="new-scene"
+                isNew=${true}
+                send=${send}
+                onClose=${() => closeCenter('scenes')}
+            />`;
+        } else if (sel && project.scenes[sel]) {
+            centerView = html`<${SceneView}
+                key=${'scene-' + sel}
+                scene=${project.scenes[sel]}
+                send=${send}
+                onClose=${() => closeCenter('scenes')}
+            />`;
+        } else {
+            centerView = html`<div class="center-empty">Select a scene or create a new one</div>`;
+        }
+    } else if (tab === 'characters') {
+        const sel = selected.characters;
+        if (sel === '__new__') {
+            centerView = html`<${CharacterView}
+                key="new-char"
+                isNew=${true}
+                send=${send}
+                onClose=${() => closeCenter('characters')}
+                openPromptModal=${setPromptModal}
+            />`;
+        } else if (sel && project.characters[sel]) {
+            centerView = html`<${CharacterView}
+                key=${'char-' + sel}
+                character=${project.characters[sel]}
+                send=${send}
+                onClose=${() => closeCenter('characters')}
+                openPromptModal=${setPromptModal}
+            />`;
+        } else {
+            centerView = html`<div class="center-empty">Select a character or create a new one</div>`;
+        }
+    } else if (tab === 'storyboard') {
+        const sel = selected.scenes;
+        if (sel && project.scenes[sel]) {
+            centerView = html`<${StoryboardView}
+                key=${'sb-' + sel}
+                scene=${project.scenes[sel]}
+                send=${send}
+                openPromptModal=${setPromptModal}
+            />`;
+        } else {
+            centerView = html`<div class="center-empty">Select a scene to start storyboarding</div>`;
+        }
+    } else {
+        centerView = html`<div class="center-empty">Generation (coming soon)</div>`;
+    }
 
     return html`
         <div class="header">
@@ -273,73 +285,24 @@ function App() {
             `)}
         </div>
         <div class="main">
-            <div class="sidebar" ref=${sidebarRef}>
-                ${schema ? html`
-                    <${EntityList}
-                        schema=${schema}
-                        items=${items}
-                        selectedId=${selected[collection]}
-                        onSelect=${item => openEntity(collection, item)}
-                        onAdd=${() => openNewEntity(collection)}
-                    />
-                ` : null}
-            </div>
+            <div class="sidebar" ref=${sidebarRef}>${sidebarView}</div>
             <${Resizer} targetRef=${sidebarRef} side="left" />
-            <div class="center">
-                ${editing && editingData ? html`
-                    <${EntityEditor}
-                        schema=${SCHEMAS[editing.collection]}
-                        data=${editingData}
-                        isNew=${editing.isNew}
-                        approval=${editing.approval}
-                        onFieldChange=${onFieldChange}
-                        onSave=${saveEntity}
-                        onCancel=${() => setEditing(null)}
-                        onDelete=${deleteEntity}
-                        onReject=${rejectEntity}
-                        onNewGeneration=${() => newGeneration(editing.collection, editingData)}
-                        onRemixGeneration=${gen => remixGeneration(editing.collection, editingData, gen)}
-                        onSetPrimary=${gen => setPrimary(editing.collection, editingData, gen)}
-                        onDeleteGeneration=${gen => deleteGeneration(editing.collection, editingData, gen)}
-                    />
-                ` : tab === 'storyboard' && selectedScene ? html`
-                    <${StoryboardView}
-                        scene=${selectedScene}
-                        shots=${sceneShots}
-                        onCreate=${() => send({ type: 'edit', collection: 'shots', id: '', data: { scene_id: selectedScene.id, description: '' } })}
-                        onUpdate=${(shot, description) => send({ type: 'edit', collection: 'shots', id: shot.id, data: { description } })}
-                        onDelete=${shot => confirm('Delete this shot?') && send({ type: 'delete', collection: 'shots', id: shot.id })}
-                        onNewGeneration=${shot => newGeneration('shots', shot)}
-                        onRemixGeneration=${(shot, gen) => remixGeneration('shots', shot, gen)}
-                        onSetPrimary=${(shot, gen) => setPrimary('shots', shot, gen)}
-                        onDeleteGeneration=${(shot, gen) => deleteGeneration('shots', shot, gen)}
-                    />
-                ` : html`
-                    <div class="center-empty">
-                        ${tab === 'storyboard' ? 'Select a scene to start storyboarding'
-                            : schema ? schema.selectHint : 'Generation (coming soon)'}
-                    </div>
-                `}
-            </div>
+            <div class="center">${centerView}</div>
             <${Resizer} targetRef=${chatRef} side="right" />
             <${Chat} rootRef=${chatRef} messages=${messages} onSend=${sendChat} onApprovalClick=${handleApprovalClick} />
         </div>
-        ${genModal ? html`
-            <${GenerationModal}
-                title=${(genModal.approval ? 'AI Proposal — Generation' : 'Generate') + ': ' + genModal.ownerName}
-                initialPrompt=${genModal.initialPrompt}
-                approval=${genModal.approval}
-                onSubmit=${submitGeneration}
-                onCancel=${cancelGeneration}
-            />
-        ` : null}
-        ${bulkModal ? html`
-            <${BulkShotsModal}
-                initialText=${bulkModal.initialText}
-                onApprove=${approveBulkShots}
-                onReject=${rejectBulkShots}
-            />
-        ` : null}
+        ${promptModal ? html`<${PromptModal}
+            title=${promptModal.title}
+            initial=${promptModal.initial}
+            approval=${promptModal.approval}
+            onSubmit=${promptModal.onSubmit}
+            onCancel=${promptModal.onCancel}
+        />` : null}
+        ${bulkModal ? html`<${BulkShotsModal}
+            initialText=${bulkModal.initialText}
+            onApprove=${bulkModal.onApprove}
+            onReject=${bulkModal.onReject}
+        />` : null}
     `;
 }
 

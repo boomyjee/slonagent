@@ -1,11 +1,20 @@
-import { html, useState } from '../lib.js';
-import { GenerationGallery } from './GenerationGallery.js';
+// Storyboard for a selected scene. Reads shots from scene.shots dict (live
+// project state). Each shot is either a compact row or a full card with
+// inline-editable description + its own gallery.
+import { html, useState, shotPrompt } from '../lib.js';
+import { Gallery } from './Gallery.js';
 
-export function StoryboardView({
-    scene, shots, onCreate, onUpdate, onDelete,
-    onNewGeneration, onRemixGeneration, onSetPrimary, onDeleteGeneration,
-}) {
+export function StoryboardView({ scene, send, openPromptModal }) {
     const [mode, setMode] = useState('compact');
+    const shots = Object.values(scene.shots || {});
+
+    function createShot() {
+        send({
+            type: 'create',
+            path: ['scenes', scene.id, 'shots'],
+            data: { description: '' },
+        });
+    }
 
     return html`
         <div class="editor">
@@ -21,7 +30,7 @@ export function StoryboardView({
                         onClick=${() => setMode('full')}
                     >Full</button>
                 </div>
-                <button class="btn btn-sm btn-primary" onClick=${onCreate}>+ Add shot</button>
+                <button class="btn btn-sm btn-primary" onClick=${createShot}>+ Add shot</button>
             </div>
             <div class="editor-body">
                 ${shots.length === 0
@@ -29,15 +38,12 @@ export function StoryboardView({
                     : shots.map((shot, i) => html`
                         <${ShotCard}
                             key=${shot.id}
+                            scene=${scene}
                             shot=${shot}
                             index=${i}
                             mode=${mode}
-                            onUpdate=${desc => onUpdate(shot, desc)}
-                            onDelete=${() => onDelete(shot)}
-                            onNewGeneration=${() => onNewGeneration(shot)}
-                            onRemixGeneration=${gen => onRemixGeneration(shot, gen)}
-                            onSetPrimary=${gen => onSetPrimary(shot, gen)}
-                            onDeleteGeneration=${gen => onDeleteGeneration(shot, gen)}
+                            send=${send}
+                            openPromptModal=${openPromptModal}
                         />
                     `)}
             </div>
@@ -45,17 +51,21 @@ export function StoryboardView({
     `;
 }
 
-function ShotCard({
-    shot, index, mode, onUpdate, onDelete,
-    onNewGeneration, onRemixGeneration, onSetPrimary, onDeleteGeneration,
-}) {
+function ShotCard({ scene, shot, index, mode, send, openPromptModal }) {
     const [draft, setDraft] = useState(null);
     const value = draft != null ? draft : (shot.description || '');
     const thumb = shot.image ? `/api/asset/${shot.image}` : null;
+    const shotPath = ['scenes', scene.id, 'shots', shot.id];
 
     function commit() {
-        if (draft != null && draft !== shot.description) onUpdate(draft);
+        if (draft != null && draft !== shot.description) {
+            send({ type: 'update', path: shotPath, data: { description: draft } });
+        }
         setDraft(null);
+    }
+    function del() {
+        if (!confirm('Delete this shot?')) return;
+        send({ type: 'delete', path: shotPath });
     }
 
     if (mode === 'compact') {
@@ -82,16 +92,15 @@ function ShotCard({
                     onInput=${e => setDraft(e.target.value)}
                     onBlur=${commit}
                 ></textarea>
-                <button class="btn btn-sm btn-danger" onClick=${onDelete}>\u2715</button>
+                <button class="btn btn-sm btn-danger" onClick=${del}>\u2715</button>
             </div>
-            <${GenerationGallery}
-                owner=${shot}
+            <${Gallery}
+                entity=${shot}
+                path=${shotPath}
                 kind="frame"
-                generations=${shot.generations || []}
-                onNew=${onNewGeneration}
-                onRemix=${onRemixGeneration}
-                onSetPrimary=${onSetPrimary}
-                onDelete=${onDeleteGeneration}
+                defaultPrompt=${() => shotPrompt(shot)}
+                send=${send}
+                openPromptModal=${openPromptModal}
             />
         </div>
     `;
