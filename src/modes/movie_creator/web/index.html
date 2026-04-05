@@ -73,6 +73,9 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .msg { margin-bottom: 10px; font-size: 13px; line-height: 1.5; padding: 8px 12px; border-radius: 8px; max-width: 90%; white-space: pre-wrap; }
 .msg.user { background: var(--accent); color: #1e1e2e; margin-left: auto; }
 .msg.assistant { background: var(--surface2); }
+.msg.thinking { background: var(--surface2); font-size: 12px; color: var(--text-dim); font-style: italic; }
+.msg.thinking.collapsed { max-height: 34px; overflow: hidden; cursor: pointer; opacity: 0.5; white-space: nowrap; text-overflow: ellipsis; }
+.msg.thinking.collapsed:hover { opacity: 0.7; }
 .msg.tool_call { background: var(--surface3); font-size: 12px; color: var(--text-dim); border-left: 3px solid var(--accent); padding: 6px 10px; }
 .msg.approval { background: var(--warn); color: #1e1e2e; cursor: pointer; font-size: 12px; border-left: 3px solid #e0a800; padding: 6px 10px; }
 .msg.approval:hover { opacity: 0.85; }
@@ -232,7 +235,7 @@ ws.onmessage = e => {
         project = msg.project;
         renderSidebar();
     } else if (msg.type === 'message') {
-        addMessage(msg.role, msg.text, msg.stream_id);
+        addMessage(msg.role, msg.text, msg.stream_id, msg.final);
     } else if (msg.type === 'tool_call') {
         addToolCall(msg.name);
     } else if (msg.type === 'processing') {
@@ -252,7 +255,7 @@ const chatInput = document.getElementById('chat-input');
 
 const streamEls = {};  // stream_id → DOM element
 
-function addMessage(role, text, streamId) {
+function addMessage(role, text, streamId, final) {
     let el;
     if (streamId != null && streamEls[streamId]) {
         el = streamEls[streamId];
@@ -263,6 +266,12 @@ function addMessage(role, text, streamId) {
         el.textContent = text;
         messagesEl.appendChild(el);
         if (streamId != null) streamEls[streamId] = el;
+        if (role === 'thinking') {
+            el.onclick = () => el.classList.toggle('collapsed');
+        }
+    }
+    if (final && role === 'thinking') {
+        el.classList.add('collapsed');
     }
     messagesEl.scrollTop = messagesEl.scrollHeight;
 }

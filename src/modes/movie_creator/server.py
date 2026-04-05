@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import webbrowser
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -55,42 +56,23 @@ class MovieServer:
     async def _handle_message(self, msg: dict):
         t = msg.get("type")
 
-        if t == "create_scene":
-            d = msg.get("data", {})
-            self.project.create_scene(
-                title=d.get("title", ""),
-                text=d.get("text", ""),
-                location=d.get("location", ""),
-            )
+        if t in ("create_scene", "create_character"):
+            collection = "scenes" if "scene" in t else "characters"
+            self.project.create(collection, **msg.get("data", {}))
             await self._send_project()
 
-        elif t == "update_scene":
-            self.project.update_scene(msg["id"], **msg.get("data", {}))
+        elif t in ("update_scene", "update_character"):
+            collection = "scenes" if "scene" in t else "characters"
+            self.project.update(collection, msg["id"], **msg.get("data", {}))
             await self._send_project()
 
-        elif t == "delete_scene":
-            self.project.delete_scene(msg["id"])
+        elif t in ("delete_scene", "delete_character"):
+            collection = "scenes" if "scene" in t else "characters"
+            self.project.delete(collection, msg["id"])
             await self._send_project()
 
         elif t == "reorder_scenes":
-            self.project.reorder_scenes(msg.get("order", []))
-            await self._send_project()
-
-        elif t == "create_character":
-            d = msg.get("data", {})
-            self.project.create_character(
-                name=d.get("name", ""),
-                description=d.get("description", ""),
-                appearance=d.get("appearance", ""),
-            )
-            await self._send_project()
-
-        elif t == "update_character":
-            self.project.update_character(msg["id"], **msg.get("data", {}))
-            await self._send_project()
-
-        elif t == "delete_character":
-            self.project.delete_character(msg["id"])
+            self.project.reorder("scenes", msg.get("order", []))
             await self._send_project()
 
         elif t == "approval_response":
@@ -115,11 +97,13 @@ class MovieServer:
                 "project": self.project.to_dict(),
             }))
 
-    async def send_chat(self, text: str, role: str = "assistant", stream_id=None):
+    async def send_chat(self, text: str, role: str = "assistant", stream_id=None, final: bool = False):
         if self.ws:
             msg = {"type": "message", "role": role, "text": text}
             if stream_id is not None:
                 msg["stream_id"] = stream_id
+            if final:
+                msg["final"] = True
             await self.ws.send_text(json.dumps(msg))
 
     async def request_approval(self, kind: str, data: dict) -> dict:
@@ -160,3 +144,4 @@ class MovieServer:
             await asyncio.sleep(0.1)
         else:
             raise RuntimeError(f"Failed to start server on port {self.port}")
+        webbrowser.open(f"http://localhost:{self.port}")

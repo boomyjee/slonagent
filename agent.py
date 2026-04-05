@@ -413,7 +413,7 @@ class Agent:
                     if unexpected:
                         logging.warning("[stream] unknown delta fields: %s", unexpected)
 
-                if thinking_id is not None:
+                if thinking_text:
                     await self.transport.send_thinking(thinking_text, thinking_id, final=True)
 
                 finish_reason = chunk.choices[0].finish_reason if chunk and chunk.choices else None

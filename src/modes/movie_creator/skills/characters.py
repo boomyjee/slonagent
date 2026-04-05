@@ -15,8 +15,8 @@ class CharactersSkill(Skill):
         self.server = server
 
     async def get_context_prompt(self, user_text: str = "") -> str:
-        chars = self.project.characters_ordered()
-        scenes = self.project.scenes_ordered()
+        chars = self.project.ordered("characters")
+        scenes = self.project.ordered("scenes")
 
         if not chars:
             chars_ctx = "Персонажей пока нет."
@@ -63,7 +63,7 @@ class CharactersSkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         data = result.get("data", {})
-        char = self.project.create_character(
+        char = self.project.create("characters",
             name=data.get("name", name),
             description=data.get("description", description),
             appearance=data.get("appearance", appearance),
@@ -92,7 +92,7 @@ class CharactersSkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         data = result.get("data", {})
-        self.project.update_character(character_id, **data)
+        self.project.update("characters", character_id, **data)
         await self.server.send_event("project_updated",
                                      project=self.project.to_dict())
         return {"status": "updated", "character_id": character_id}

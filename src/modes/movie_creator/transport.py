@@ -13,8 +13,7 @@ class WebTransport(BaseTransport):
         await self.server.send_chat(text, stream_id=stream_id)
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
-        if final:
-            await self.server.send_event("thinking", text=text)
+        await self.server.send_chat(text, role="thinking", stream_id=stream_id, final=final)
 
     async def on_tool_call(self, name: str, args: dict):
         await self.server.send_event("tool_call", name=name)

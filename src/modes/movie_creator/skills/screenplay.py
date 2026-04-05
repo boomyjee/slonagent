@@ -15,7 +15,7 @@ class ScreenplaySkill(Skill):
         self.server = server
 
     async def get_context_prompt(self, user_text: str = "") -> str:
-        scenes = self.project.scenes_ordered()
+        scenes = self.project.ordered("scenes")
         if not scenes:
             ctx = "Проект пока пуст — нет ни одной сцены."
         else:
@@ -46,7 +46,7 @@ class ScreenplaySkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         data = result.get("data", {})
-        scene = self.project.create_scene(
+        scene = self.project.create("scenes",
             title=data.get("title", title),
             text=data.get("text", text),
             location=data.get("location", location),
@@ -75,7 +75,7 @@ class ScreenplaySkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         data = result.get("data", {})
-        self.project.update_scene(scene_id, **data)
+        self.project.update("scenes", scene_id, **data)
         await self.server.send_event("project_updated",
                                      project=self.project.to_dict())
         return {"status": "updated", "scene_id": scene_id}

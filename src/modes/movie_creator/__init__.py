@@ -1,6 +1,5 @@
 """Movie Creator mode — AI-assisted short film production pipeline."""
 import logging
-import webbrowser
 from pathlib import Path
 from typing import Annotated
 
@@ -30,68 +29,56 @@ class MovieCreatorSkill(Skill):
         self,
         project_name: Annotated[str, "Имя проекта"] = "default",
     ) -> dict:
-        transport = self.agent.transport
-        movies_dir = Path(self.agent.memory.memory_dir) / "movies"
-        project_dir = movies_dir / project_name
 
-        if (project_dir / "project.json").exists():
-            project = Project.load(project_dir)
-        else:
-            project = Project(project_dir, title=project_name)
-            project.save()
-
-        server = MovieServer(self._port, project)
-        await server.start()
-
-        url = f"http://localhost:{self._port}"
-        await transport.send_message(f"Movie Creator: {url}")
-        webbrowser.open(url)
-
-        # Tab skills
-        screenplay_skill = ScreenplaySkill(project, server)
-        characters_skill = CharactersSkill(project, server)
-        tab_skills = {"screenplay": screenplay_skill, "characters": characters_skill}
-
-        # Multi-transport: Telegram + web UI
-        web_transport = WebTransport(server)
-        multi = MultiTransport([transport, web_transport])
-
-        # Spawn subagent with default tab skill
         sub = await self.agent.spawn_subagent(
             f"movie_{project_name}",
             memory_providers=[],
-            skills=[screenplay_skill],
-            transport=multi,
+            skills=[],
         )
+
+        project = Project.load(Path(sub.memory.memory_dir) / "project")
+        server = MovieServer(self._port, project)
+        await server.start()
+
+        multi = MultiTransport([self.agent.transport, WebTransport(server)])
+        sub.transport = multi
+        multi.set_agent(sub)
+
+        tab_skills = {
+            "screenplay": ScreenplaySkill(project, server), 
+            "characters": CharactersSkill(project, server)
+        }
 
         def on_tab(tab):
             skill = tab_skills.get(tab)
             if skill:
                 sub.skills = [skill]
                 skill.register(sub)
-
         server.on_tab_changed(on_tab)
+        on_tab("screenplay")
 
-        # Web chat → show in Telegram + put in subagent queue
         async def _on_chat(text):
-            await transport.inject_message(text)
-            await multi.process_message([{"type": "text", "text": text}])
-
+            await sub.transport.inject_message(text)
+            await sub.transport.process_message([{"type": "text", "text": text}])
         server.on_chat(_on_chat)
 
         # Chat loop
-        try:
-            while True:
-                content_parts, _ = await sub.next_message()
+        while True:
+            content_parts, _ = await sub.next_message()
+            await sub.transport.send_processing(True)
+            try:
                 await sub.memory.add_turn({"role": "user", "content": content_parts})
-
-                tool_calls, reply = await sub.llm()
+                tool_calls, text = await sub.llm()
 
                 while tool_calls:
                     await sub.dispatch_tool_calls(tool_calls)
-                    tool_calls, reply = await sub.llm()
-        except Exception:
-            log.exception("[movie_creator] error in chat loop")
-            raise
+                    tool_calls, text = await sub.llm()
+
+                await sub.memory.add_turn({"role": "assistant", "content": text or ""})
+            except Exception as e:
+                log.exception("[movie_creator] error in chat loop")
+                await sub.transport.send_message(f"Ошибка: {e}")
+            finally:
+                await sub.transport.send_processing(False)
 
         return {"status": "done", "project": project.title}
