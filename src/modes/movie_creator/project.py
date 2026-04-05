@@ -1,20 +1,14 @@
 """Movie project data model — plain dataclasses, nothing else.
 
-Persistence and mutation live in the server. This module exposes:
-  - the dataclass tree (Generation/Shot/Scene/Character/Project)
-  - pure helpers that read the tree (resolve_path, resolve_entity, dump)
-  - load_project / save_project as free functions (the server calls them)
+Persistence lives in the server. Project exposes its own read helpers
+(`resolve`, `allocate_id`). The module also exposes `child_class` (type
+introspection) and `dump` (LLM-facing formatter).
 
 Ordering invariant for nested ``dict[str, Entity]``: **insertion order is
-display order**. Callers append on create and rebuild the dict on reorder —
-nothing in this module sorts anything.
+display order**. Callers append on create — nothing in this module sorts.
 """
-import json
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
-from typing import Any
-
-from dacite import from_dict
+from dataclasses import dataclass, field
+from typing import Any, get_args, get_type_hints
 
 
 @dataclass
@@ -32,7 +26,7 @@ class Generation:
 class Shot:
     id: str = ""
     description: str = ""
-    image: str = ""
+    primary_generation_id: str = ""  # id of the generation shown as primary
     generations: dict[str, Generation] = field(default_factory=dict)
 
 
@@ -51,7 +45,7 @@ class Character:
     name: str = ""
     description: str = ""
     appearance: str = ""
-    image: str = ""
+    primary_generation_id: str = ""  # id of the generation shown as primary
     generations: dict[str, Generation] = field(default_factory=dict)
 
 
@@ -62,69 +56,65 @@ class Project:
     scenes: dict[str, Scene] = field(default_factory=dict)
     characters: dict[str, Character] = field(default_factory=dict)
 
+    def allocate_id(self) -> str:
+        eid = str(self.next_id)
+        self.next_id += 1
+        return eid
 
-# Top-level collection → (entity class, nested-slot → child class map)
-_SCHEMA: dict[str, tuple[type, dict[str, type]]] = {
-    "scenes":     (Scene,     {"shots": Shot}),
-    "characters": (Character, {"generations": Generation}),
-}
-_NESTED_OF: dict[type, dict[str, type]] = {
-    Scene:      {"shots": Shot},
-    Shot:       {"generations": Generation},
-    Character:  {"generations": Generation},
-    Generation: {},
-}
+    def resolve(self, path: list[str]) -> Any:
+        """Walk a path and return whatever sits at the end.
 
+        Each segment is either a field name (when the current node is a
+        dataclass) or a dict key (when the current node is a container).
+        Callers check ``isinstance`` to tell container from entity.
+        """
+        obj: Any = self
+        for seg in path:
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                obj = obj.get(seg)
+            else:
+                obj = getattr(obj, seg, None)
+        return obj
 
-def allocate_id(project: Project) -> str:
-    eid = str(project.next_id)
-    project.next_id += 1
-    return eid
+    def create(self, path: list[str], data: dict) -> str | None:
+        """Create an entity inside the container at ``path``. Returns new id."""
+        container = self.resolve(path)
+        parent = self.resolve(path[:-1])
+        if not isinstance(container, dict) or parent is None:
+            return None
+        cls = child_class(type(parent), path[-1])
+        if cls is None:
+            return None
+        eid = self.allocate_id()
+        container[eid] = cls(id=eid, **data)
+        return eid
 
+    def update(self, path: list[str], data: dict) -> bool:
+        """Update fields on the entity at ``path``."""
+        obj = self.resolve(path)
+        if obj is None or isinstance(obj, dict):
+            return False
+        for k, v in data.items():
+            if hasattr(obj, k):
+                setattr(obj, k, v)
+        return True
 
-def resolve_path(project: Project, path: list[str]) -> tuple[dict | None, type | None]:
-    """Resolve an odd-length path to (container_dict, entity_class)."""
-    if not path or path[0] not in _SCHEMA:
-        return None, None
-    cls, nested = _SCHEMA[path[0]]
-    container = getattr(project, path[0])
-    i = 1
-    while i < len(path) - 1:
-        parent = container.get(path[i])
-        if parent is None:
-            return None, None
-        slot = path[i + 1]
-        if slot not in nested:
-            return None, None
-        container = getattr(parent, slot)
-        cls = nested[slot]
-        nested = _NESTED_OF.get(cls, {})
-        i += 2
-    if len(path) % 2 == 0:
-        return None, None
-    return container, cls
-
-
-def resolve_entity(project: Project, path: list[str]) -> Any | None:
-    """Resolve an even-length path to a specific entity."""
-    if len(path) < 2 or len(path) % 2 != 0:
-        return None
-    container, _ = resolve_path(project, path[:-1])
-    return container.get(path[-1]) if container else None
-
-
-def load_project(path: Path) -> Project:
-    if not path.exists():
-        return Project()
-    return from_dict(Project, json.loads(path.read_text(encoding="utf-8")))
+    def delete(self, path: list[str], data: dict | None = None) -> bool:
+        """Remove the entity at ``path`` from its container."""
+        container = self.resolve(path[:-1])
+        if not isinstance(container, dict) or path[-1] not in container:
+            return False
+        del container[path[-1]]
+        return True
 
 
-def save_project(project: Project, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(asdict(project), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+def child_class(cls: type, attr: str) -> type | None:
+    """For a dataclass field typed ``dict[str, X]``, return X."""
+    ann = get_type_hints(cls).get(attr)
+    args = get_args(ann) if ann else ()
+    return args[1] if len(args) == 2 else None
 
 
 def dump(items) -> str:

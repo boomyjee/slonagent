@@ -1,5 +1,5 @@
 // Shared imports, entity schemas, prompt defaults, WS factory.
-export { h, render } from 'https://esm.sh/preact@10.22.0';
+export { h, render, Component } from 'https://esm.sh/preact@10.22.0';
 export { useState, useEffect, useRef } from 'https://esm.sh/preact@10.22.0/hooks';
 import { h } from 'https://esm.sh/preact@10.22.0';
 import htm from 'https://esm.sh/htm@3.1.1';
@@ -53,10 +53,15 @@ export function shotPrompt(shot) {
     return `Cinematic film still. ${shot.description || ''}. Cinematic lighting, shallow depth of field.`;
 }
 
+let _ws = null;
+
 export function createWS(onMessage, onStatus) {
-    const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-    ws.onopen = () => onStatus(true);
-    ws.onclose = () => onStatus(false);
-    ws.onmessage = e => onMessage(JSON.parse(e.data));
-    return { send: msg => ws.readyState === 1 && ws.send(JSON.stringify(msg)) };
+    _ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    _ws.onopen = () => onStatus(true);
+    _ws.onclose = () => onStatus(false);
+    _ws.onmessage = e => onMessage(JSON.parse(e.data));
+}
+
+export function send(msg) {
+    if (_ws && _ws.readyState === 1) _ws.send(JSON.stringify(msg));
 }

@@ -5,7 +5,6 @@ from typing import Annotated
 
 from agent import Skill, tool
 from src.modes.movie_creator.generator import Generator
-from src.modes.movie_creator.project import load_project
 from src.modes.movie_creator.server import MovieServer
 from src.modes.movie_creator.skills.characters import CharactersSkill
 from src.modes.movie_creator.skills.screenplay import ScreenplaySkill
@@ -40,8 +39,7 @@ class MovieCreatorSkill(Skill):
         )
 
         project_dir = Path(sub.memory.memory_dir) / "project"
-        project = load_project(project_dir / "project.json")
-        server = MovieServer(self._port, project, project_dir)
+        server = MovieServer(self._port, project_dir)
         server.generator = Generator(server, self._api_key)
         await server.start()
 
@@ -50,9 +48,9 @@ class MovieCreatorSkill(Skill):
         multi.set_agent(sub)
 
         tab_skills = {
-            "screenplay": ScreenplaySkill(project, server),
-            "characters": CharactersSkill(project, server),
-            "storyboard": StoryboardSkill(project, server),
+            "screenplay": ScreenplaySkill(server),
+            "characters": CharactersSkill(server),
+            "storyboard": StoryboardSkill(server),
         }
 
         def on_tab(tab):
@@ -87,4 +85,4 @@ class MovieCreatorSkill(Skill):
             finally:
                 await sub.transport.send_processing(False)
 
-        return {"status": "done", "project": project.title}
+        return {"status": "done", "project": server.project.title}

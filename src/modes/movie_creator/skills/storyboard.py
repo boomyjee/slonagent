@@ -2,7 +2,7 @@
 from typing import Annotated
 
 from agent import Skill, tool
-from src.modes.movie_creator.project import Project, Shot, allocate_id, dump, resolve_path
+from src.modes.movie_creator.project import dump
 from src.modes.movie_creator.server import MovieServer
 
 SHOT_SEPARATOR = "\n\n---\n\n"
@@ -11,14 +11,14 @@ SHOT_SEPARATOR = "\n\n---\n\n"
 class StoryboardSkill(Skill):
     """AI tools available in the Storyboard tab."""
 
-    def __init__(self, project: Project, server: MovieServer):
+    def __init__(self, server: MovieServer):
         super().__init__()
-        self.project = project
         self.server = server
 
     async def get_context_prompt(self, user_text: str = "") -> str:
+        project = self.server.project
         scene_id = self.server.active_scope.get("scene_id", "")
-        current_scene = self.project.scenes.get(scene_id) if scene_id else None
+        current_scene = project.scenes.get(scene_id) if scene_id else None
         current_block = ""
         if current_scene:
             current_block = (
@@ -34,8 +34,8 @@ class StoryboardSkill(Skill):
             "• update_shot — изменить существующий\n\n"
             "По умолчанию работай с текущей выбранной сценой, но ты видишь все сцены "
             "и всех персонажей и можешь использовать эту информацию.\n\n"
-            f"ВСЕ СЦЕНЫ:\n{dump(self.project.scenes)}\n\n"
-            f"ВСЕ ПЕРСОНАЖИ:\n{dump(self.project.characters)}"
+            f"ВСЕ СЦЕНЫ:\n{dump(project.scenes)}\n\n"
+            f"ВСЕ ПЕРСОНАЖИ:\n{dump(project.characters)}"
             f"{current_block}"
         )
 
@@ -67,16 +67,16 @@ class StoryboardSkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         text = result.get("data", {}).get("text", "")
-        container, _ = resolve_path(self.project, ["scenes", scene_id, "shots"])
-        if container is None:
+        shots_path = ["scenes", scene_id, "shots"]
+        if not isinstance(self.server.project.resolve(shots_path), dict):
             return {"status": "error", "error": f"scene {scene_id} not found"}
         ids = []
         for desc in text.split(SHOT_SEPARATOR):
             desc = desc.strip()
             if desc:
-                eid = allocate_id(self.project)
-                container[eid] = Shot(id=eid, description=desc)
-                ids.append(eid)
+                eid = self.server.project.create(shots_path, {"description": desc})
+                if eid:
+                    ids.append(eid)
         self.server.save()
         await self.server.send_project()
         return {"status": "created", "ids": ids, "count": len(ids)}

@@ -1,6 +1,28 @@
-import { html, useState, useEffect, useRef } from '../lib.js';
+import { html, useState, useEffect, useRef, send } from '../lib.js';
+import { app } from '../app.js';
+import { Dialog } from '../common/Dialog.js';
+import { ApprovalView } from './ApprovalView.js';
 
-export function Chat({ messages, onSend, onApprovalClick, rootRef }) {
+function markResolved(idx) {
+    if (idx == null) return;
+    app.setState(({ messages }) => ({
+        messages: messages.map((m, i) => i === idx ? { ...m, resolved: true } : m),
+    }));
+}
+
+function openApproval(m) {
+    if (m.resolved) return;
+    const idx = m.idx;
+    Dialog.open(html`<${ApprovalView}
+        kind=${m.approvalKind}
+        data=${m.data.fields || m.data}
+        onApprove=${data => { send({ type: 'approval_response', action: 'approve', data }); markResolved(idx); }}
+        onReject=${() => { send({ type: 'approval_response', action: 'reject', reason: prompt('Reason (optional):') || '' }); markResolved(idx); }}
+    />`);
+}
+
+export function Chat() {
+    const { messages } = app.state;
     const [input, setInput] = useState('');
     const [collapsed, setCollapsed] = useState({});
     const scrollRef = useRef(null);
@@ -12,12 +34,12 @@ export function Chat({ messages, onSend, onApprovalClick, rootRef }) {
     function submit() {
         const text = input.trim();
         if (!text) return;
-        onSend(text);
+        send({ type: 'chat', text });
         setInput('');
     }
 
     return html`
-        <div class="chat" ref=${rootRef}>
+        <div class="chat">
             <div class="chat-header">AI Assistant</div>
             <div class="chat-messages" ref=${scrollRef}>
                 ${messages.map((m, i) => {
@@ -34,7 +56,6 @@ export function Chat({ messages, onSend, onApprovalClick, rootRef }) {
                     if (m.kind === 'tool') return html`<div class="msg tool_call">\u2699 ${m.name}</div>`;
                     if (m.kind === 'processing') return html`<div class="processing">AI is thinking...</div>`;
                     if (m.kind === 'approval') {
-                        // Entity approvals wrap payload in {path, fields}; tool approvals are flat.
                         const fields = m.data.fields || m.data;
                         const label = m.approvalKind === 'scene' ? (fields.title || 'Scene')
                             : m.approvalKind === 'character' ? (fields.name || 'Character')
@@ -45,7 +66,7 @@ export function Chat({ messages, onSend, onApprovalClick, rootRef }) {
                         return html`
                             <div
                                 class=${'msg approval' + (m.resolved ? ' resolved' : '')}
-                                onClick=${() => onApprovalClick(m)}
+                                onClick=${() => openApproval(m)}
                             >\u270f Approve: ${label}</div>
                         `;
                     }

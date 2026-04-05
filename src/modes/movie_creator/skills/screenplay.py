@@ -2,16 +2,15 @@
 from typing import Annotated
 
 from agent import Skill, tool
-from src.modes.movie_creator.project import Project, dump
+from src.modes.movie_creator.project import dump
 from src.modes.movie_creator.server import MovieServer
 
 
 class ScreenplaySkill(Skill):
     """AI tools available in the Screenplay tab."""
 
-    def __init__(self, project: Project, server: MovieServer):
+    def __init__(self, server: MovieServer):
         super().__init__()
-        self.project = project
         self.server = server
 
     async def get_context_prompt(self, user_text: str = "") -> str:
@@ -19,7 +18,7 @@ class ScreenplaySkill(Skill):
             "Ты — ассистент-сценарист. Помогаешь пользователю работать со сценарием.\n"
             "Когда пользователь просит создать сцену — используй create_scene.\n"
             "Когда пользователь просит изменить существующую — используй update_scene.\n\n"
-            f"СЦЕНАРИЙ:\n{dump(self.project.scenes)}"
+            f"СЦЕНАРИЙ:\n{dump(self.server.project.scenes)}"
         )
 
     @tool("Создать новую сцену. Пользователь сможет отредактировать и одобрить.")

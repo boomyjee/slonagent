@@ -7,29 +7,24 @@
 // Knows its own WS path and issues generate/set_primary/delete messages
 // directly. No "million callbacks" from the parent.
 
-import { html, useState } from '../lib.js';
+import { html, useState, send } from '../lib.js';
+import { Dialog } from '../common/Dialog.js';
 
-export function Gallery({ entity, path, kind, defaultPrompt, send, openPromptModal }) {
+export function Gallery({ entity, path, kind, defaultPrompt }) {
     const [lightbox, setLightbox] = useState(null);
     const gens = Object.values(entity.generations || {}).filter(g => g.kind === kind);
-    const primary = entity.image || '';
+    const primaryId = entity.primary_generation_id || '';
 
-    function openPrompt(initial) {
-        openPromptModal({
-            title: `Generate: ${entity.name || entity.title || entity.description || 'item'}`,
-            initial,
-            onSubmit: prompt => {
-                send({ type: 'generate', path, kind, prompt });
-                openPromptModal(null);
-            },
-            onCancel: () => openPromptModal(null),
-        });
+    async function openPrompt(initial) {
+        const title = `Generate: ${entity.name || entity.title || entity.description || 'item'}`;
+        const prompt = await Dialog.prompt(title, initial);
+        if (prompt != null) send({ type: 'generate', path, kind, prompt });
     }
 
     function newGen() { openPrompt(defaultPrompt ? defaultPrompt() : ''); }
     function remix(g) { openPrompt(g.prompt || ''); }
     function setPrimary(g) {
-        send({ type: 'set_primary', path: [...path, 'generations', g.id] });
+        send({ type: 'update', path, data: { primary_generation_id: g.id } });
     }
     function deleteGen(g) {
         if (!confirm('Delete this generation?')) return;
@@ -50,7 +45,7 @@ export function Gallery({ entity, path, kind, defaultPrompt, send, openPromptMod
                             <${Tile}
                                 key=${g.id}
                                 gen=${g}
-                                isPrimary=${!!g.file && g.file === primary}
+                                isPrimary=${g.id === primaryId}
                                 onZoom=${src => setLightbox(src)}
                                 onSetPrimary=${() => setPrimary(g)}
                                 onRemix=${() => remix(g)}

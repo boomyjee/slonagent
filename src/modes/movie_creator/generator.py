@@ -7,7 +7,7 @@ import os
 
 import requests
 
-from src.modes.movie_creator.project import Generation, allocate_id
+from src.modes.movie_creator.project import Generation
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class Generator:
 
     async def enqueue(self, owner, kind: str, prompt: str, media_type: str = "image") -> str:
         gen = Generation(
-            id=allocate_id(self.server.project),
+            id=self.server.project.allocate_id(),
             kind=kind,
             media_type=media_type,
             prompt=prompt,
@@ -69,8 +69,8 @@ class Generator:
             gen.file = filename
             gen.status = "done"
             # First successful generation becomes primary automatically
-            if hasattr(owner, "image") and not owner.image:
-                owner.image = filename
+            if hasattr(owner, "primary_generation_id") and not owner.primary_generation_id:
+                owner.primary_generation_id = gen.id
         except Exception as e:
             log.exception("[movie] generation failed")
             gen.status = "failed"

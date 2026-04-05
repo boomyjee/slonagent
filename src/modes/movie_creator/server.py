@@ -7,12 +7,11 @@ import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 
+from dacite import from_dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 
-from src.modes.movie_creator.project import (
-    Project, allocate_id, resolve_path, resolve_entity, save_project,
-)
+from src.modes.movie_creator.project import Project
 
 log = logging.getLogger(__name__)
 
@@ -25,16 +24,19 @@ class MovieServer:
     Path-based protocol — every entity is addressed by a list of segments,
     e.g. ``["scenes", "3"]`` (a scene) or
     ``["scenes", "3", "shots", "2", "generations", "5"]`` (a generation).
-    Odd-length paths point to a container (collection dict),
-    even-length paths point to a single entity.
+    A path ending on a dataclass field name resolves to that container;
+    a path ending on an id inside a container resolves to the entity.
     """
 
-    def __init__(self, port: int, project: Project, project_dir: Path):
+    def __init__(self, port: int, project_dir: Path):
         self.port = port
-        self.project = project
         self.project_dir = project_dir
         self.project_path = project_dir / "project.json"
         self.assets_dir = project_dir / "assets"
+        if self.project_path.exists():
+            self.project = from_dict(Project, json.loads(self.project_path.read_text(encoding="utf-8")))
+        else:
+            self.project = Project()
         self.generator = None  # set by orchestrator
         self.app = FastAPI()
         self.ws: WebSocket | None = None
@@ -46,7 +48,11 @@ class MovieServer:
         self._setup_routes()
 
     def save(self):
-        save_project(self.project, self.project_path)
+        self.project_path.parent.mkdir(parents=True, exist_ok=True)
+        self.project_path.write_text(
+            json.dumps(asdict(self.project), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _setup_routes(self):
         no_cache = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
@@ -90,61 +96,20 @@ class MovieServer:
         path = msg.get("path") or []
         data = msg.get("data") or {}
 
-        if t == "create":
-            container, cls = resolve_path(self.project, path)
-            if container is not None:
-                eid = allocate_id(self.project)
-                container[eid] = cls(id=eid, **data)
-                self.save()
-                await self.send_project()
-
-        elif t == "update":
-            obj = resolve_entity(self.project, path)
-            if obj is not None:
-                for k, v in data.items():
-                    if hasattr(obj, k):
-                        setattr(obj, k, v)
-                self.save()
-                await self.send_project()
-
-        elif t == "delete":
-            container, _ = resolve_path(self.project, path[:-1])
-            if container is not None and path[-1] in container:
-                del container[path[-1]]
-                self.save()
-                await self.send_project()
-
-        elif t == "reorder":
-            # path = container path, msg["order"] = new id sequence
-            container, _ = resolve_path(self.project, path)
-            if container is not None:
-                order = msg.get("order", [])
-                reordered = {eid: container[eid] for eid in order if eid in container}
-                for eid, obj in container.items():
-                    if eid not in reordered:
-                        reordered[eid] = obj
-                container.clear()
-                container.update(reordered)
+        if t in ("create", "update", "delete"):
+            if getattr(self.project, t)(path, data):
                 self.save()
                 await self.send_project()
 
         elif t == "generate":
-            owner = resolve_entity(self.project, path)
-            if owner is not None:
+            owner = self.project.resolve(path)
+            if owner is not None and not isinstance(owner, dict):
                 asyncio.create_task(self.generator.enqueue(
                     owner,
                     msg.get("kind", "portrait"),
                     msg.get("prompt", ""),
                     msg.get("media_type", "image"),
                 ))
-
-        elif t == "set_primary":
-            gen = resolve_entity(self.project, path)
-            owner = resolve_entity(self.project, path[:-2])
-            if gen and owner and getattr(gen, "file", ""):
-                owner.image = gen.file
-                self.save()
-                await self.send_project()
 
         elif t == "approval_response":
             if self._pending_approval and not self._pending_approval.done():
@@ -195,40 +160,33 @@ class MovieServer:
     async def edit(self, path: list, fields: dict, approval: bool = False) -> dict:
         """Create or update an entity at ``path``, optionally with user approval.
 
-        Odd-length path = create in that container, even-length = update existing.
+        Path ending on a container field = create inside it;
+        path ending on an id inside a container = update that entity.
         For update approvals: empty fields fall back to current values (so the AI
         can pass "" for "don't change").
         """
-        fields = {k: v for k, v in fields.items() if k != "self" and not k.startswith("_")}
-        is_create = len(path) % 2 == 1
+        target = self.project.resolve(path)
+        is_create = isinstance(target, dict)
 
         if approval:
-            if not is_create:
-                obj = resolve_entity(self.project, path)
-                if obj is not None:
-                    fields = {k: (v if v else getattr(obj, k, "")) for k, v in fields.items()}
+            if not is_create and target is not None:
+                fields = {k: (v if v else getattr(target, k, "")) for k, v in fields.items()}
             kind = (path[-1] if is_create else path[-2]).rstrip("s")
             result = await self.request_approval(kind, {"path": path, "fields": fields})
             if result.get("action") == "reject":
                 return {"status": "rejected", "reason": result.get("reason", "")}
-            fields = {k: v for k, v in (result.get("data") or {}).items() if not k.startswith("_")}
+            fields = result.get("data") or {}
 
         if is_create:
-            container, cls = resolve_path(self.project, path)
-            if container is None:
+            eid = self.project.create(path, fields)
+            if eid is None:
                 return {"status": "error", "error": f"invalid path {path}"}
-            eid = allocate_id(self.project)
-            container[eid] = cls(id=eid, **fields)
             self.save()
             await self.send_project()
             return {"status": "created", "id": eid}
         else:
-            obj = resolve_entity(self.project, path)
-            if obj is None:
+            if not self.project.update(path, fields):
                 return {"status": "error", "error": f"not found {path}"}
-            for k, v in fields.items():
-                if hasattr(obj, k):
-                    setattr(obj, k, v)
             self.save()
             await self.send_project()
             return {"status": "updated", "id": path[-1]}

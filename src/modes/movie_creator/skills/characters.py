@@ -2,27 +2,27 @@
 from typing import Annotated
 
 from agent import Skill, tool
-from src.modes.movie_creator.project import Project, dump
+from src.modes.movie_creator.project import dump
 from src.modes.movie_creator.server import MovieServer
 
 
 class CharactersSkill(Skill):
     """AI tools available in the Characters tab."""
 
-    def __init__(self, project: Project, server: MovieServer):
+    def __init__(self, server: MovieServer):
         super().__init__()
-        self.project = project
         self.server = server
 
     async def get_context_prompt(self, user_text: str = "") -> str:
+        project = self.server.project
         return (
             "Ты — ассистент по персонажам фильма.\n"
             "Помогаешь создавать и редактировать персонажей.\n"
             "Когда пользователь просит создать — используй create_character.\n"
             "Когда просит изменить — используй update_character.\n"
             "Каждый вызов покажет пользователю форму для одобрения.\n\n"
-            f"ПЕРСОНАЖИ:\n{dump(self.project.characters)}\n\n"
-            f"СЦЕНАРИЙ:\n{dump(self.project.scenes)}"
+            f"ПЕРСОНАЖИ:\n{dump(project.characters)}\n\n"
+            f"СЦЕНАРИЙ:\n{dump(project.scenes)}"
         )
 
     @tool("Создать нового персонажа. Пользователь сможет отредактировать и одобрить.")
@@ -59,7 +59,7 @@ class CharactersSkill(Skill):
         character_id: Annotated[str, "ID персонажа"],
         prompt: Annotated[str, "Полный промпт для генерации (англ., описание лица/одежды/освещения)"],
     ) -> dict:
-        char = self.project.characters.get(character_id)
+        char = self.server.project.characters.get(character_id)
         if not char:
             return {"error": f"Character {character_id} not found"}
         result = await self.server.request_approval("portrait", {

@@ -1,51 +1,63 @@
-// Character editor = form (owns draft) + gallery (reads live project state).
-// These are siblings inside EntityForm's children slot. The form's draft
-// never touches `character.generations`, and the gallery re-reads them on
-// every render — so an incoming generation shows up instantly even while
-// the user is typing.
-import { html, CHARACTER_SCHEMA, characterPrompt } from '../lib.js';
-import { EntityForm } from './EntityForm.js';
+// Character editor — form + gallery + footer. Reads character from app.state.
+import { html, useState, CHARACTER_SCHEMA, characterPrompt, send } from '../lib.js';
+import { app } from '../app.js';
+import { EntityForm } from '../common/EntityForm.js';
 import { Gallery } from './Gallery.js';
 
-export function CharacterView({ character, isNew, send, onClose, openPromptModal }) {
-    const initial = isNew ? {} : {
+export function CharacterView() {
+    const { project, selected } = app.state;
+    const sel = selected.characters;
+    const character = sel === '__new__' ? {} : (project.characters[sel] || null);
+
+    if (!character) {
+        return html`<div class="center-empty">Select a character or create a new one</div>`;
+    }
+    const isNew = !character.id;
+    const [draft, setDraft] = useState(() => ({
         name: character.name || '',
         description: character.description || '',
         appearance: character.appearance || '',
-    };
+    }));
 
-    function submit(data) {
+    function submit() {
         if (isNew) {
-            send({ type: 'create', path: ['characters'], data });
+            send({ type: 'create', path: ['characters'], data: draft });
         } else {
-            send({ type: 'update', path: ['characters', character.id], data });
+            send({ type: 'update', path: ['characters', character.id], data: draft });
         }
-        onClose();
+        app.selectEntity('characters', null);
     }
 
     function del() {
         if (!confirm('Delete this character?')) return;
         send({ type: 'delete', path: ['characters', character.id] });
-        onClose();
+        app.selectEntity('characters', null);
     }
 
-    return html`<${EntityForm}
-        schema=${CHARACTER_SCHEMA}
-        initial=${initial}
-        mode=${isNew ? 'create' : 'edit'}
-        onSubmit=${submit}
-        onCancel=${onClose}
-        onDelete=${del}
-    >
-        ${!isNew ? html`
-            <${Gallery}
-                entity=${character}
-                path=${['characters', character.id]}
-                kind="portrait"
-                defaultPrompt=${() => characterPrompt(character)}
-                send=${send}
-                openPromptModal=${openPromptModal}
-            />
-        ` : null}
-    <//>`;
+    const title = isNew
+        ? 'New Character'
+        : `Character: ${draft.name || 'Unnamed'}`;
+
+    return html`
+        <div class="editor">
+            <div class="editor-header"><h2>${title}</h2></div>
+            <div class="editor-body">
+                <${EntityForm} schema=${CHARACTER_SCHEMA} draft=${draft} onChange=${setDraft} />
+                ${!isNew ? html`
+                    <${Gallery}
+                        entity=${character}
+                        path=${['characters', character.id]}
+                        kind="portrait"
+                        defaultPrompt=${() => characterPrompt(character)}
+                    />
+                ` : null}
+            </div>
+            <div class="editor-footer">
+                ${!isNew ? html`<button class="btn btn-danger" onClick=${del}>Delete</button>` : null}
+                <div class="spacer"></div>
+                <button class="btn" onClick=${() => app.selectEntity('characters', null)}>Cancel</button>
+                <button class="btn btn-primary" onClick=${submit}>Save</button>
+            </div>
+        </div>
+    `;
 }

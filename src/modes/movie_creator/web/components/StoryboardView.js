@@ -1,11 +1,16 @@
 // Storyboard for a selected scene. Reads shots from scene.shots dict (live
 // project state). Each shot is either a compact row or a full card with
 // inline-editable description + its own gallery.
-import { html, useState, shotPrompt } from '../lib.js';
+import { html, useState, shotPrompt, send } from '../lib.js';
+import { app } from '../app.js';
 import { Gallery } from './Gallery.js';
 
-export function StoryboardView({ scene, send, openPromptModal }) {
+export function StoryboardView() {
+    const scene = app.state.project.scenes[app.state.selected.scenes] || null;
     const [mode, setMode] = useState('compact');
+    if (!scene) {
+        return html`<div class="center-empty">Select a scene to start storyboarding</div>`;
+    }
     const shots = Object.values(scene.shots || {});
 
     function createShot() {
@@ -42,8 +47,6 @@ export function StoryboardView({ scene, send, openPromptModal }) {
                             shot=${shot}
                             index=${i}
                             mode=${mode}
-                            send=${send}
-                            openPromptModal=${openPromptModal}
                         />
                     `)}
             </div>
@@ -51,10 +54,11 @@ export function StoryboardView({ scene, send, openPromptModal }) {
     `;
 }
 
-function ShotCard({ scene, shot, index, mode, send, openPromptModal }) {
+function ShotCard({ scene, shot, index, mode }) {
     const [draft, setDraft] = useState(null);
     const value = draft != null ? draft : (shot.description || '');
-    const thumb = shot.image ? `/api/asset/${shot.image}` : null;
+    const primary = shot.generations?.[shot.primary_generation_id];
+    const thumb = primary?.file ? `/api/asset/${primary.file}` : null;
     const shotPath = ['scenes', scene.id, 'shots', shot.id];
 
     function commit() {
@@ -99,8 +103,6 @@ function ShotCard({ scene, shot, index, mode, send, openPromptModal }) {
                 path=${shotPath}
                 kind="frame"
                 defaultPrompt=${() => shotPrompt(shot)}
-                send=${send}
-                openPromptModal=${openPromptModal}
             />
         </div>
     `;
