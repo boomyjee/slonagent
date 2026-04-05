@@ -1,9 +1,11 @@
 // Movie Creator — Preact app entry
-import { render, html, useState, useEffect, useRef, SCHEMAS, TAB_COLLECTION, defaultPortraitPrompt, createWS } from './lib.js';
+import { render, html, useState, useEffect, useRef, SCHEMAS, TAB_COLLECTION, defaultGenerationPrompt, createWS } from './lib.js';
 import { Resizer } from './components/Resizer.js';
 import { EntityList } from './components/EntityList.js';
 import { EntityEditor } from './components/EntityEditor.js';
-import { PortraitModal } from './components/PortraitModal.js';
+import { StoryboardView } from './components/StoryboardView.js';
+import { GenerationModal } from './components/GenerationModal.js';
+import { BulkShotsModal } from './components/BulkShotsModal.js';
 import { Chat } from './components/Chat.js';
 
 function App() {
@@ -16,7 +18,8 @@ function App() {
     //   - new entity: id=null, isNew=true, edits = full form
     //   - approval: id=null, approval=true, edits = AI proposal
     const [editing, setEditing] = useState(null);
-    const [portraitModal, setPortraitModal] = useState(null);
+    const [genModal, setGenModal] = useState(null);
+    const [bulkModal, setBulkModal] = useState(null);
     const [messages, setMessages] = useState([]);
     const wsRef = useRef(null);
     const streamElsRef = useRef({});
@@ -68,16 +71,26 @@ function App() {
         setTab(newTab);
         setEditing(null);
         send({ type: 'tab_changed', tab: newTab });
+        if (newTab === 'storyboard') {
+            send({ type: 'scope_changed', scope: { scene_id: selected.scenes || '' } });
+        } else {
+            send({ type: 'scope_changed', scope: {} });
+        }
     }
 
     function openEntity(collection, item) {
         setSelected(s => ({ ...s, [collection]: item.id }));
+        if (tab === 'storyboard' && collection === 'scenes') {
+            send({ type: 'scope_changed', scope: { scene_id: item.id } });
+            setEditing(null);
+            return;
+        }
         setEditing({ collection, id: item.id, isNew: false, edits: {} });
     }
 
     function openNewEntity(collection) {
         const blank = {};
-        SCHEMAS[collection].fields.forEach(f => blank[f.name] = '');
+        (SCHEMAS[collection].fields || []).forEach(f => blank[f.name] = '');
         setEditing({ collection, id: null, isNew: true, edits: blank });
     }
 
@@ -127,11 +140,19 @@ function App() {
         if (msgItem.resolved) return;
         const kind = msgItem.approvalKind;
         if (kind === 'portrait') {
-            setPortraitModal({
-                charId: msgItem.data.character_id,
-                charName: msgItem.data.character_name,
-                prompt: msgItem.data.prompt,
+            setGenModal({
+                collection: 'characters',
+                kind: 'portrait',
+                ownerId: msgItem.data.character_id,
+                ownerName: msgItem.data.character_name,
+                initialPrompt: msgItem.data.prompt,
                 approval: true,
+                chatIdx: msgItem.idx,
+            });
+        } else if (kind === 'shots_bulk') {
+            setBulkModal({
+                sceneId: msgItem.data.scene_id,
+                initialText: msgItem.data.text || '',
                 chatIdx: msgItem.idx,
             });
         } else {
@@ -147,60 +168,83 @@ function App() {
         }
     }
 
-    function generatePortrait() {
-        if (!portraitModal) return;
-        if (portraitModal.approval) {
+    function submitGeneration(prompt) {
+        if (genModal.approval) {
             send({
                 type: 'approval_response',
                 action: 'approve',
-                data: { prompt: portraitModal.prompt, character_id: portraitModal.charId, character_name: portraitModal.charName },
+                data: { prompt, character_id: genModal.ownerId, character_name: genModal.ownerName },
             });
-            markApprovalResolved(portraitModal.chatIdx);
+            markApprovalResolved(genModal.chatIdx);
         } else {
             send({
                 type: 'generate',
-                collection: 'characters',
-                id: portraitModal.charId,
-                kind: 'portrait',
-                prompt: portraitModal.prompt,
+                collection: genModal.collection,
+                id: genModal.ownerId,
+                kind: genModal.kind,
+                prompt,
             });
         }
-        setPortraitModal(null);
+        setGenModal(null);
     }
 
-    function newGeneration(owner) {
-        setPortraitModal({
-            charId: owner.id,
-            charName: owner.name,
-            prompt: defaultPortraitPrompt(owner),
-            approval: false,
+    function cancelGeneration() {
+        if (genModal.approval) {
+            const reason = prompt('Reason (optional):') || '';
+            send({ type: 'approval_response', action: 'reject', reason });
+            markApprovalResolved(genModal.chatIdx);
+        }
+        setGenModal(null);
+    }
+
+    function approveBulkShots(text) {
+        send({
+            type: 'approval_response',
+            action: 'approve',
+            data: { text, scene_id: bulkModal.sceneId },
         });
+        markApprovalResolved(bulkModal.chatIdx);
+        setBulkModal(null);
     }
 
-    function remixGeneration(owner, gen) {
-        setPortraitModal({
-            charId: owner.id,
-            charName: owner.name,
-            prompt: gen.prompt,
-            approval: false,
-        });
-    }
-
-    function setPrimary(owner, gen) {
-        send({ type: 'set_primary', collection: 'characters', id: owner.id, generation_id: gen.id });
-    }
-
-    function deleteGeneration(owner, gen) {
-        if (!confirm('Delete this generation?')) return;
-        send({ type: 'delete_generation', collection: 'characters', id: owner.id, generation_id: gen.id });
-    }
-
-    function rejectPortrait() {
-        if (!portraitModal || !portraitModal.approval) return;
+    function rejectBulkShots() {
         const reason = prompt('Reason (optional):') || '';
         send({ type: 'approval_response', action: 'reject', reason });
-        markApprovalResolved(portraitModal.chatIdx);
-        setPortraitModal(null);
+        markApprovalResolved(bulkModal.chatIdx);
+        setBulkModal(null);
+    }
+
+    function newGeneration(collection, owner) {
+        const schema = SCHEMAS[collection];
+        setGenModal({
+            collection,
+            kind: schema.gallery,
+            ownerId: owner.id,
+            ownerName: owner[schema.titleField] || schema.emptyTitle,
+            initialPrompt: defaultGenerationPrompt(collection, owner),
+            approval: false,
+        });
+    }
+
+    function remixGeneration(collection, owner, gen) {
+        const schema = SCHEMAS[collection];
+        setGenModal({
+            collection,
+            kind: schema.gallery,
+            ownerId: owner.id,
+            ownerName: owner[schema.titleField] || schema.emptyTitle,
+            initialPrompt: gen.prompt,
+            approval: false,
+        });
+    }
+
+    function setPrimary(collection, owner, gen) {
+        send({ type: 'set_primary', collection, id: owner.id, generation_id: gen.id });
+    }
+
+    function deleteGeneration(collection, owner, gen) {
+        if (!confirm('Delete this generation?')) return;
+        send({ type: 'delete_generation', collection, id: owner.id, generation_id: gen.id });
     }
 
     function sendChat(text) { send({ type: 'chat', text }); }
@@ -209,6 +253,10 @@ function App() {
     const schema = collection && SCHEMAS[collection];
     const items = collection ? (project[collection] || []) : [];
     const editingData = resolveEditing();
+    const selectedScene = tab === 'storyboard' && selected.scenes
+        ? (project.scenes || []).find(s => s.id === selected.scenes) : null;
+    const sceneShots = selectedScene
+        ? (project.shots || []).filter(s => s.scene_id === selectedScene.id) : [];
 
     return html`
         <div class="header">
@@ -249,27 +297,47 @@ function App() {
                         onCancel=${() => setEditing(null)}
                         onDelete=${deleteEntity}
                         onReject=${rejectEntity}
-                        onNewGeneration=${() => newGeneration(editingData)}
-                        onRemixGeneration=${gen => remixGeneration(editingData, gen)}
-                        onSetPrimary=${gen => setPrimary(editingData, gen)}
-                        onDeleteGeneration=${gen => deleteGeneration(editingData, gen)}
+                        onNewGeneration=${() => newGeneration(editing.collection, editingData)}
+                        onRemixGeneration=${gen => remixGeneration(editing.collection, editingData, gen)}
+                        onSetPrimary=${gen => setPrimary(editing.collection, editingData, gen)}
+                        onDeleteGeneration=${gen => deleteGeneration(editing.collection, editingData, gen)}
+                    />
+                ` : tab === 'storyboard' && selectedScene ? html`
+                    <${StoryboardView}
+                        scene=${selectedScene}
+                        shots=${sceneShots}
+                        onCreate=${() => send({ type: 'edit', collection: 'shots', id: '', data: { scene_id: selectedScene.id, description: '' } })}
+                        onUpdate=${(shot, description) => send({ type: 'edit', collection: 'shots', id: shot.id, data: { description } })}
+                        onDelete=${shot => confirm('Delete this shot?') && send({ type: 'delete', collection: 'shots', id: shot.id })}
+                        onNewGeneration=${shot => newGeneration('shots', shot)}
+                        onRemixGeneration=${(shot, gen) => remixGeneration('shots', shot, gen)}
+                        onSetPrimary=${(shot, gen) => setPrimary('shots', shot, gen)}
+                        onDeleteGeneration=${(shot, gen) => deleteGeneration('shots', shot, gen)}
                     />
                 ` : html`
                     <div class="center-empty">
-                        ${schema ? schema.selectHint : (tab === 'storyboard' ? 'Storyboard (coming soon)' : 'Generation (coming soon)')}
+                        ${tab === 'storyboard' ? 'Select a scene to start storyboarding'
+                            : schema ? schema.selectHint : 'Generation (coming soon)'}
                     </div>
                 `}
             </div>
             <${Resizer} targetRef=${chatRef} side="right" />
             <${Chat} rootRef=${chatRef} messages=${messages} onSend=${sendChat} onApprovalClick=${handleApprovalClick} />
         </div>
-        ${portraitModal ? html`
-            <${PortraitModal}
-                modal=${portraitModal}
-                onChange=${prompt => setPortraitModal({ ...portraitModal, prompt })}
-                onGenerate=${generatePortrait}
-                onReject=${rejectPortrait}
-                onCancel=${() => setPortraitModal(null)}
+        ${genModal ? html`
+            <${GenerationModal}
+                title=${(genModal.approval ? 'AI Proposal — Generation' : 'Generate') + ': ' + genModal.ownerName}
+                initialPrompt=${genModal.initialPrompt}
+                approval=${genModal.approval}
+                onSubmit=${submitGeneration}
+                onCancel=${cancelGeneration}
+            />
+        ` : null}
+        ${bulkModal ? html`
+            <${BulkShotsModal}
+                initialText=${bulkModal.initialText}
+                onApprove=${approveBulkShots}
+                onReject=${rejectBulkShots}
             />
         ` : null}
     `;

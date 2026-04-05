@@ -68,8 +68,8 @@ class Generator:
             (self.project.assets_dir / filename).write_bytes(data)
             gen.file = filename
             gen.status = "done"
-            # First successful portrait becomes primary automatically
-            if gen.kind == "portrait" and not getattr(owner, "image", ""):
+            # First successful generation becomes primary automatically
+            if hasattr(owner, "image") and not owner.image:
                 owner.image = filename
         except Exception as e:
             log.exception("[movie] generation failed")

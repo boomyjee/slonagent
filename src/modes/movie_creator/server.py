@@ -1,5 +1,6 @@
 """WebSocket + HTTP server for movie creator mode."""
 import asyncio
+import contextlib
 import json
 import logging
 import webbrowser
@@ -23,6 +24,7 @@ class MovieServer:
         self.app = FastAPI()
         self.ws: WebSocket | None = None
         self.active_tab: str = "screenplay"
+        self.active_scope: dict = {}  # tab-specific context, e.g. {"scene_id": "1"}
         self._on_chat: list = []  # callbacks
         self._on_tab_changed: list = []  # callbacks
         self._pending_approval: asyncio.Future | None = None
@@ -123,6 +125,9 @@ class MovieServer:
             for cb in self._on_tab_changed:
                 cb(self.active_tab)
 
+        elif t == "scope_changed":
+            self.active_scope = msg.get("scope", {}) or {}
+
     # ── send to client ──
 
     async def send_project(self):
@@ -188,7 +193,10 @@ class MovieServer:
         config = uvicorn.Config(
             self.app, host="0.0.0.0", port=self.port, log_level="warning")
         server = uvicorn.Server(config)
-        server.install_signal_handlers = lambda: None
+        # Don't steal Ctrl+C from the main dashboard uvicorn — newer uvicorn
+        # uses capture_signals() instead of install_signal_handlers; two servers
+        # fighting over SIGINT breaks graceful shutdown.
+        server.capture_signals = lambda: contextlib.nullcontext()
 
         async def _serve():
             try:

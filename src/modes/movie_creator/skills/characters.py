@@ -21,8 +21,8 @@ class CharactersSkill(Skill):
             "Когда пользователь просит создать — используй create_character.\n"
             "Когда просит изменить — используй update_character.\n"
             "Каждый вызов покажет пользователю форму для одобрения.\n\n"
-            f"ПЕРСОНАЖИ:\n{self.project.dump('characters')}\n\n"
-            f"СЦЕНАРИЙ:\n{self.project.dump('scenes')}"
+            f"ПЕРСОНАЖИ:\n{self.project.dump(self.project.characters)}\n\n"
+            f"СЦЕНАРИЙ:\n{self.project.dump(self.project.scenes)}"
         )
 
     @tool("Создать нового персонажа. Пользователь сможет отредактировать и одобрить.")

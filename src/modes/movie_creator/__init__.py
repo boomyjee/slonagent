@@ -9,6 +9,7 @@ from src.modes.movie_creator.project import Project
 from src.modes.movie_creator.server import MovieServer
 from src.modes.movie_creator.skills.characters import CharactersSkill
 from src.modes.movie_creator.skills.screenplay import ScreenplaySkill
+from src.modes.movie_creator.skills.storyboard import StoryboardSkill
 from src.modes.movie_creator.transport import WebTransport
 from src.transport.multi import MultiTransport
 
@@ -48,8 +49,9 @@ class MovieCreatorSkill(Skill):
         multi.set_agent(sub)
 
         tab_skills = {
-            "screenplay": ScreenplaySkill(project, server), 
-            "characters": CharactersSkill(project, server)
+            "screenplay": ScreenplaySkill(project, server),
+            "characters": CharactersSkill(project, server),
+            "storyboard": StoryboardSkill(project, server),
         }
 
         def on_tab(tab):

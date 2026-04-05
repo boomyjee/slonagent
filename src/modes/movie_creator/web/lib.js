@@ -35,13 +35,24 @@ export const SCHEMAS = {
             { name: 'appearance', label: 'Appearance', type: 'textarea', grow: true, placeholder: 'Age, height, hair, clothing...' },
         ],
     },
+    shots: {
+        label: 'Shot',
+        gallery: 'frame',
+    },
 };
 
-export const TAB_COLLECTION = { screenplay: 'scenes', characters: 'characters' };
+export const TAB_COLLECTION = { screenplay: 'scenes', characters: 'characters', storyboard: 'scenes' };
 
-export function defaultPortraitPrompt(char) {
-    const appearance = char.appearance || 'a film character';
-    return `Cinematic portrait of ${char.name || 'character'}. ${appearance}. Head and shoulders, cinematic lighting, film still, shallow depth of field.`;
+export function defaultGenerationPrompt(collection, owner) {
+    if (collection === 'characters') {
+        const appearance = owner.appearance || 'a film character';
+        return `Cinematic portrait of ${owner.name || 'character'}. ${appearance}. Head and shoulders, cinematic lighting, film still, shallow depth of field.`;
+    }
+    if (collection === 'shots') {
+        const parts = [owner.description, owner.camera, owner.action].filter(Boolean);
+        return `Cinematic film still. ${parts.join('. ')}. Cinematic lighting, shallow depth of field.`;
+    }
+    return '';
 }
 
 export function createWS(onMessage, onStatus) {
