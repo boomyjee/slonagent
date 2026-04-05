@@ -2,7 +2,7 @@
 from typing import Annotated
 
 from agent import Skill, tool
-from src.modes.movie_creator.project import Project
+from src.modes.movie_creator.project import Project, Shot, allocate_id, dump, resolve_path
 from src.modes.movie_creator.server import MovieServer
 
 SHOT_SEPARATOR = "\n\n---\n\n"
@@ -21,10 +21,9 @@ class StoryboardSkill(Skill):
         current_scene = self.project.scenes.get(scene_id) if scene_id else None
         current_block = ""
         if current_scene:
-            shots_dump = self.project.dump(current_scene.shots)
             current_block = (
                 f"\n\nТЕКУЩАЯ ВЫБРАННАЯ СЦЕНА: id={current_scene.id}\n"
-                f"КАДРЫ ЭТОЙ СЦЕНЫ:\n{shots_dump}"
+                f"КАДРЫ ЭТОЙ СЦЕНЫ:\n{dump(current_scene.shots)}"
             )
         return (
             "Ты — ассистент по раскадровке. Помогаешь разбивать сцены на кадры.\n"
@@ -35,8 +34,8 @@ class StoryboardSkill(Skill):
             "• update_shot — изменить существующий\n\n"
             "По умолчанию работай с текущей выбранной сценой, но ты видишь все сцены "
             "и всех персонажей и можешь использовать эту информацию.\n\n"
-            f"ВСЕ СЦЕНЫ:\n{self.project.dump(self.project.scenes)}\n\n"
-            f"ВСЕ ПЕРСОНАЖИ:\n{self.project.dump(self.project.characters)}"
+            f"ВСЕ СЦЕНЫ:\n{dump(self.project.scenes)}\n\n"
+            f"ВСЕ ПЕРСОНАЖИ:\n{dump(self.project.characters)}"
             f"{current_block}"
         )
 
@@ -68,15 +67,17 @@ class StoryboardSkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         text = result.get("data", {}).get("text", "")
-        container, cls = self.project.resolve_path(["scenes", scene_id, "shots"])
+        container, _ = resolve_path(self.project, ["scenes", scene_id, "shots"])
         if container is None:
             return {"status": "error", "error": f"scene {scene_id} not found"}
         ids = []
         for desc in text.split(SHOT_SEPARATOR):
             desc = desc.strip()
             if desc:
-                obj = self.project.create(container, cls, description=desc)
-                ids.append(obj.id)
+                eid = allocate_id(self.project)
+                container[eid] = Shot(id=eid, description=desc)
+                ids.append(eid)
+        self.server.save()
         await self.server.send_project()
         return {"status": "created", "ids": ids, "count": len(ids)}
 

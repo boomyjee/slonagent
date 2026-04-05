@@ -2,7 +2,7 @@
 from typing import Annotated
 
 from agent import Skill, tool
-from src.modes.movie_creator.project import Project
+from src.modes.movie_creator.project import Project, dump
 from src.modes.movie_creator.server import MovieServer
 
 
@@ -21,8 +21,8 @@ class CharactersSkill(Skill):
             "Когда пользователь просит создать — используй create_character.\n"
             "Когда просит изменить — используй update_character.\n"
             "Каждый вызов покажет пользователю форму для одобрения.\n\n"
-            f"ПЕРСОНАЖИ:\n{self.project.dump(self.project.characters)}\n\n"
-            f"СЦЕНАРИЙ:\n{self.project.dump(self.project.scenes)}"
+            f"ПЕРСОНАЖИ:\n{dump(self.project.characters)}\n\n"
+            f"СЦЕНАРИЙ:\n{dump(self.project.scenes)}"
         )
 
     @tool("Создать нового персонажа. Пользователь сможет отредактировать и одобрить.")

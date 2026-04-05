@@ -5,7 +5,7 @@ from typing import Annotated
 
 from agent import Skill, tool
 from src.modes.movie_creator.generator import Generator
-from src.modes.movie_creator.project import Project
+from src.modes.movie_creator.project import load_project
 from src.modes.movie_creator.server import MovieServer
 from src.modes.movie_creator.skills.characters import CharactersSkill
 from src.modes.movie_creator.skills.screenplay import ScreenplaySkill
@@ -39,9 +39,10 @@ class MovieCreatorSkill(Skill):
             skills=[],
         )
 
-        project = Project.load(Path(sub.memory.memory_dir) / "project")
-        server = MovieServer(self._port, project)
-        server.generator = Generator(project, self._api_key, notify=server.send_project)
+        project_dir = Path(sub.memory.memory_dir) / "project"
+        project = load_project(project_dir / "project.json")
+        server = MovieServer(self._port, project, project_dir)
+        server.generator = Generator(server, self._api_key)
         await server.start()
 
         multi = MultiTransport([self.agent.transport, WebTransport(server)])

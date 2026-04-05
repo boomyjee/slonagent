@@ -1,5 +1,5 @@
 """Media generation queue + worker. Handles image (and later video) generations
-attached to any owner entity that has a `generations` slot (dict of id → Generation)."""
+attached to any owner entity that has a `generations` dict slot."""
 import asyncio
 import base64
 import logging
@@ -7,34 +7,34 @@ import os
 
 import requests
 
-from src.modes.movie_creator.project import Generation, Project
+from src.modes.movie_creator.project import Generation, allocate_id
 
 log = logging.getLogger(__name__)
 
 
 class Generator:
-    def __init__(self, project: Project, api_key: str, notify):
-        self.project = project
+    """Background worker for image/video generation.
+
+    Bound to a MovieServer so it can reach the project tree, save to disk,
+    and broadcast updates to the UI without extra callback plumbing.
+    """
+
+    def __init__(self, server, api_key: str):
+        self.server = server
         self.api_key = api_key
-        self.notify = notify  # async callable — broadcasts project state to UI
         self._queue: asyncio.Queue = asyncio.Queue()
         self._worker: asyncio.Task | None = None
 
     async def enqueue(self, owner, kind: str, prompt: str, media_type: str = "image") -> str:
-        """Insert a queued Generation into owner.generations dict and schedule processing.
-
-        owner — any Entity with a `generations` dict slot.
-        kind  — semantic role within owner (portrait, frame, location, ...).
-        """
         gen = Generation(
-            id=self.project.next_id(),
+            id=allocate_id(self.server.project),
             kind=kind,
             media_type=media_type,
             prompt=prompt,
         )
         owner.generations[gen.id] = gen
-        self.project.save()
-        await self.notify()
+        self.server.save()
+        await self.server.send_project()
 
         await self._queue.put((owner, gen.id))
         if self._worker is None or self._worker.done():
@@ -54,8 +54,8 @@ class Generator:
         if not gen:
             return
         gen.status = "generating"
-        self.project.save()
-        await self.notify()
+        self.server.save()
+        await self.server.send_project()
 
         try:
             if gen.media_type == "image":
@@ -64,8 +64,8 @@ class Generator:
                 raise NotImplementedError(f"media_type={gen.media_type}")
 
             filename = f"gen_{gen_id}.{ext}"
-            self.project.assets_dir.mkdir(parents=True, exist_ok=True)
-            (self.project.assets_dir / filename).write_bytes(data)
+            self.server.assets_dir.mkdir(parents=True, exist_ok=True)
+            (self.server.assets_dir / filename).write_bytes(data)
             gen.file = filename
             gen.status = "done"
             # First successful generation becomes primary automatically
@@ -76,8 +76,8 @@ class Generator:
             gen.status = "failed"
             gen.error = str(e)
 
-        self.project.save()
-        await self.notify()
+        self.server.save()
+        await self.server.send_project()
 
     async def _gen_image(self, prompt: str) -> bytes:
         url = (

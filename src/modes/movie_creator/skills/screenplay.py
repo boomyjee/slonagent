@@ -2,7 +2,7 @@
 from typing import Annotated
 
 from agent import Skill, tool
-from src.modes.movie_creator.project import Project
+from src.modes.movie_creator.project import Project, dump
 from src.modes.movie_creator.server import MovieServer
 
 
@@ -19,7 +19,7 @@ class ScreenplaySkill(Skill):
             "Ты — ассистент-сценарист. Помогаешь пользователю работать со сценарием.\n"
             "Когда пользователь просит создать сцену — используй create_scene.\n"
             "Когда пользователь просит изменить существующую — используй update_scene.\n\n"
-            f"СЦЕНАРИЙ:\n{self.project.dump(self.project.scenes)}"
+            f"СЦЕНАРИЙ:\n{dump(self.project.scenes)}"
         )
 
     @tool("Создать новую сцену. Пользователь сможет отредактировать и одобрить.")
