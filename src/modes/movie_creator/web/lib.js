@@ -26,7 +26,7 @@ export const SCHEMAS = {
         titleField: 'name',
         emptyTitle: 'Unnamed',
         thumb: 'image',
-        portrait: true,
+        gallery: 'portrait',
         emptyText: 'No characters yet',
         selectHint: 'Select a character or create a new one',
         fields: [

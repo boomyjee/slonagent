@@ -32,7 +32,7 @@ class CharactersSkill(Skill):
         description: Annotated[str, "Описание (роль, характер, мотивация)"] = "",
         appearance: Annotated[str, "Внешность (возраст, рост, волосы, одежда)"] = "",
     ) -> dict:
-        return await self.server.edit("characters", approval=True, **locals())
+        return await self.server.edit("characters", locals(), approval=True)
 
     @tool("Обновить существующего персонажа по ID. Пользователь сможет отредактировать и одобрить.")
     async def update_character(
@@ -42,9 +42,10 @@ class CharactersSkill(Skill):
         description: Annotated[str, "Новое описание (пусто = не менять)"] = "",
         appearance: Annotated[str, "Новая внешность (пусто = не менять)"] = "",
     ) -> dict:
-        return await self.server.edit("characters", approval=True, **locals())
+        return await self.server.edit("characters", locals(), approval=True)
 
-    @tool("Сгенерировать портрет персонажа. Передай полный промпт для image-модели.")
+    @tool("Сгенерировать портрет персонажа. Передай полный промпт для image-модели. "
+          "Генерация добавится в очередь — результат появится в галерее персонажа.")
     async def generate_portrait(
         self,
         character_id: Annotated[str, "ID персонажа"],
@@ -61,4 +62,6 @@ class CharactersSkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         data = result.get("data", {})
-        return await self.server.generate_portrait(character_id, data.get("prompt", prompt))
+        gen_id = await self.server.generator.enqueue(
+            char, "portrait", data.get("prompt", prompt))
+        return {"status": "queued", "generation_id": gen_id}

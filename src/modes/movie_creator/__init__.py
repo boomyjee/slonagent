@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Annotated
 
 from agent import Skill, tool
+from src.modes.movie_creator.generator import Generator
 from src.modes.movie_creator.project import Project
 from src.modes.movie_creator.server import MovieServer
 from src.modes.movie_creator.skills.characters import CharactersSkill
@@ -38,7 +39,8 @@ class MovieCreatorSkill(Skill):
         )
 
         project = Project.load(Path(sub.memory.memory_dir) / "project")
-        server = MovieServer(self._port, project, self._api_key)
+        server = MovieServer(self._port, project)
+        server.generator = Generator(project, self._api_key, notify=server.send_project)
         await server.start()
 
         multi = MultiTransport([self.agent.transport, WebTransport(server)])

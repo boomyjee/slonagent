@@ -29,7 +29,7 @@ class ScreenplaySkill(Skill):
         location: Annotated[str, "Локация (напр. INT. КВАРТИРА - НОЧЬ)"] = "",
         text: Annotated[str, "Текст сцены (действие, диалоги)"] = "",
     ) -> dict:
-        return await self.server.edit("scenes", approval=True, **locals())
+        return await self.server.edit("scenes", locals(), approval=True)
 
     @tool("Обновить существующую сцену по ID. Пользователь сможет отредактировать и одобрить.")
     async def update_scene(
@@ -39,4 +39,4 @@ class ScreenplaySkill(Skill):
         location: Annotated[str, "Новая локация (пусто = не менять)"] = "",
         text: Annotated[str, "Новый текст (пусто = не менять)"] = "",
     ) -> dict:
-        return await self.server.edit("scenes", approval=True, **locals())
+        return await self.server.edit("scenes", locals(), approval=True)

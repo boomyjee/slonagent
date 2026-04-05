@@ -1,16 +1,16 @@
 import { html } from '../lib.js';
+import { GenerationGallery } from './GenerationGallery.js';
 
-export function EntityEditor({ schema, editing, onChange, onSave, onCancel, onDelete, onReject, onGeneratePortrait }) {
-    const { data, isNew, approval } = editing;
+export function EntityEditor({
+    schema, data, isNew, approval,
+    onFieldChange, onSave, onCancel, onDelete, onReject,
+    onNewGeneration, onRemixGeneration, onSetPrimary, onDeleteGeneration,
+}) {
     const title = approval
         ? `AI Proposal — ${schema.label}`
         : isNew
             ? `New ${schema.label}`
             : `${schema.label}: ${data[schema.titleField] || schema.emptyTitle}`;
-
-    function setField(name, value) {
-        onChange({ ...data, [name]: value });
-    }
 
     return html`
         <div class="editor">
@@ -18,13 +18,6 @@ export function EntityEditor({ schema, editing, onChange, onSave, onCancel, onDe
                 <h2>${title}</h2>
             </div>
             <div class="editor-body">
-                ${schema.portrait ? html`
-                    <${PortraitSection}
-                        char=${data}
-                        disabled=${isNew || approval}
-                        onGenerate=${onGeneratePortrait}
-                    />
-                ` : null}
                 ${schema.fields.map(f => html`
                     <div class=${'field' + (f.grow ? ' grow' : '')}>
                         <label>${f.label}</label>
@@ -32,16 +25,27 @@ export function EntityEditor({ schema, editing, onChange, onSave, onCancel, onDe
                             ? html`<textarea
                                 placeholder=${f.placeholder}
                                 value=${data[f.name] || ''}
-                                onInput=${e => setField(f.name, e.target.value)}
+                                onInput=${e => onFieldChange(f.name, e.target.value)}
                             ></textarea>`
                             : html`<input
                                 type="text"
                                 placeholder=${f.placeholder}
                                 value=${data[f.name] || ''}
-                                onInput=${e => setField(f.name, e.target.value)}
+                                onInput=${e => onFieldChange(f.name, e.target.value)}
                             />`}
                     </div>
                 `)}
+                ${schema.gallery && !isNew && !approval ? html`
+                    <${GenerationGallery}
+                        owner=${data}
+                        kind=${schema.gallery}
+                        generations=${data.generations || []}
+                        onNew=${onNewGeneration}
+                        onRemix=${onRemixGeneration}
+                        onSetPrimary=${onSetPrimary}
+                        onDelete=${onDeleteGeneration}
+                    />
+                ` : null}
             </div>
             <div class="editor-footer">
                 ${approval ? html`
@@ -55,23 +59,6 @@ export function EntityEditor({ schema, editing, onChange, onSave, onCancel, onDe
                     <button class="btn btn-primary" onClick=${onSave}>Save</button>
                 `}
             </div>
-        </div>
-    `;
-}
-
-function PortraitSection({ char, disabled, onGenerate }) {
-    const hasImg = !!char.image;
-    const src = hasImg ? `/api/asset/${char.image}?t=${Date.now()}` : null;
-    return html`
-        <div class="char-portrait">
-            ${hasImg
-                ? html`<img src=${src} />`
-                : html`<div class="placeholder">No portrait</div>`}
-            ${!disabled ? html`
-                <button class="btn btn-sm" onClick=${onGenerate}>
-                    ${hasImg ? 'Regenerate portrait' : 'Generate portrait'}
-                </button>
-            ` : null}
         </div>
     `;
 }

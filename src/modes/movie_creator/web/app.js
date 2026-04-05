@@ -11,6 +11,10 @@ function App() {
     const [project, setProject] = useState({ title: '', scenes: [], characters: [] });
     const [tab, setTab] = useState('screenplay');
     const [selected, setSelected] = useState({ scenes: null, characters: null });
+    // editing: { collection, id, isNew, approval?, edits, chatIdx? }
+    //   - existing entity: id set, edits = user field overrides
+    //   - new entity: id=null, isNew=true, edits = full form
+    //   - approval: id=null, approval=true, edits = AI proposal
     const [editing, setEditing] = useState(null);
     const [portraitModal, setPortraitModal] = useState(null);
     const [messages, setMessages] = useState([]);
@@ -52,6 +56,14 @@ function App() {
         }
     }
 
+    // Resolve live editing data — merge project base with local edits
+    function resolveEditing() {
+        if (!editing) return null;
+        if (editing.isNew || editing.approval) return editing.edits;
+        const base = (project[editing.collection] || []).find(x => x.id === editing.id) || {};
+        return { ...base, ...editing.edits };
+    }
+
     function switchTab(newTab) {
         setTab(newTab);
         setEditing(null);
@@ -60,18 +72,23 @@ function App() {
 
     function openEntity(collection, item) {
         setSelected(s => ({ ...s, [collection]: item.id }));
-        setEditing({ collection, data: { ...item }, isNew: false });
+        setEditing({ collection, id: item.id, isNew: false, edits: {} });
     }
 
     function openNewEntity(collection) {
         const blank = {};
         SCHEMAS[collection].fields.forEach(f => blank[f.name] = '');
-        setEditing({ collection, data: blank, isNew: true });
+        setEditing({ collection, id: null, isNew: true, edits: blank });
+    }
+
+    function onFieldChange(name, value) {
+        setEditing(e => e && ({ ...e, edits: { ...e.edits, [name]: value } }));
     }
 
     function saveEntity() {
         if (!editing) return;
-        const { id, order, ...fields } = editing.data;
+        const data = resolveEditing();
+        const { id, order, generations, ...fields } = data;
         if (editing.approval) {
             send({ type: 'approval_response', action: 'approve', data: fields });
             markApprovalResolved(editing.chatIdx);
@@ -79,7 +96,7 @@ function App() {
             send({
                 type: 'edit',
                 collection: editing.collection,
-                id: editing.isNew ? '' : (id || ''),
+                id: editing.isNew ? '' : editing.id,
                 data: fields,
             });
         }
@@ -97,7 +114,7 @@ function App() {
     function deleteEntity() {
         if (!editing || editing.isNew) return;
         if (!confirm(`Delete this ${SCHEMAS[editing.collection].label.toLowerCase()}?`)) return;
-        send({ type: 'delete', collection: editing.collection, id: editing.data.id });
+        send({ type: 'delete', collection: editing.collection, id: editing.id });
         setEditing(null);
     }
 
@@ -121,21 +138,13 @@ function App() {
             const collection = kind === 'scene' ? 'scenes' : 'characters';
             setEditing({
                 collection,
-                data: { ...msgItem.data },
+                id: null,
                 isNew: true,
                 approval: true,
+                edits: { ...msgItem.data },
                 chatIdx: msgItem.idx,
             });
         }
-    }
-
-    function openPortraitForChar(char) {
-        setPortraitModal({
-            charId: char.id,
-            charName: char.name,
-            prompt: defaultPortraitPrompt(char),
-            approval: false,
-        });
     }
 
     function generatePortrait() {
@@ -148,9 +157,42 @@ function App() {
             });
             markApprovalResolved(portraitModal.chatIdx);
         } else {
-            send({ type: 'generate_portrait', id: portraitModal.charId, prompt: portraitModal.prompt });
+            send({
+                type: 'generate',
+                collection: 'characters',
+                id: portraitModal.charId,
+                kind: 'portrait',
+                prompt: portraitModal.prompt,
+            });
         }
         setPortraitModal(null);
+    }
+
+    function newGeneration(owner) {
+        setPortraitModal({
+            charId: owner.id,
+            charName: owner.name,
+            prompt: defaultPortraitPrompt(owner),
+            approval: false,
+        });
+    }
+
+    function remixGeneration(owner, gen) {
+        setPortraitModal({
+            charId: owner.id,
+            charName: owner.name,
+            prompt: gen.prompt,
+            approval: false,
+        });
+    }
+
+    function setPrimary(owner, gen) {
+        send({ type: 'set_primary', collection: 'characters', id: owner.id, generation_id: gen.id });
+    }
+
+    function deleteGeneration(owner, gen) {
+        if (!confirm('Delete this generation?')) return;
+        send({ type: 'delete_generation', collection: 'characters', id: owner.id, generation_id: gen.id });
     }
 
     function rejectPortrait() {
@@ -166,6 +208,7 @@ function App() {
     const collection = TAB_COLLECTION[tab];
     const schema = collection && SCHEMAS[collection];
     const items = collection ? (project[collection] || []) : [];
+    const editingData = resolveEditing();
 
     return html`
         <div class="header">
@@ -195,16 +238,21 @@ function App() {
             </div>
             <${Resizer} targetRef=${sidebarRef} side="left" />
             <div class="center">
-                ${editing ? html`
+                ${editing && editingData ? html`
                     <${EntityEditor}
                         schema=${SCHEMAS[editing.collection]}
-                        editing=${editing}
-                        onChange=${data => setEditing({ ...editing, data })}
+                        data=${editingData}
+                        isNew=${editing.isNew}
+                        approval=${editing.approval}
+                        onFieldChange=${onFieldChange}
                         onSave=${saveEntity}
                         onCancel=${() => setEditing(null)}
                         onDelete=${deleteEntity}
                         onReject=${rejectEntity}
-                        onGeneratePortrait=${() => openPortraitForChar(editing.data)}
+                        onNewGeneration=${() => newGeneration(editingData)}
+                        onRemixGeneration=${gen => remixGeneration(editingData, gen)}
+                        onSetPrimary=${gen => setPrimary(editingData, gen)}
+                        onDeleteGeneration=${gen => deleteGeneration(editingData, gen)}
                     />
                 ` : html`
                     <div class="center-empty">

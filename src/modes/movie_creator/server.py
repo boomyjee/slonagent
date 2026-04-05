@@ -1,13 +1,10 @@
 """WebSocket + HTTP server for movie creator mode."""
 import asyncio
-import base64
 import json
 import logging
-import os
 import webbrowser
 from pathlib import Path
 
-import requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 
@@ -19,10 +16,10 @@ WEB_DIR = Path(__file__).parent / "web"
 
 
 class MovieServer:
-    def __init__(self, port: int, project: Project, api_key: str = ""):
+    def __init__(self, port: int, project: Project):
         self.port = port
         self.project = project
-        self.api_key = api_key
+        self.generator = None  # set by orchestrator
         self.app = FastAPI()
         self.ws: WebSocket | None = None
         self.active_tab: str = "screenplay"
@@ -32,17 +29,19 @@ class MovieServer:
         self._setup_routes()
 
     def _setup_routes(self):
+        no_cache = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+
         @self.app.get("/")
         async def index():
             html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
-            return HTMLResponse(html)
+            return HTMLResponse(html, headers=no_cache)
 
         @self.app.get("/{filepath:path}.js")
         async def js_file(filepath: str):
             path = WEB_DIR / f"{filepath}.js"
             if ".." in filepath or not path.exists():
                 return {"error": "not found"}, 404
-            return FileResponse(path, media_type="application/javascript")
+            return FileResponse(path, media_type="application/javascript", headers=no_cache)
 
         @self.app.get("/api/asset/{path:path}")
         async def get_asset(path: str):
@@ -60,7 +59,10 @@ class MovieServer:
             try:
                 while True:
                     data = await ws.receive_text()
-                    await self._handle_message(json.loads(data))
+                    try:
+                        await self._handle_message(json.loads(data))
+                    except Exception:
+                        log.exception("[movie] error handling WS message: %s", data[:200])
             except WebSocketDisconnect:
                 self.ws = None
 
@@ -68,7 +70,7 @@ class MovieServer:
         t = msg.get("type")
 
         if t == "edit":
-            await self.edit(msg["collection"], id=msg.get("id", ""), **msg.get("data", {}))
+            await self.edit(msg["collection"], {"id": msg.get("id", ""), **msg.get("data", {})})
 
         elif t == "delete":
             self.project.delete(msg["collection"], msg["id"])
@@ -78,8 +80,35 @@ class MovieServer:
             self.project.reorder(msg["collection"], msg.get("order", []))
             await self.send_project()
 
-        elif t == "generate_portrait":
-            asyncio.create_task(self.generate_portrait(msg["id"], msg.get("prompt", "")))
+        elif t == "generate":
+            owner = getattr(self.project, msg["collection"]).get(msg["id"])
+            if owner:
+                asyncio.create_task(self.generator.enqueue(
+                    owner,
+                    msg.get("kind", "portrait"),
+                    msg.get("prompt", ""),
+                    msg.get("media_type", "image"),
+                ))
+
+        elif t == "set_primary":
+            owner = getattr(self.project, msg["collection"]).get(msg["id"])
+            if owner:
+                gen = next(
+                    (g for g in getattr(owner, "generations", [])
+                     if g.id == msg["generation_id"] and g.file),
+                    None,
+                )
+                if gen:
+                    owner.image = gen.file
+                    self.project.save()
+                    await self.send_project()
+
+        elif t == "delete_generation":
+            owner = getattr(self.project, msg["collection"]).get(msg["id"])
+            if owner and hasattr(owner, "generations"):
+                owner.generations = [g for g in owner.generations if g.id != msg["generation_id"]]
+                self.project.save()
+                await self.send_project()
 
         elif t == "approval_response":
             if self._pending_approval and not self._pending_approval.done():
@@ -120,9 +149,9 @@ class MovieServer:
         self._pending_approval = None
         return result
 
-    async def edit(self, collection: str, approval: bool = False, **fields) -> dict:
+    async def edit(self, collection: str, fields: dict, approval: bool = False) -> dict:
         """Create (no id) or update (with id) entity. If approval=True — ask user first."""
-        fields.pop("self", None)
+        fields = {k: v for k, v in fields.items() if k != "self"}
         id = fields.pop("id", "")
         if approval:
             if id:
@@ -148,48 +177,6 @@ class MovieServer:
         if self.ws:
             await self.ws.send_text(json.dumps({"type": event, **kwargs}))
 
-    async def generate_portrait(self, char_id: str, prompt: str) -> dict:
-        """Generate character portrait via Gemini Image API. Prompt is provided by caller."""
-        char = self.project.characters.get(char_id)
-        if not char:
-            return {"error": f"Character {char_id} not found"}
-        if not prompt.strip():
-            return {"error": "Empty prompt"}
-
-        await self.send_event("generating", id=char_id, asset="portrait")
-
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.5-flash-image:generateContent?key={self.api_key}"
-        )
-        proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-
-        try:
-            resp = await asyncio.to_thread(
-                requests.post, url,
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-                proxies=proxies, timeout=300,
-            )
-            if resp.status_code != 200:
-                return {"error": f"API {resp.status_code}: {resp.text[:200]}"}
-
-            for cand in resp.json().get("candidates", []):
-                for part in cand.get("content", {}).get("parts", []):
-                    if "inlineData" in part:
-                        img = base64.b64decode(part["inlineData"]["data"])
-                        filename = f"char_{char_id}.png"
-                        self.project.assets_dir.mkdir(parents=True, exist_ok=True)
-                        (self.project.assets_dir / filename).write_bytes(img)
-                        self.project.update("characters", char_id, image=filename)
-                        await self.send_project()
-                        return {"status": "success", "image": filename}
-
-            return {"error": "No image in API response"}
-        except Exception as e:
-            log.exception("[movie] portrait generation failed")
-            return {"error": str(e)}
-
     def on_chat(self, callback):
         self._on_chat.append(callback)
 
@@ -201,6 +188,7 @@ class MovieServer:
         config = uvicorn.Config(
             self.app, host="0.0.0.0", port=self.port, log_level="warning")
         server = uvicorn.Server(config)
+        server.install_signal_handlers = lambda: None
 
         async def _serve():
             try:

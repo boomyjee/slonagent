@@ -17,19 +17,19 @@ class BadFinishReason(Exception):
 async def stoppable(coro, stop_event: asyncio.Event):
     task = asyncio.create_task(coro)
     stop_task = asyncio.create_task(stop_event.wait())
-    await asyncio.wait({task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
-    stop_task.cancel()
-    if not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    try:
+        await asyncio.wait({task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stop_task.cancel()
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+    if task.cancelled() or stop_task.done() and not stop_task.cancelled():
         return None
     return task.result()
-
-
-
 
 def tool(description: str):
     def decorator(fn):

@@ -173,4 +173,5 @@ class Dashboard:
             log_config=None,
         )
         server = uvicorn.Server(config)
+        server.install_signal_handlers = lambda: None
         await server.serve()

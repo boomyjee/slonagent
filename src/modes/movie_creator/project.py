@@ -7,22 +7,41 @@ from pathlib import Path
 class Entity:
     __slots__ = ("id", "order")
     _defaults = {"order": 0}
+    _nested: dict = {}  # slot_name -> Entity subclass for list[Entity] slots
 
     def __init__(self, **kw):
         for slot in self.__slots__:
             val = kw.get(slot, self._defaults.get(slot, ""))
-            setattr(self, slot, val() if callable(val) else val)
+            if callable(val) and not isinstance(val, (str, int, float, list, dict)):
+                val = val()
+            if slot in self._nested and isinstance(val, list):
+                cls = self._nested[slot]
+                val = [x if isinstance(x, cls) else cls.from_dict(x) for x in val]
+            setattr(self, slot, val)
 
     def to_dict(self) -> dict:
-        return {s: getattr(self, s) for s in self.__slots__}
+        result = {}
+        for s in self.__slots__:
+            v = getattr(self, s)
+            if s in self._nested and isinstance(v, list):
+                v = [x.to_dict() for x in v]
+            result[s] = v
+        return result
 
     @classmethod
     def from_dict(cls, d: dict) -> "Entity":
         return cls(**{k: v for k, v in d.items() if k in cls.__slots__})
 
 
+class Generation(Entity):
+    __slots__ = ("id", "kind", "media_type", "prompt", "file", "status", "error")
+    _defaults = {"media_type": "image", "status": "queued"}
+
+
 class Character(Entity):
-    __slots__ = ("id", "name", "description", "appearance", "image", "order")
+    __slots__ = ("id", "name", "description", "appearance", "image", "generations", "order")
+    _defaults = {"order": 0, "generations": list}
+    _nested = {"generations": Generation}
 
 
 class Scene(Entity):
@@ -77,12 +96,16 @@ class Project:
         with open(self._history_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def next_id(self) -> str:
+        eid = str(self._next_id)
+        self._next_id += 1
+        return eid
+
     # ── generic CRUD ──
 
     def create(self, collection: str, **fields):
         items = getattr(self, collection)
-        eid = str(self._next_id)
-        self._next_id += 1
+        eid = self.next_id()
         order = max((x.order for x in items.values()), default=-1) + 1
         obj = self._entity_types[collection](id=eid, order=order, **fields)
         items[eid] = obj
@@ -127,7 +150,11 @@ class Project:
         if not items:
             return "(пусто)"
         return "\n\n".join(
-            "\n".join(f"{s}: {getattr(item, s)}" for s in item.__slots__ if s != "order")
+            "\n".join(
+                f"{s}: {getattr(item, s)}"
+                for s in item.__slots__
+                if s != "order" and not isinstance(getattr(item, s), (list, dict))
+            )
             for item in items
         )
 
