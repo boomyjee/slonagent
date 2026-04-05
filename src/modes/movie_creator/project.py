@@ -6,7 +6,7 @@ from pathlib import Path
 
 class Entity:
     __slots__ = ("id", "order")
-    _defaults = {}
+    _defaults = {"order": 0}
 
     def __init__(self, **kw):
         for slot in self.__slots__:
@@ -22,7 +22,7 @@ class Entity:
 
 
 class Character(Entity):
-    __slots__ = ("id", "name", "description", "appearance", "order")
+    __slots__ = ("id", "name", "description", "appearance", "image", "order")
 
 
 class Scene(Entity):

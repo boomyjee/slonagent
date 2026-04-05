@@ -1,10 +1,13 @@
 """WebSocket + HTTP server for movie creator mode."""
 import asyncio
+import base64
 import json
 import logging
+import os
 import webbrowser
 from pathlib import Path
 
+import requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 
@@ -16,9 +19,10 @@ WEB_DIR = Path(__file__).parent / "web"
 
 
 class MovieServer:
-    def __init__(self, port: int, project: Project):
+    def __init__(self, port: int, project: Project, api_key: str = ""):
         self.port = port
         self.project = project
+        self.api_key = api_key
         self.app = FastAPI()
         self.ws: WebSocket | None = None
         self.active_tab: str = "screenplay"
@@ -75,6 +79,9 @@ class MovieServer:
             self.project.reorder("scenes", msg.get("order", []))
             await self._send_project()
 
+        elif t == "generate_portrait":
+            asyncio.create_task(self.generate_portrait(msg["id"]))
+
         elif t == "approval_response":
             if self._pending_approval and not self._pending_approval.done():
                 self._pending_approval.set_result(msg)
@@ -117,6 +124,53 @@ class MovieServer:
     async def send_event(self, event: str, **kwargs):
         if self.ws:
             await self.ws.send_text(json.dumps({"type": event, **kwargs}))
+
+    async def generate_portrait(self, char_id: str) -> dict:
+        """Generate character portrait via Gemini Image API."""
+        char = self.project.characters.get(char_id)
+        if not char:
+            return {"error": f"Character {char_id} not found"}
+        if not char.appearance:
+            return {"error": "No appearance description"}
+
+        await self.send_event("generating", id=char_id, asset="portrait")
+
+        prompt = (
+            f"Cinematic portrait of a film character: {char.name}. "
+            f"{char.appearance}. "
+            "Head and shoulders, cinematic lighting, film still, shallow depth of field."
+        )
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.5-flash-image:generateContent?key={self.api_key}"
+        )
+        proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+
+        try:
+            resp = await asyncio.to_thread(
+                requests.post, url,
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                proxies=proxies, timeout=300,
+            )
+            if resp.status_code != 200:
+                return {"error": f"API {resp.status_code}: {resp.text[:200]}"}
+
+            for cand in resp.json().get("candidates", []):
+                for part in cand.get("content", {}).get("parts", []):
+                    if "inlineData" in part:
+                        img = base64.b64decode(part["inlineData"]["data"])
+                        filename = f"char_{char_id}.png"
+                        self.project.assets_dir.mkdir(parents=True, exist_ok=True)
+                        (self.project.assets_dir / filename).write_bytes(img)
+                        self.project.update("characters", char_id, image=filename)
+                        await self._send_project()
+                        return {"status": "success", "image": filename}
+
+            return {"error": "No image in API response"}
+        except Exception as e:
+            log.exception("[movie] portrait generation failed")
+            return {"error": str(e)}
 
     def on_chat(self, callback):
         self._on_chat.append(callback)

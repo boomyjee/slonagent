@@ -35,12 +35,18 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .scene-item .num { font-size: 11px; font-weight: 600; min-width: 20px; opacity: 0.6; }
 .scene-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Character list items (reuse scene-item style) */
-.char-item { display: flex; align-items: center; padding: 10px 12px; cursor: pointer; border-bottom: 1px solid var(--border); gap: 8px; font-size: 13px; }
+/* Character list items */
+.char-item { display: flex; align-items: center; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border); gap: 8px; font-size: 13px; }
 .char-item:hover { background: var(--surface2); }
 .char-item.active { background: var(--accent); color: #1e1e2e; }
+.char-item .thumb { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: var(--surface3); }
 .char-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.char-item .badge { font-size: 10px; background: var(--surface3); padding: 2px 6px; border-radius: 4px; }
+
+/* Character portrait in editor */
+.char-portrait { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.char-portrait img { max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; }
+.char-portrait .placeholder { width: 200px; height: 200px; border-radius: 8px; background: var(--surface3); display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 12px; }
+.char-portrait .generating { opacity: 0.5; animation: pulse 1.5s infinite; }
 
 /* Center — editor/viewer */
 .center { flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; min-width: 200px; min-height: 0; }
@@ -168,6 +174,11 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
                 <h2 id="char-editor-title">Character</h2>
             </div>
             <div class="editor-body">
+                <div class="char-portrait" id="char-portrait">
+                    <div class="placeholder" id="portrait-placeholder">No portrait</div>
+                    <img id="portrait-img" style="display:none">
+                    <button class="btn btn-sm" id="btn-gen-portrait" onclick="generatePortrait()">Generate portrait</button>
+                </div>
                 <div class="field">
                     <label>Name</label>
                     <input type="text" id="cf-name" placeholder="Character name">
@@ -234,6 +245,18 @@ ws.onmessage = e => {
     if (msg.type === 'project_updated') {
         project = msg.project;
         renderSidebar();
+        // Refresh portrait if char editor is open
+        if (selectedCharId && charEditorEl.style.display !== 'none') {
+            const char = project.characters.find(c => c.id === selectedCharId);
+            if (char && char.image) {
+                const img = document.getElementById('portrait-img');
+                img.src = '/api/asset/' + char.image + '?t=' + Date.now();
+                img.style.display = 'block';
+                document.getElementById('portrait-placeholder').style.display = 'none';
+                document.getElementById('btn-gen-portrait').textContent = 'Regenerate portrait';
+                document.getElementById('btn-gen-portrait').disabled = false;
+            }
+        }
     } else if (msg.type === 'message') {
         addMessage(msg.role, msg.text, msg.stream_id, msg.final);
     } else if (msg.type === 'tool_call') {
@@ -511,7 +534,8 @@ function renderCharList() {
     project.characters.forEach(c => {
         const item = document.createElement('div');
         item.className = 'char-item' + (c.id === selectedCharId ? ' active' : '');
-        item.innerHTML = `<span class="name">${c.name || 'Unnamed'}</span>`;
+        const thumb = c.image ? `<img class="thumb" src="/api/asset/${c.image}">` : `<div class="thumb"></div>`;
+        item.innerHTML = `${thumb}<span class="name">${c.name || 'Unnamed'}</span>`;
         item.onclick = () => selectCharacter(c.id);
         charListEl.appendChild(item);
     });
@@ -541,6 +565,23 @@ function showCharEditor(char, approval = false) {
     document.getElementById('btn-delete-char').style.display = isNewChar ? 'none' : 'block';
     document.getElementById('char-footer-normal').style.display = approval ? 'none' : 'flex';
     document.getElementById('char-footer-approval').style.display = approval ? 'flex' : 'none';
+
+    // Portrait
+    const img = document.getElementById('portrait-img');
+    const placeholder = document.getElementById('portrait-placeholder');
+    const btnGen = document.getElementById('btn-gen-portrait');
+    if (char.image) {
+        img.src = '/api/asset/' + char.image + '?t=' + Date.now();
+        img.style.display = 'block';
+        placeholder.style.display = 'none';
+        btnGen.textContent = 'Regenerate portrait';
+    } else {
+        img.style.display = 'none';
+        placeholder.style.display = 'flex';
+        btnGen.textContent = 'Generate portrait';
+    }
+    btnGen.style.display = (isNewChar || approval) ? 'none' : 'block';
+    placeholder.classList.remove('generating');
 }
 
 function hideCharEditor() {
@@ -581,6 +622,15 @@ function deleteCharacter() {
         send({ type: 'delete_character', id: selectedCharId });
         hideCharEditor();
     }
+}
+
+function generatePortrait() {
+    if (!selectedCharId) return;
+    document.getElementById('portrait-placeholder').style.display = 'flex';
+    document.getElementById('portrait-placeholder').textContent = 'Generating...';
+    document.getElementById('portrait-placeholder').classList.add('generating');
+    document.getElementById('btn-gen-portrait').disabled = true;
+    send({ type: 'generate_portrait', id: selectedCharId });
 }
 
 // ── Resizers ──

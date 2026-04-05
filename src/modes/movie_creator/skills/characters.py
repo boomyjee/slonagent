@@ -72,6 +72,13 @@ class CharactersSkill(Skill):
                                      project=self.project.to_dict())
         return {"status": "created", "id": char.id, "name": char.name}
 
+    @tool("Сгенерировать портрет персонажа по описанию внешности.")
+    async def generate_portrait(
+        self,
+        character_id: Annotated[str, "ID персонажа"],
+    ) -> dict:
+        return await self.server.generate_portrait(character_id)
+
     @tool("Обновить существующего персонажа по ID. Пользователь сможет отредактировать и одобрить.")
     async def update_character(
         self,
