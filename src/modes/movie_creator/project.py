@@ -121,6 +121,16 @@ class Project:
     def ordered(self, collection: str) -> list:
         return sorted(getattr(self, collection).values(), key=lambda x: x.order)
 
+    def dump(self, collection: str) -> str:
+        """Plain text dump of a collection for LLM context."""
+        items = self.ordered(collection)
+        if not items:
+            return "(пусто)"
+        return "\n\n".join(
+            "\n".join(f"{s}: {getattr(item, s)}" for s in item.__slots__ if s != "order")
+            for item in items
+        )
+
     def to_dict(self) -> dict:
         result = {"title": self.title}
         for name in self._entity_types:

@@ -15,39 +15,14 @@ class CharactersSkill(Skill):
         self.server = server
 
     async def get_context_prompt(self, user_text: str = "") -> str:
-        chars = self.project.ordered("characters")
-        scenes = self.project.ordered("scenes")
-
-        if not chars:
-            chars_ctx = "Персонажей пока нет."
-        else:
-            parts = []
-            for c in chars:
-                parts.append(
-                    f"- {c.name} (id={c.id}): {c.description or '(нет описания)'}"
-                    f"\n  Внешность: {c.appearance or '(не описана)'}"
-                )
-            chars_ctx = "\n".join(parts)
-
-        if not scenes:
-            scenes_ctx = "Сцен пока нет."
-        else:
-            parts = []
-            for i, s in enumerate(scenes, 1):
-                parts.append(
-                    f"Сцена {i} (id={s.id}): {s.title or 'Без названия'}"
-                    f"{' [' + s.location + ']' if s.location else ''}\n{s.text or '(пусто)'}"
-                )
-            scenes_ctx = "\n\n".join(parts)
-
         return (
             "Ты — ассистент по персонажам фильма.\n"
             "Помогаешь создавать и редактировать персонажей.\n"
             "Когда пользователь просит создать — используй create_character.\n"
             "Когда просит изменить — используй update_character.\n"
             "Каждый вызов покажет пользователю форму для одобрения.\n\n"
-            f"ПЕРСОНАЖИ ({len(chars)}):\n{chars_ctx}\n\n"
-            f"СЦЕНАРИЙ ({len(scenes)} сцен):\n{scenes_ctx}"
+            f"ПЕРСОНАЖИ:\n{self.project.dump('characters')}\n\n"
+            f"СЦЕНАРИЙ:\n{self.project.dump('scenes')}"
         )
 
     @tool("Создать нового персонажа. Пользователь сможет отредактировать и одобрить.")

@@ -15,22 +15,11 @@ class ScreenplaySkill(Skill):
         self.server = server
 
     async def get_context_prompt(self, user_text: str = "") -> str:
-        scenes = self.project.ordered("scenes")
-        if not scenes:
-            ctx = "Проект пока пуст — нет ни одной сцены."
-        else:
-            parts = []
-            for i, s in enumerate(scenes, 1):
-                parts.append(
-                    f"Сцена {i} (id={s.id}): {s.title or 'Без названия'}"
-                    f"{' [' + s.location + ']' if s.location else ''}\n{s.text or '(пусто)'}"
-                )
-            ctx = "\n\n".join(parts)
         return (
             "Ты — ассистент-сценарист. Помогаешь пользователю работать со сценарием.\n"
-            "Когда пользователь просит создать или изменить сцену — используй propose_scene.\n"
+            "Когда пользователь просит создать сцену — используй create_scene.\n"
             "Когда пользователь просит изменить существующую — используй update_scene.\n\n"
-            f"ТЕКУЩИЙ СЦЕНАРИЙ ({len(scenes)} сцен):\n{ctx}"
+            f"СЦЕНАРИЙ:\n{self.project.dump('scenes')}"
         )
 
     @tool("Создать новую сцену. Пользователь сможет отредактировать и одобрить.")
