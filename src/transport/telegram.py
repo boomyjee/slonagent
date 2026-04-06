@@ -222,8 +222,6 @@ class TelegramTransport(BaseTransport):
         self._pending_messages: list[Message] = []
         self._flush_task: asyncio.Task | None = None
         self._typing_task: asyncio.Task | None = None
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._queue_task: asyncio.Task | None = None
         self._last_edit_texts: dict[int, str] = {}  # msg_id → last sent text
         self._stream_messages: dict[int, list] = {}  # stream_id → list of Message
 
@@ -266,69 +264,39 @@ class TelegramTransport(BaseTransport):
             log.info("[telegram] set %d commands for %s", len(commands), self.agent_id or self.chat_id)
         asyncio.create_task(update_commands())
 
-    async def _exec_item(self, item):
-        kind = item["kind"]
-        if kind == "send":
-            return await self.bot.send_message(
-                self.chat_id, item["text"],
-                message_thread_id=self.thread_id,
-                link_preview_options=self._no_link_preview,
-                **item["kwargs"],
-            )
-        elif kind == "edit":
-            msg, text = item["msg"], item["text"]
-            if self._last_edit_texts.get(msg.message_id) == text:
-                return msg
-            result = await msg.edit_text(text, link_preview_options=self._no_link_preview, **item["kwargs"])
-            self._last_edit_texts[msg.message_id] = text
-            return result
-
-    async def _queue_worker(self):
-        """Process send/edit queue with rate limiting."""
-        while True:
-            item = await self._queue.get()
-            # Skip stale edits — if queue has a newer edit for same message, skip this one
-            if item["kind"] == "edit" and any(
-                q["kind"] == "edit" and q["msg"].message_id == item["msg"].message_id
-                for q in self._queue._queue
-            ):
-                item["future"].set_result(item["msg"])
-                continue
-            future = item["future"]
-            try:
-                future.set_result(await self._exec_item(item))
-            except (TelegramRetryAfter, TelegramServerError) as e:
-                wait = e.retry_after if isinstance(e, TelegramRetryAfter) else 5
-                log.warning("Telegram error, waiting %s sec: %s", wait, e)
-                await asyncio.sleep(wait)
-                try:
-                    future.set_result(await self._exec_item(item))
-                except Exception as e2:
-                    future.set_exception(e2)
-            except Exception as e:
-                future.set_exception(e)
-            await asyncio.sleep(1)
-
-
-    def _ensure_queue(self):
-        if not self._queue_task or self._queue_task.done():
-            self._queue_task = asyncio.create_task(self._queue_worker())
-
     async def _send(self, text: str, **kwargs) -> Message:
-        self._ensure_queue()
-        future = asyncio.get_event_loop().create_future()
-        self._queue.put_nowait({"kind": "send", "text": text, "kwargs": kwargs, "future": future})
-        return await future
+        while True:
+            try:
+                return await self.bot.send_message(
+                    self.chat_id, text,
+                    message_thread_id=self.thread_id,
+                    link_preview_options=self._no_link_preview,
+                    **kwargs,
+                )
+            except TelegramRetryAfter as e:
+                log.warning("Telegram flood, waiting %s sec", e.retry_after)
+                await asyncio.sleep(e.retry_after)
+            except TelegramServerError:
+                await asyncio.sleep(5)
 
     async def _edit(self, msg: Message, text: str, **kwargs) -> Message:
-        self._ensure_queue()
-        future = asyncio.get_event_loop().create_future()
-        self._queue.put_nowait({"kind": "edit", "msg": msg, "text": text, "kwargs": kwargs, "future": future})
-        return await future
-    
-    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, final: bool = False, prefix: str = "", max_chunks = None):
+        if self._last_edit_texts.get(msg.message_id) == text:
+            return msg
+        while True:
+            try:
+                result = await msg.edit_text(text, link_preview_options=self._no_link_preview, **kwargs)
+                self._last_edit_texts[msg.message_id] = text
+                return result
+            except TelegramRetryAfter as e:
+                log.warning("Telegram flood, waiting %s sec", e.retry_after)
+                await asyncio.sleep(e.retry_after)
+            except TelegramServerError:
+                await asyncio.sleep(5)
+
+    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = "", max_chunks = None, final: bool = False):
         if messages is None:
             messages = []
+
         if expandable:
             escaped_prefix = html.escape(prefix)
             overhead = len(escaped_prefix) + 36  # <blockquote expandable>…</blockquote>
@@ -338,34 +306,37 @@ class TelegramTransport(BaseTransport):
             converter = _markdown_to_html
 
         if max_chunks: overhead += 3
-        raw_chunks = _split_message_to_html(text, converter, max_len=4096 - overhead)            
+        raw_chunks = _split_message_to_html(text, converter, max_len=4096 - overhead)
 
         if max_chunks:
             if len(raw_chunks) > max_chunks:
                 raw_chunks = raw_chunks[:max_chunks]
                 raw_chunks[max_chunks-1] += "..."
 
-        if expandable:
-            tag = "blockquote expandable" if final else "blockquote"
-            bodies = [f"<{tag}>{escaped_prefix}{c}</blockquote>" for c in raw_chunks]
-        else:
-            bodies = raw_chunks
+        messages.extend([None] * (len(raw_chunks) - len(messages)))
 
-        for m, body in enumerate(bodies):
-            if m < len(messages):
-                try:
-                    messages[m] = await self._edit(messages[m], body, parse_mode="HTML")
-                except Exception as e:
-                    if "message is not modified" not in str(e):
-                        raise
+        for m, raw_chunk in enumerate(raw_chunks):
+            if expandable:
+                body = f"<blockquote>{escaped_prefix}{raw_chunk}</blockquote>"
+                body_final = f"<blockquote expandable>{escaped_prefix}{raw_chunk}</blockquote>"
             else:
-                messages.append(await self._send(body, parse_mode="HTML"))
-        for msg in messages[len(bodies):]:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-        del messages[len(bodies):]
+                body = raw_chunk
+                body_final = raw_chunk
+
+            if messages[m] is None:
+                if m < len(messages) - 1 or final:
+                    messages[m] = await self._send(body_final, parse_mode="HTML")
+                else:
+                    try:
+                        await self.bot.send_message_draft(
+                            chat_id=self.chat_id,
+                            message_thread_id=self.thread_id,
+                            draft_id=id(messages),
+                            text=body,
+                            parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        log.debug("draft failed: %s", e)
 
     async def on_tool_call(self, name: str, args: dict):
         lines = "\n".join(f"{html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
@@ -398,14 +369,14 @@ class TelegramTransport(BaseTransport):
 
     async def send_system_prompt(self, text: str):
         if not self.verbose: return
-        await self._answer(text, expandable=True, prefix="🔧 ", max_chunks=1)
+        await self._answer(text, expandable=True, final=True, prefix="🔧 ", max_chunks=1)
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
         messages = self._stream_messages.setdefault(stream_id, []) if stream_id else None
         await self._answer(text, expandable=True, final=final, prefix="🧠 ", messages=messages)
 
     async def send_code(self, lang: str, code: str):
-        await self._answer(f"```{lang}\n{code}\n```")
+        await self._answer(f"```{lang}\n{code}\n```", final=True)
 
     async def handle_message(self, message: Message):
         if self.thread_id and not self.thread_name:

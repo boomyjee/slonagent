@@ -363,6 +363,7 @@ class Agent:
                 self._stream_counter += 1
                 stream_id = self._stream_counter
                 accumulated_calls: dict[int, dict] = {}
+                thinking_finalized = False
 
                 async for chunk in stream:
                     if self._stop_event.is_set():
@@ -405,6 +406,9 @@ class Agent:
                         else:
                             content = delta.content.removeprefix("</thought>")
                             if content:
+                                if thinking_text and not thinking_finalized:
+                                    await self.transport.send_thinking(thinking_text, thinking_id, final=True)
+                                    thinking_finalized = True
                                 text += content
                                 await self.transport.send_message(text, stream_id, final=False)
                     # OpenAI o1: reasoning_content, OpenRouter: reasoning
@@ -418,7 +422,7 @@ class Agent:
                     if unexpected:
                         logging.warning("[stream] unknown delta fields: %s", unexpected)
 
-                if thinking_text:
+                if thinking_text and not thinking_finalized:
                     await self.transport.send_thinking(thinking_text, thinking_id, final=True)
                 if text and stream_id:
                     await self.transport.send_message(text, stream_id, final=True)
