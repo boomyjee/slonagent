@@ -371,6 +371,11 @@ class Agent:
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
+                    logging.debug("[stream] chunk: content=%r tc=%s finish=%s extra=%s",
+                                  delta.content[:80] if delta.content else None,
+                                  len(delta.tool_calls) if delta.tool_calls else 0,
+                                  chunk.choices[0].finish_reason,
+                                  list((getattr(delta, "model_extra", None) or {}).keys()) or None)
 
                     if delta.tool_calls:
                         for tc in delta.tool_calls:

@@ -1,5 +1,5 @@
 import html
-import base64, io, os, re, asyncio, logging, json, mimetypes
+import base64, io, os, re, asyncio, logging, json, mimetypes, time
 
 log = logging.getLogger(__name__)
 from typing import Annotated
@@ -224,6 +224,7 @@ class TelegramTransport(BaseTransport):
         self._typing_task: asyncio.Task | None = None
         self._last_edit_texts: dict[int, str] = {}  # msg_id → last sent text
         self._stream_messages: dict[int, list] = {}  # stream_id → list of Message
+        self._last_draft_time: float = 0
 
     async def send_processing(self, active: bool):
         if active:
@@ -232,7 +233,13 @@ class TelegramTransport(BaseTransport):
             async def _typing_loop():
                 try:
                     while True:
-                        await self.bot.send_chat_action(chat_id=self.chat_id, action="typing", message_thread_id=self.thread_id)
+                        try:
+                            await self.bot.send_chat_action(chat_id=self.chat_id, action="typing", message_thread_id=self.thread_id)
+                        except TelegramRetryAfter as e:
+                            log.warning("typing flood, waiting %s sec", e.retry_after)
+                            await asyncio.sleep(e.retry_after)
+                        except Exception as e:
+                            log.warning("typing action failed: %s", e)
                         await asyncio.sleep(4)
                 except asyncio.CancelledError:
                     pass
@@ -279,19 +286,21 @@ class TelegramTransport(BaseTransport):
             except TelegramServerError:
                 await asyncio.sleep(5)
 
-    async def _edit(self, msg: Message, text: str, **kwargs) -> Message:
-        if self._last_edit_texts.get(msg.message_id) == text:
-            return msg
-        while True:
-            try:
-                result = await msg.edit_text(text, link_preview_options=self._no_link_preview, **kwargs)
-                self._last_edit_texts[msg.message_id] = text
-                return result
-            except TelegramRetryAfter as e:
-                log.warning("Telegram flood, waiting %s sec", e.retry_after)
-                await asyncio.sleep(e.retry_after)
-            except TelegramServerError:
-                await asyncio.sleep(5)
+    async def _edit(self, msg: Message, text: str, **kwargs):
+        await msg.edit_text(text, link_preview_options=self._no_link_preview, **kwargs)
+
+    async def _draft(self, draft_id: int, text: str, **kwargs):
+        now = time.monotonic()
+        if now - self._last_draft_time < 0.5:
+            return
+        self._last_draft_time = now
+        try:
+            await self.bot.send_message_draft(
+                chat_id=self.chat_id, message_thread_id=self.thread_id,
+                draft_id=draft_id, text=text, **kwargs,
+            )
+        except Exception as e:
+            log.warning("draft failed: %s", e)
 
     async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, prefix: str = "", max_chunks = None, final: bool = False):
         if messages is None:
@@ -327,16 +336,7 @@ class TelegramTransport(BaseTransport):
                 if m < len(messages) - 1 or final:
                     messages[m] = await self._send(body_final, parse_mode="HTML")
                 else:
-                    try:
-                        await self.bot.send_message_draft(
-                            chat_id=self.chat_id,
-                            message_thread_id=self.thread_id,
-                            draft_id=id(messages),
-                            text=body,
-                            parse_mode="HTML",
-                        )
-                    except Exception as e:
-                        log.debug("draft failed: %s", e)
+                    await self._draft(id(messages), body, parse_mode="HTML")
 
     async def on_tool_call(self, name: str, args: dict):
         lines = "\n".join(f"{html.escape(k)}: {html.escape(str(v))}" for k, v in args.items())
