@@ -9,6 +9,7 @@
 
 import { html, useState } from '../lib.js';
 import { app } from '../app.js';
+import { useEntity } from '../common/EntityView.js';
 import { Dialog } from '../common/Dialog.js';
 import { ReferencePicker } from './ReferencePicker.js';
 
@@ -25,7 +26,10 @@ async function uploadFile(file, path, kind) {
     await fetch('/api/upload?' + params, { method: 'POST', body: form });
 }
 
-export function Gallery({ entity, path, kind, defaultPrompt }) {
+export function Gallery({ kind, defaultPrompt }) {
+    const ctx = useEntity();
+    if (!ctx?.entity?.id) return null;
+    const { entity, path } = ctx;
     const [lightbox, setLightbox] = useState(null);
     const [dragover, setDragover] = useState(false);
     const gens = Object.values(entity.generations || {}).filter(g => g.kind === kind);
@@ -56,7 +60,7 @@ export function Gallery({ entity, path, kind, defaultPrompt }) {
         />`);
     }
 
-    function newGen() { openPrompt(defaultPrompt ? defaultPrompt() : ''); }
+    function newGen() { openPrompt(defaultPrompt ? defaultPrompt(entity) : ''); }
     function remix(g) { openPrompt(g.prompt || '', g.model || lastModel); }
     function setPrimary(g) {
         app.send({ type: 'update', path, data: { primary_generation_id: g.id } });

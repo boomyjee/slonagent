@@ -1,6 +1,9 @@
-import { html } from '../lib.js';
+import { html, createContext, useContext } from '../lib.js';
 import { app } from '../app.js';
 import { FormView } from './FormView.js';
+
+const EntityCtx = createContext(null);
+export function useEntity() { return useContext(EntityCtx); }
 
 function resolve(obj, path) {
     for (const seg of path) {
@@ -10,7 +13,7 @@ function resolve(obj, path) {
     return obj ?? null;
 }
 
-export function EntityView({ path, label, back, children, extra }) {
+export function EntityView({ path, label, back, children }) {
     const isNew = path[path.length - 1] === '__new__';
     const entity = isNew ? {} : resolve(app.state.project, path);
     if (!entity) {
@@ -30,19 +33,20 @@ export function EntityView({ path, label, back, children, extra }) {
         close();
     }
 
-    return html`<${FormView}
-        heading=${isNew ? `New ${label}` : `${label}: ${entity.name || entity.title || entity.description || 'Untitled'}`}
-        entity=${entity}
-        left=${() => [
-            ...(back ? [{ label: '\u2190 Back', onClick: close }] : []),
-            ...(!isNew ? [{ label: 'Delete', cls: 'danger', onClick: del }] : []),
-        ]}
-        right=${draft => [
-            ...(!back ? [{ label: 'Cancel', onClick: close }] : []),
-            { label: 'Save', cls: 'primary', onClick: () => submit(draft) },
-        ]}
-    >
-        ${children}
-        ${!isNew && extra ? extra(entity, path) : null}
+    return html`<${EntityCtx.Provider} value=${{ entity, path }}>
+        <${FormView}
+            heading=${isNew ? `New ${label}` : `${label}: ${entity.name || entity.title || entity.description || 'Untitled'}`}
+            entity=${entity}
+            left=${() => [
+                ...(back ? [{ label: '\u2190 Back', onClick: close }] : []),
+                ...(!isNew ? [{ label: 'Delete', cls: 'danger', onClick: del }] : []),
+            ]}
+            right=${draft => [
+                ...(!back ? [{ label: 'Cancel', onClick: close }] : []),
+                { label: 'Save', cls: 'primary', onClick: () => submit(draft) },
+            ]}
+        >
+            ${children}
+        <//>
     <//>`;
 }

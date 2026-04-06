@@ -3,9 +3,8 @@ import { Text } from '../common/Form.js';
 import { Gallery } from './Gallery.js';
 
 export function FolderForm() {
-    return html`<${Text} name="name" label="Name" placeholder="Folder name" />`;
+    return html`
+        <${Text} name="name" label="Name" placeholder="Folder name" />
+        <${Gallery} kind="reference" defaultPrompt=${() => ''} />
+    `;
 }
-
-export const folderExtra = (folder, path) => html`
-    <${Gallery} entity=${folder} path=${path} kind="reference" defaultPrompt=${() => ''} />
-`;

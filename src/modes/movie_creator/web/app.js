@@ -7,12 +7,12 @@ import { Resizer } from './common/Resizer.js';
 import { SceneList } from './components/SceneList.js';
 import { CharacterList } from './components/CharacterList.js';
 import { EntityView } from './common/EntityView.js';
-import { SceneForm, sceneExtra } from './components/SceneForm.js';
-import { CharacterForm, characterExtra } from './components/CharacterForm.js';
+import { SceneForm } from './components/SceneForm.js';
+import { CharacterForm } from './components/CharacterForm.js';
 import { StoryboardView } from './components/StoryboardView.js';
-import { ShotForm, shotExtra } from './components/ShotForm.js';
+import { ShotForm } from './components/ShotForm.js';
 import { FolderList } from './components/FolderList.js';
-import { FolderForm, folderExtra } from './components/FolderForm.js';
+import { FolderForm } from './components/FolderForm.js';
 import './common/Dialog.js';
 import { Chat } from './components/Chat.js';
 
@@ -81,15 +81,15 @@ class App extends Component {
         }
 
         if (selectedPath?.length === 4 && selectedPath[2] === 'shots') {
-            centerView = html`<${EntityView} path=${selectedPath} label="Shot" back=${selectedPath.slice(0, 2)} extra=${shotExtra} key=${'shot-' + selKey}><${ShotForm} /><//>`;
+            centerView = html`<${EntityView} path=${selectedPath} label="Shot" back=${selectedPath.slice(0, 2)} key=${'shot-' + selKey}><${ShotForm} /><//>`;
         } else if (collection === 'scenes' && tab === 'storyboard') {
             centerView = html`<${StoryboardView} key=${'sb-' + selKey} />`;
         } else if (collection === 'scenes') {
-            centerView = html`<${EntityView} path=${selectedPath} label="Scene" extra=${sceneExtra} key=${'scene-' + selKey}><${SceneForm} /><//>`;
+            centerView = html`<${EntityView} path=${selectedPath} label="Scene" key=${'scene-' + selKey}><${SceneForm} /><//>`;
         } else if (collection === 'characters') {
-            centerView = html`<${EntityView} path=${selectedPath} label="Character" extra=${characterExtra} key=${'char-' + selKey}><${CharacterForm} /><//>`;
+            centerView = html`<${EntityView} path=${selectedPath} label="Character" key=${'char-' + selKey}><${CharacterForm} /><//>`;
         } else if (collection === 'library') {
-            centerView = html`<${EntityView} path=${selectedPath} label="Folder" extra=${folderExtra} key=${'folder-' + selKey}><${FolderForm} /><//>`;
+            centerView = html`<${EntityView} path=${selectedPath} label="Folder" key=${'folder-' + selKey}><${FolderForm} /><//>`;
         } else {
             centerView = html`<div class="center-empty">Select an entity</div>`;
         }
