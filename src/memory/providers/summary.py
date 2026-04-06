@@ -7,12 +7,11 @@
 Контекст инжектируется автоматически через get_context_prompt.
 Поиск по архиву — через инструмент read_history.
 """
-import asyncio, json, logging, os, httpx
+import asyncio, json, logging, os
 
 log = logging.getLogger(__name__)
 from typing import Annotated
-from agent import tool
-from openai import AsyncOpenAI
+from agent import tool, Agent
 from src.memory.providers.base import BaseProvider
 
 
@@ -22,9 +21,7 @@ class SummaryProvider(BaseProvider):
         self.memory_file: str = ""
         self.history_file: str = ""
         self.model_name = model_name
-        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
+        self._client = Agent.OpenAI(api_key, base_url)
 
     async def start(self):
         await super().start()

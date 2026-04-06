@@ -169,11 +169,8 @@ class OpenAIEmbedder:
     """Embedder через OpenAI-compatible /embeddings endpoint (OpenAI, OpenRouter, Gemini и др.)."""
 
     def __init__(self, model: str, api_key: str, base_url: str):
-        import httpx
-        from openai import OpenAI
-        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-        self._client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+        from agent import Agent
+        self._client = Agent.OpenAI(api_key, base_url, sync=True)
         self._model = model
         result = self._client.embeddings.create(model=model, input=["test"])
         self.dimension = len(result.data[0].embedding)

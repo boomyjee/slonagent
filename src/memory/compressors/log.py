@@ -18,10 +18,7 @@ import logging
 import os
 import re
 from datetime import datetime
-import httpx
-from openai import AsyncOpenAI
-
-from agent import Skill
+from agent import Skill, Agent
 from src.memory.memory import Memory
 
 # ── Observer prompts (Mastra observer-agent.ts, single-thread) ─────────────────
@@ -642,9 +639,7 @@ class LogCompressor(Skill):
         self._min_recent_turns      = min_recent_turns
         self._model_name = model_name
 
-        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
+        self._client = Agent.OpenAI(api_key, base_url)
 
     # ── Public ────────────────────────────────────────────────────────────────
 

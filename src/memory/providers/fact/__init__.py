@@ -19,10 +19,7 @@ import os
 from datetime import datetime
 from typing import Annotated
 
-import httpx
-from openai import AsyncOpenAI
-
-from agent import tool, bypass
+from agent import tool, bypass, Agent
 from src.memory.memory import Memory
 from src.memory.providers.base import BaseProvider
 from src.memory.providers.fact.retain import RetainItem, retain
@@ -78,9 +75,7 @@ class FactProvider(BaseProvider):
         self._custom_instructions = custom_instructions
         self._rerank_model        = rerank_model
 
-        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self._llm = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
+        self._llm = Agent.OpenAI(api_key, base_url)
 
         self._embedding_model = embedding_model
         self.storage: Storage | None = None

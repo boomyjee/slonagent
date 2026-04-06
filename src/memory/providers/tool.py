@@ -8,9 +8,7 @@
 import asyncio, json, logging, os
 from datetime import datetime
 
-import httpx
-from openai import AsyncOpenAI
-
+from agent import Agent
 from src.memory.providers.base import BaseProvider
 from src.memory.memory import Memory
 
@@ -43,9 +41,7 @@ class ToolProvider(BaseProvider):
         self._tool_stats_file: str = ""
         self._tool_stats: dict = {}
 
-        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
+        self._client = Agent.OpenAI(api_key, base_url)
 
     async def start(self):
         await super().start()

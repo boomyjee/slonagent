@@ -14,13 +14,11 @@ import asyncio, json, logging, os, re, uuid
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-import httpx
 import lancedb
 import numpy as np
 import pyarrow as pa
-from openai import AsyncOpenAI
 
-from agent import tool
+from agent import tool, Agent
 from src.memory.providers.base import BaseProvider
 from src.memory.memory import Memory
 
@@ -126,9 +124,7 @@ class SemanticProvider(BaseProvider):
         self._table = None
         self._embed = None
 
-        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
+        self._client = Agent.OpenAI(api_key, base_url)
 
     async def start(self):
         await super().start()

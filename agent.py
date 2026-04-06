@@ -1,10 +1,9 @@
 import asyncio, base64, io, json, os, sys, inspect, logging, weakref
-import httpx
 import numpy as np
 import soundfile as sf
 from datetime import datetime
 from typing import Annotated, get_type_hints, get_args, get_origin
-from openai import AsyncOpenAI
+import httpx
 from src.memory.memory import Memory
 
 
@@ -175,6 +174,19 @@ class AgentSkill(Skill):
 
 
 class Agent:
+    @staticmethod
+    def OpenAI(api_key, base_url, sync=False):
+        from openai import AsyncOpenAI, OpenAI
+        from urllib.parse import urlparse
+        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+        if proxy:
+            no_proxy = os.environ.get("NO_PROXY", "")
+            host = urlparse(base_url).hostname or ""
+            if any(h.strip() == host for h in no_proxy.split(",")):
+                proxy = None
+        http = httpx.Client(proxy=proxy, timeout=120.0) if sync else httpx.AsyncClient(proxy=proxy, timeout=120.0)
+        return (OpenAI if sync else AsyncOpenAI)(api_key=api_key, base_url=base_url, http_client=http, max_retries=0)
+
     @classmethod
     def from_config(cls, cfg: dict, **overrides):
         import importlib
@@ -232,15 +244,8 @@ class Agent:
         if transport:
             transport.set_agent(self)
 
-        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-        http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
-        self.transcription_client = AsyncOpenAI(
-            api_key=transcription_api_key or api_key,
-            base_url=transcription_base_url or base_url,
-            http_client=http_client,
-            max_retries=0,
-        )
+        self.client = Agent.OpenAI(api_key, base_url)
+        self.transcription_client = Agent.OpenAI(transcription_api_key or api_key, transcription_base_url or base_url)
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
         self._tool_stop_event = asyncio.Event()
