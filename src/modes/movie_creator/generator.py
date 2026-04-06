@@ -1,5 +1,4 @@
-"""Media generation queue + worker. Handles image (and later video) generations
-attached to any owner entity that has a `generations` dict slot."""
+"""Media generation. Each generation runs as an independent asyncio task."""
 import asyncio
 import base64
 import logging
@@ -13,19 +12,11 @@ log = logging.getLogger(__name__)
 
 
 class Generator:
-    """Background worker for image/video generation.
-
-    Bound to a MovieServer so it can reach the project tree, save to disk,
-    and broadcast updates to the UI without extra callback plumbing.
-    """
-
     def __init__(self, server, api_key: str):
         self.server = server
         self.api_key = api_key
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._worker: asyncio.Task | None = None
 
-    async def enqueue(self, owner, kind: str, prompt: str, media_type: str = "image") -> str:
+    async def enqueue(self, owner, kind: str, prompt: str, media_type: str = "image", references: list = None) -> str:
         gen = Generation(
             id=self.server.project.allocate_id(),
             kind=kind,
@@ -34,39 +25,21 @@ class Generator:
         )
         owner.generations[gen.id] = gen
         await self.server.save()
-
-        await self._queue.put((owner, gen.id))
-        if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._run())
+        asyncio.create_task(self._process(owner, gen, references or []))
         return gen.id
 
-    async def _run(self):
-        while True:
-            owner, gen_id = await self._queue.get()
-            try:
-                await self._process(owner, gen_id)
-            except Exception:
-                log.exception("[movie] generator worker error")
-
-    async def _process(self, owner, gen_id: str):
-        gen = owner.generations.get(gen_id)
-        if not gen:
-            return
-        gen.status = "generating"
-        await self.server.save()
-
+    async def _process(self, owner, gen, refs: list):
         try:
             if gen.media_type == "image":
-                data, ext = await self._gen_image(gen.prompt), "png"
+                data, ext = await self._gen_image(gen.prompt, refs), "png"
             else:
                 raise NotImplementedError(f"media_type={gen.media_type}")
 
-            filename = f"gen_{gen_id}.{ext}"
+            filename = f"gen_{gen.id}.{ext}"
             self.server.assets_dir.mkdir(parents=True, exist_ok=True)
             (self.server.assets_dir / filename).write_bytes(data)
             gen.file = filename
             gen.status = "done"
-            # First successful generation becomes primary automatically
             if hasattr(owner, "primary_generation_id") and not owner.primary_generation_id:
                 owner.primary_generation_id = gen.id
         except Exception as e:
@@ -76,7 +49,15 @@ class Generator:
 
         await self.server.save()
 
-    async def _gen_image(self, prompt: str) -> bytes:
+    async def _gen_image(self, prompt: str, refs: list) -> bytes:
+        parts = []
+        for ref_path in refs:
+            if ref_path.exists():
+                mime = "image/png" if ref_path.suffix == ".png" else "image/jpeg"
+                img_data = base64.b64encode(ref_path.read_bytes()).decode()
+                parts.append({"inlineData": {"mimeType": mime, "data": img_data}})
+        parts.append({"text": prompt})
+
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"gemini-3.1-flash-image-preview:generateContent?key={self.api_key}"
@@ -85,7 +66,7 @@ class Generator:
         proxies = {"http": proxy, "https": proxy} if proxy else None
         resp = await asyncio.to_thread(
             requests.post, url,
-            json={"contents": [{"parts": [{"text": prompt}]}]},
+            json={"contents": [{"parts": parts}]},
             proxies=proxies, timeout=300,
         )
         if resp.status_code != 200:

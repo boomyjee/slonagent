@@ -18,7 +18,7 @@ class Generation:
     media_type: str = "image"
     prompt: str = ""
     file: str = ""
-    status: str = "queued"
+    status: str = "generating"
     error: str = ""
 
 

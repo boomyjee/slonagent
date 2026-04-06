@@ -131,11 +131,14 @@ class MovieServer:
         elif t == "generate":
             owner = self.project.resolve(path)
             if owner is not None and not isinstance(owner, dict):
+                ref_files = msg.get("references") or []
+                ref_paths = [self.assets_dir / f for f in ref_files]
                 asyncio.create_task(self.generator.enqueue(
                     owner,
                     msg.get("kind", "portrait"),
                     msg.get("prompt", ""),
                     msg.get("media_type", "image"),
+                    references=ref_paths,
                 ))
 
         elif t == "approval_response":

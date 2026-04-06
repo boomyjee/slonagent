@@ -10,8 +10,7 @@
 import { html, useState } from '../lib.js';
 import { app } from '../app.js';
 import { Dialog } from '../common/Dialog.js';
-import { FormView } from '../common/FormView.js';
-import { Textarea } from '../common/Form.js';
+import { ReferencePicker } from './ReferencePicker.js';
 
 async function uploadFile(file, path, kind) {
     const form = new FormData();
@@ -45,17 +44,9 @@ export function Gallery({ entity, path, kind, defaultPrompt }) {
 
     function openPrompt(initial) {
         const title = `Generate: ${entity.name || entity.title || entity.description || 'item'}`;
-        Dialog.open(html`<${FormView}
-            heading=${title}
-            entity=${{ prompt: initial }}
-            right=${draft => [
-                { label: 'Cancel', onClick: () => Dialog.close() },
-                { label: 'Generate', cls: 'primary', onClick: () => {
-                    app.send({ type: 'generate', path, kind, prompt: draft.prompt });
-                    Dialog.close();
-                }},
-            ]}
-        ><${Textarea} name="prompt" label="Prompt" placeholder="Describe the image..." grow /><//>`);
+        Dialog.open(html`<${GenerateDialog}
+            title=${title} initial=${initial} path=${path} kind=${kind}
+        />`);
     }
 
     function newGen() { openPrompt(defaultPrompt ? defaultPrompt() : ''); }
@@ -127,6 +118,42 @@ function Tile({ gen, isPrimary, onZoom, onSetPrimary, onRemix, onDelete }) {
                     : null}
                 <button class="btn btn-sm" onClick=${onRemix}>Remix</button>
                 <button class="btn btn-sm btn-danger" onClick=${onDelete}>\u2715</button>
+            </div>
+        </div>
+    `;
+}
+
+function GenerateDialog({ title, initial, path, kind }) {
+    const [prompt, setPrompt] = useState(initial || '');
+    const [refs, setRefs] = useState([]);
+
+    function toggle(file) {
+        setRefs(r => r.includes(file) ? r.filter(f => f !== file) : [...r, file]);
+    }
+
+    function generate() {
+        app.send({ type: 'generate', path, kind, prompt, references: refs });
+        Dialog.close();
+    }
+
+    return html`
+        <div class="editor generate-dialog">
+            <div class="editor-header"><h2>${title}</h2></div>
+            <div class="editor-body">
+                <div class="field grow">
+                    <label>Prompt</label>
+                    <textarea
+                        value=${prompt}
+                        onInput=${e => setPrompt(e.target.value)}
+                        placeholder="Describe the image..."
+                    ></textarea>
+                </div>
+                <${ReferencePicker} selected=${refs} onToggle=${toggle} />
+            </div>
+            <div class="editor-footer">
+                <button class="btn" onClick=${() => Dialog.close()}>Cancel</button>
+                <div class="spacer"></div>
+                <button class="btn btn-primary" onClick=${generate}>Generate</button>
             </div>
         </div>
     `;
