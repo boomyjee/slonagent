@@ -137,7 +137,7 @@ class MovieServer:
                     owner,
                     msg.get("kind", "portrait"),
                     msg.get("prompt", ""),
-                    msg.get("media_type", "image"),
+                    model=msg.get("model", "gemini-image"),
                     references=ref_paths,
                 ))
 

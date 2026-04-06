@@ -12,6 +12,12 @@ import { app } from '../app.js';
 import { Dialog } from '../common/Dialog.js';
 import { ReferencePicker } from './ReferencePicker.js';
 
+const MODELS = [
+    { id: 'gemini-image', label: 'Nano Banana 2' },
+    { id: 'seedream-v5', label: 'Seedream 5.0' },
+];
+let lastModel = 'gemini-image';
+
 async function uploadFile(file, path, kind) {
     const form = new FormData();
     form.append('file', file);
@@ -43,15 +49,15 @@ export function Gallery({ entity, path, kind, defaultPrompt }) {
         if (files.length) { e.preventDefault(); handleFiles(files); }
     }
 
-    function openPrompt(initial) {
+    function openPrompt(initial, model) {
         const title = `Generate: ${entity.name || entity.title || entity.description || 'item'}`;
         Dialog.open(html`<${GenerateDialog}
-            title=${title} initial=${initial} path=${path} kind=${kind}
+            title=${title} initial=${initial} initialModel=${model || lastModel} path=${path} kind=${kind}
         />`);
     }
 
     function newGen() { openPrompt(defaultPrompt ? defaultPrompt() : ''); }
-    function remix(g) { openPrompt(g.prompt || ''); }
+    function remix(g) { openPrompt(g.prompt || '', g.model || lastModel); }
     function setPrimary(g) {
         app.send({ type: 'update', path, data: { primary_generation_id: g.id } });
     }
@@ -113,7 +119,7 @@ function Tile({ gen, isPrimary, canSetPrimary, onZoom, onSetPrimary, onRemix, on
                         : html`<div class=${'gen-status ' + gen.status}>${gen.status}</div>`}
                 ${isPrimary ? html`<div class="gen-primary-badge">primary</div>` : null}
             </div>
-            <div class="gen-prompt" title=${gen.prompt}>${gen.prompt}</div>
+            <div class="gen-prompt" title=${gen.prompt}>${gen.model ? `[${gen.model}] ` : ''}${gen.prompt}</div>
             <div class="gen-actions">
                 ${canSetPrimary && done && !isPrimary
                     ? html`<button class="btn btn-sm" onClick=${onSetPrimary}>Set primary</button>`
@@ -125,8 +131,9 @@ function Tile({ gen, isPrimary, canSetPrimary, onZoom, onSetPrimary, onRemix, on
     `;
 }
 
-function GenerateDialog({ title, initial, path, kind }) {
+function GenerateDialog({ title, initial, initialModel, path, kind }) {
     const [prompt, setPrompt] = useState(initial || '');
+    const [model, setModel] = useState(initialModel || lastModel);
     const [refs, setRefs] = useState([]);
 
     function toggle(file) {
@@ -134,7 +141,8 @@ function GenerateDialog({ title, initial, path, kind }) {
     }
 
     function generate() {
-        app.send({ type: 'generate', path, kind, prompt, references: refs });
+        lastModel = model;
+        app.send({ type: 'generate', path, kind, prompt, model, references: refs });
         Dialog.close();
     }
 
@@ -142,12 +150,18 @@ function GenerateDialog({ title, initial, path, kind }) {
         <div class="editor generate-dialog">
             <div class="editor-header"><h2>${title}</h2></div>
             <div class="editor-body">
+                <div class="field">
+                    <label>Model</label>
+                    <select value=${model} onChange=${e => setModel(e.target.value)}>
+                        ${MODELS.map(m => html`<option value=${m.id}>${m.label}</option>`)}
+                    </select>
+                </div>
                 <div class="field grow">
                     <label>Prompt</label>
                     <textarea
                         value=${prompt}
                         onInput=${e => setPrompt(e.target.value)}
-                        placeholder="Describe the image..."
+                        placeholder="Describe the image or video..."
                     ></textarea>
                 </div>
                 <${ReferencePicker} selected=${refs} onToggle=${toggle} />

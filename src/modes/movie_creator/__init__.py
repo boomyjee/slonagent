@@ -18,10 +18,11 @@ log = logging.getLogger(__name__)
 class MovieCreatorSkill(Skill):
     """Entry point skill — registered in .config.json."""
 
-    def __init__(self, port: int = 3210, api_key: str = ""):
+    def __init__(self, port: int = 3210, gemini_key: str = "", muapi_key: str = ""):
         super().__init__()
         self._port = port
-        self._api_key = api_key
+        self._gemini_key = gemini_key
+        self._muapi_key = muapi_key
 
     @tool(
         "Запустить режим создания AI-короткометражки. "
@@ -40,7 +41,7 @@ class MovieCreatorSkill(Skill):
 
         project_dir = Path(sub.memory.memory_dir) / "project"
         server = MovieServer(self._port, project_dir)
-        server.generator = Generator(server, self._api_key)
+        server.generator = Generator(server, self._gemini_key, self._muapi_key)
         await server.start()
 
         multi = MultiTransport([self.agent.transport, WebTransport(server)])

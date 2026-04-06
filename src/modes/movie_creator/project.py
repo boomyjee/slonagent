@@ -16,6 +16,7 @@ class Generation:
     id: str = ""
     kind: str = ""
     media_type: str = "image"
+    model: str = ""
     prompt: str = ""
     file: str = ""
     status: str = "generating"
