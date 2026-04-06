@@ -18,7 +18,7 @@ class HelloSubagentSkill(Skill):
                 super().__init__()
                 self.result = ""
 
-            async def send_message(self, text: str, stream_id=None):
+            async def send_message(self, text: str, stream_id=None, final: bool = True):
                 self.result = text
                 return stream_id
 
@@ -55,7 +55,7 @@ class SubAgentSkill(Skill):
                 super().__init__()
                 self.result = ""
 
-            async def send_message(self, text: str, stream_id=None):
+            async def send_message(self, text: str, stream_id=None, final: bool = True):
                 self.result = text
                 return stream_id
 

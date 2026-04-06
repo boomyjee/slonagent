@@ -52,7 +52,7 @@ class CapturingTransport(BaseTransport):
         self.tool_calls: list[tuple[str, dict]] = []
         self.tool_results: list[tuple[str, object]] = []
 
-    async def send_message(self, text: str, stream_id=None):
+    async def send_message(self, text: str, stream_id=None, final: bool = True):
         if stream_id is None:
             stream_id = len(self.messages)
             self.messages.append("")

@@ -9,7 +9,7 @@ class WebTransport(BaseTransport):
         super().__init__()
         self.server = server
 
-    async def send_message(self, text: str, stream_id=None):
+    async def send_message(self, text: str, stream_id=None, final: bool = True):
         await self.server.send("message", role="assistant", text=text, stream_id=stream_id)
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):

@@ -326,7 +326,7 @@ class TelegramTransport(BaseTransport):
         self._queue.put_nowait({"kind": "edit", "msg": msg, "text": text, "kwargs": kwargs, "future": future})
         return await future
     
-    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, collapsed: bool = True, prefix: str = "", max_chunks = None):
+    async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, final: bool = False, prefix: str = "", max_chunks = None):
         if messages is None:
             messages = []
         if expandable:
@@ -346,7 +346,7 @@ class TelegramTransport(BaseTransport):
                 raw_chunks[max_chunks-1] += "..."
 
         if expandable:
-            tag = "blockquote expandable" if collapsed else "blockquote"
+            tag = "blockquote expandable" if final else "blockquote"
             bodies = [f"<{tag}>{escaped_prefix}{c}</blockquote>" for c in raw_chunks]
         else:
             bodies = raw_chunks
@@ -389,9 +389,9 @@ class TelegramTransport(BaseTransport):
         except Exception:
             logging.debug("[transport] Не удалось обновить tool message", exc_info=True)
 
-    async def send_message(self, text: str, stream_id=None):
+    async def send_message(self, text: str, stream_id=None, final: bool = True):
         messages = self._stream_messages.setdefault(stream_id, []) if stream_id else None
-        await self._answer((text or "").strip() or "[…]", messages=messages)
+        await self._answer((text or "").strip() or "[…]", messages=messages, final=final)
 
     async def inject_message(self, text: str):
         sent = await self._send("[→]" + text)
@@ -402,7 +402,7 @@ class TelegramTransport(BaseTransport):
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
         messages = self._stream_messages.setdefault(stream_id, []) if stream_id else None
-        await self._answer(text, expandable=True, collapsed=final, prefix="🧠 ", messages=messages)
+        await self._answer(text, expandable=True, final=final, prefix="🧠 ", messages=messages)
 
     async def send_code(self, lang: str, code: str):
         await self._answer(f"```{lang}\n{code}\n```")

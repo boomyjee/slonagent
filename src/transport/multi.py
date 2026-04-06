@@ -16,9 +16,9 @@ class MultiTransport(BaseTransport):
     def set_agent(self, agent):
         self.agent = agent
 
-    async def send_message(self, text, stream_id=None):
+    async def send_message(self, text, stream_id=None, final=True):
         for t in self.transports:
-            await t.send_message(text, stream_id)
+            await t.send_message(text, stream_id, final=final)
 
     async def send_thinking(self, text, stream_id=None, final=False):
         for t in self.transports:

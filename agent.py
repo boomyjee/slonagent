@@ -406,7 +406,7 @@ class Agent:
                             content = delta.content.removeprefix("</thought>")
                             if content:
                                 text += content
-                                await self.transport.send_message(text, stream_id)
+                                await self.transport.send_message(text, stream_id, final=False)
                     # OpenAI o1: reasoning_content, OpenRouter: reasoning
                     thought_extra = delta_extra.get("reasoning_content") or delta_extra.get("reasoning")
                     if thought_extra and isinstance(thought_extra, str):
@@ -420,6 +420,8 @@ class Agent:
 
                 if thinking_text:
                     await self.transport.send_thinking(thinking_text, thinking_id, final=True)
+                if text and stream_id:
+                    await self.transport.send_message(text, stream_id, final=True)
 
                 finish_reason = chunk.choices[0].finish_reason if chunk and chunk.choices else None
                 if finish_reason and finish_reason not in ("stop", "tool_calls"):

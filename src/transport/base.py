@@ -8,7 +8,7 @@ class BaseTransport:
     def get_skill(self):
         return None
 
-    async def send_message(self, text: str, stream_id=None):
+    async def send_message(self, text: str, stream_id=None, final: bool = True):
         pass
 
     async def send_system_prompt(self, text: str):

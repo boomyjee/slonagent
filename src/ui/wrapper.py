@@ -22,8 +22,8 @@ def UITransportWrapper(transport_class, dashboard: Dashboard):
                 self.dashboard.add_chat("user", " ".join(texts), agent_id=self.agent_id)
             return await super().process_message(content_parts, user_message_id)
 
-        async def send_message(self, text: str, stream_id=None):
-            await super().send_message(text, stream_id)
+        async def send_message(self, text: str, stream_id=None, final: bool = True):
+            await super().send_message(text, stream_id, final=final)
             self.dashboard.add_chat("assistant", text, stream_id, agent_id=self.agent_id)
 
         async def send_thinking(self, text: str, stream_id=None, final: bool = False):

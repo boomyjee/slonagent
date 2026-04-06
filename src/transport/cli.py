@@ -15,7 +15,7 @@ class CliTransport(BaseTransport):
         if stream_id:
             self._printed[stream_id] = len(text)
 
-    async def send_message(self, text: str, stream_id=None):
+    async def send_message(self, text: str, stream_id=None, final: bool = True):
         self._stream_print(text, stream_id, "Агент: ")
 
     async def send_system_prompt(self, text: str):

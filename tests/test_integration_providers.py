@@ -50,7 +50,7 @@ class CapturingTransport(BaseTransport):
         super().__init__()
         self.messages: list[str] = []
 
-    async def send_message(self, text: str, stream_id=None):
+    async def send_message(self, text: str, stream_id=None, final: bool = True):
         if stream_id is None:
             stream_id = len(self.messages)
             self.messages.append("")
