@@ -24,11 +24,10 @@ class App extends Component {
             project: { title: '', scenes: {}, characters: {} },
             tab: 'screenplay',
             selected: { scenes: null, characters: null },
-            messages: [],
         };
-        this._streamEls = {};
         this._sidebarRef = null;
         this._chatRef = null;
+        this._chat = null;
     }
 
     componentDidMount() {
@@ -43,36 +42,13 @@ class App extends Component {
     }
 
     handleMessage(msg) {
-        if (msg.type === 'project_updated') {
+        const t = msg.type;
+        if (t === 'project_updated')
             this.setState({ project: msg.project });
-        } else if (msg.type === 'message') {
-            this.setState(({ messages }) => {
-                if (msg.stream_id != null && this._streamEls[msg.stream_id] != null) {
-                    const idx = this._streamEls[msg.stream_id];
-                    const next = [...messages];
-                    next[idx] = { ...next[idx], text: msg.text, final: msg.final };
-                    return { messages: next };
-                }
-                const next = [...messages, { kind: 'msg', role: msg.role, text: msg.text, stream_id: msg.stream_id, final: msg.final }];
-                if (msg.stream_id != null) this._streamEls[msg.stream_id] = next.length - 1;
-                return { messages: next };
-            });
-        } else if (msg.type === 'tool_call') {
-            this.setState(({ messages }) => ({ messages: [...messages, { kind: 'tool', name: msg.name }] }));
-        } else if (msg.type === 'processing') {
-            this.setState(({ messages }) => ({ messages: [...messages, { kind: 'processing' }] }));
-        } else if (msg.type === 'processing_done') {
-            this.setState(({ messages }) => ({ messages: messages.filter(m => m.kind !== 'processing') }));
-        } else if (msg.type === 'approval_request') {
-            this.setState(({ messages }) => ({
-                messages: [...messages, {
-                    kind: 'approval',
-                    approvalKind: msg.kind,
-                    data: msg.data,
-                    resolved: false,
-                }],
-            }));
-        }
+        else if (t === 'message' || t === 'tool_call' || t === 'processing' || t === 'processing_done' || t === 'approval_request')
+            this._chat?.handleMessage(msg);
+        else
+            console.warn('Unknown WS message type:', t, msg);
     }
 
     selectEntity(collection, id) {
@@ -126,7 +102,7 @@ class App extends Component {
                 <${Resizer} targetRef=${{ current: this._sidebarRef }} side="left" />
                 <div class="center">${centerView}</div>
                 <${Resizer} targetRef=${{ current: this._chatRef }} side="right" />
-                <${Chat} rootRef=${el => this._chatRef = el} />
+                <${Chat} ref=${c => this._chat = c} rootRef=${el => this._chatRef = el} />
             </div>
         `;
     }
