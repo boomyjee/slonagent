@@ -18,6 +18,7 @@ class Generation:
     media_type: str = "image"
     model: str = ""
     prompt: str = ""
+    references: list[str] = field(default_factory=list)
     file: str = ""
     status: str = "generating"
     error: str = ""

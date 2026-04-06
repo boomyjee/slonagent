@@ -40,15 +40,16 @@ export function StoryboardView() {
                     ? html`<div class="center-empty">No shots yet</div>`
                     : html`<div class="shot-grid">
                         ${shots.map((shot, i) => html`
-                            <${ShotCard} key=${shot.id} scene=${scene} shot=${shot} index=${i} onZoom=${setLightbox} />
+                            <${ShotCard} key=${shot.id} scene=${scene} shot=${shot} index=${i}
+                                onZoom=${src => setLightbox(src)} />
                         `)}
                     </div>`}
-                ${lightbox ? html`
-                    <div class="lightbox" onClick=${() => setLightbox(null)}>
-                        <img src=${lightbox} onClick=${e => e.stopPropagation()} />
-                    </div>
-                ` : null}
             </div>
+            ${lightbox ? html`
+                <div class="lightbox" onClick=${() => setLightbox(null)}>
+                    <img src=${lightbox} onClick=${e => e.stopPropagation()} />
+                </div>
+            ` : null}
         </div>
     `;
 }
@@ -56,9 +57,13 @@ export function StoryboardView() {
 function ShotCard({ scene, shot, index, onZoom }) {
     const primary = shot.generations?.[shot.primary_generation_id];
     const thumb = primary?.file ? `/api/asset/${primary.file}` : null;
-    const preview = (shot.description || '').split('\n')[0] || '(empty)';
+    const description = shot.description || '(empty)';
 
-    function select(e) {
+    function zoom() {
+        if (thumb) onZoom(thumb);
+    }
+
+    function edit(e) {
         e.stopPropagation();
         app.select(['scenes', scene.id, 'shots', shot.id]);
     }
@@ -70,15 +75,18 @@ function ShotCard({ scene, shot, index, onZoom }) {
     }
 
     return html`
-        <div class="shot-card" onClick=${select}>
-            <div class="shot-thumb" onClick=${e => { if (thumb) { e.stopPropagation(); onZoom(thumb); } }}>
+        <div class="shot-card" onClick=${zoom}>
+            <div class="shot-thumb">
                 ${thumb ? html`<img src=${thumb} />` : null}
-                <span class="shot-num">${index + 1}</span>
             </div>
             <div class="shot-compact-footer">
-                <div class="shot-preview">${preview}</div>
-                <button class="btn-icon btn-danger" onClick=${del}>\u2715</button>
+                <div class="shot-preview">${index + 1}. ${description}</div>
+                <div class="shot-footer-actions">
+                    <button class="shot-btn" onClick=${edit}>\u270E</button>
+                    <button class="shot-btn shot-btn-danger" onClick=${del}>\u2715</button>
+                </div>
             </div>
+            <div class="shot-desc-hover">${index + 1}. ${description}</div>
         </div>
     `;
 }

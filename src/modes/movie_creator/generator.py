@@ -24,12 +24,14 @@ class Generator:
 
     async def enqueue(self, owner, kind: str, prompt: str, model: str = "gemini-image",
                       references: list = None) -> str:
+        ref_files = [r.name for r in (references or []) if r.exists()]
         gen = Generation(
             id=self.server.project.allocate_id(),
             kind=kind,
             media_type="image",
             model=model,
             prompt=prompt,
+            references=ref_files,
         )
         owner.generations[gen.id] = gen
         await self.server.save()
@@ -83,10 +85,18 @@ class Generator:
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Gemini API {resp.status_code}: {resp.text[:200]}")
-        for cand in resp.json().get("candidates", []):
+        body = resp.json()
+        for cand in body.get("candidates", []):
             for part in cand.get("content", {}).get("parts", []):
                 if "inlineData" in part:
                     return base64.b64decode(part["inlineData"]["data"])
+        # Log what we got instead
+        text_parts = []
+        for cand in body.get("candidates", []):
+            for part in cand.get("content", {}).get("parts", []):
+                if "text" in part:
+                    text_parts.append(part["text"])
+        log.warning("[movie] Gemini returned text instead of image: %s", " ".join(text_parts)[:300])
         raise RuntimeError("No image in Gemini response")
 
     # -- muapi.ai --

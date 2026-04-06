@@ -61,7 +61,9 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .gen-status.failed { color: var(--red); }
 .gen-primary-badge { position: absolute; top: 4px; right: 4px; background: var(--accent); color: #1e1e2e; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600; text-transform: uppercase; }
 .gen-prompt { font-size: 11px; color: var(--text-dim); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.gen-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.gen-tile .gen-model { display: none; position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.6); color: #fff; font-size: 10px; padding: 2px 6px; border-radius: 4px; pointer-events: none; }
+.gen-tile:hover .gen-model { display: block; }
+.gen-actions { display: flex; gap: 4px; flex-wrap: wrap; margin-top: auto; }
 .gen-actions .btn { flex: 1; padding: 3px 6px; font-size: 11px; }
 .gen-actions .btn-danger { flex: 0 0 auto; }
 
@@ -137,14 +139,20 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .shot-card { padding: 0; gap: 0; overflow: hidden; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .shot-card .shot-thumb { width: 100%; height: 0; padding-bottom: 56.25%; position: relative; background: var(--surface3); }
 .shot-card .shot-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.shot-card .shot-thumb .shot-num { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; color: var(--text-dim); z-index: 1; pointer-events: none; }
-.shot-card .shot-thumb img ~ .shot-num { opacity: 0; transition: opacity 0.15s; }
-.shot-card .shot-thumb:hover img ~ .shot-num { opacity: 1; background: rgba(0,0,0,0.35); }
-.shot-card .shot-compact-footer { display: flex; align-items: center; padding: 4px 8px; gap: 4px; }
-.shot-card .shot-preview { flex: 1; font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shot-card .btn-icon { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 2px 4px; opacity: 0; transition: opacity 0.15s; }
-.shot-card:hover .btn-icon { opacity: 1; }
-.shot-card .btn-icon.btn-danger:hover { color: var(--danger); }
+.shot-card { position: relative; }
+.shot-card .shot-compact-footer { display: flex; align-items: center; padding: 4px 6px; gap: 4px; }
+.shot-card .shot-preview { flex: 1; font-size: 10px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shot-card .shot-footer-actions { display: none; }
+.shot-card:hover .shot-preview { display: none; }
+.shot-card:hover .shot-compact-footer { padding: 0; gap: 0; }
+.shot-card:hover .shot-footer-actions { display: flex; width: 100%; }
+.shot-btn { width: 50%; padding: 4px 0; font-size: 10px; background: var(--surface3); color: var(--text-dim); border: none; cursor: pointer; font-family: inherit; }
+.shot-btn + .shot-btn { border-left: 1px solid var(--border); }
+.shot-btn:hover { color: var(--text); }
+.shot-btn-danger:hover { color: var(--red); }
+.shot-card .shot-desc-hover { display: none; position: absolute; inset: 0; background: rgba(30,30,46,0.9); color: var(--text-dim); font-size: 11px; padding: 8px; line-height: 1.4; overflow-y: auto; pointer-events: none; }
+.shot-card:hover .shot-desc-hover { display: block; }
+.shot-card:hover .shot-compact-footer { position: relative; z-index: 1; }
 
 .resizer { width: 4px; cursor: col-resize; flex-shrink: 0; }
 .resizer:hover { background: var(--accent); }

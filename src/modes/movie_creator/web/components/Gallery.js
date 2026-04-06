@@ -53,15 +53,16 @@ export function Gallery({ kind, defaultPrompt }) {
         if (files.length) { e.preventDefault(); handleFiles(files); }
     }
 
-    function openPrompt(initial, model) {
+    function openPrompt(initial, model, initialRefs) {
         const title = `Generate: ${entity.name || entity.title || entity.description || 'item'}`;
         Dialog.open(html`<${GenerateDialog}
-            title=${title} initial=${initial} initialModel=${model || lastModel} path=${path} kind=${kind}
+            title=${title} initial=${initial} initialModel=${model || lastModel}
+            initialRefs=${initialRefs || []} path=${path} kind=${kind}
         />`);
     }
 
     function newGen() { openPrompt(defaultPrompt ? defaultPrompt(entity) : ''); }
-    function remix(g) { openPrompt(g.prompt || '', g.model || lastModel); }
+    function remix(g) { openPrompt(g.prompt || '', g.model || lastModel, g.references || []); }
     function setPrimary(g) {
         app.send({ type: 'update', path, data: { primary_generation_id: g.id } });
     }
@@ -122,8 +123,9 @@ function Tile({ gen, isPrimary, canSetPrimary, onZoom, onSetPrimary, onRemix, on
                         ? html`<div class="gen-status failed" title=${gen.error || ''}>failed</div>`
                         : html`<div class=${'gen-status ' + gen.status}>${gen.status}</div>`}
                 ${isPrimary ? html`<div class="gen-primary-badge">primary</div>` : null}
+                ${gen.model ? html`<div class="gen-model">${gen.model}</div>` : null}
             </div>
-            <div class="gen-prompt" title=${gen.prompt}>${gen.model ? `[${gen.model}] ` : ''}${gen.prompt}</div>
+            <div class="gen-prompt" title=${gen.prompt}>${gen.prompt}</div>
             <div class="gen-actions">
                 ${canSetPrimary && done && !isPrimary
                     ? html`<button class="btn btn-sm" onClick=${onSetPrimary}>Set primary</button>`
@@ -135,10 +137,10 @@ function Tile({ gen, isPrimary, canSetPrimary, onZoom, onSetPrimary, onRemix, on
     `;
 }
 
-function GenerateDialog({ title, initial, initialModel, path, kind }) {
+function GenerateDialog({ title, initial, initialModel, initialRefs, path, kind }) {
     const [prompt, setPrompt] = useState(initial || '');
     const [model, setModel] = useState(initialModel || lastModel);
-    const [refs, setRefs] = useState([]);
+    const [refs, setRefs] = useState(initialRefs || []);
 
     function toggle(file) {
         setRefs(r => r.includes(file) ? r.filter(f => f !== file) : [...r, file]);

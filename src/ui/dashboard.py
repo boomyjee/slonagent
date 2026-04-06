@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import webbrowser
@@ -174,4 +175,5 @@ class Dashboard:
         )
         server = uvicorn.Server(config)
         server.install_signal_handlers = lambda: None
+        server.capture_signals = lambda: contextlib.nullcontext()
         await server.serve()
