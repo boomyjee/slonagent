@@ -8,10 +8,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 from dacite import from_dict
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
 
-from src.modes.movie_creator.project import Project
+from src.modes.movie_creator.project import Project, Generation
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +77,32 @@ class MovieServer:
             if not full.exists():
                 return {"error": "Not found"}, 404
             return FileResponse(full)
+
+        @self.app.post("/api/upload")
+        async def upload(file: UploadFile, path: str = "", kind: str = ""):
+            segments = [s for s in path.split("/") if s]
+            owner = self.project.resolve(segments)
+            log.info("[movie] upload: path=%s kind=%s segments=%s owner=%s", path, kind, segments, type(owner).__name__ if owner else None)
+            if owner is None or isinstance(owner, dict) or not hasattr(owner, 'generations'):
+                log.warning("[movie] upload rejected: owner=%s", owner)
+                return {"error": "invalid path"}
+            data = await file.read()
+            ext = file.filename.rsplit(".", 1)[-1] if "." in file.filename else "png"
+            gen = Generation(
+                id=self.project.allocate_id(),
+                kind=kind,
+                media_type="image",
+                prompt="(uploaded)",
+                status="done",
+            )
+            gen.file = f"gen_{gen.id}.{ext}"
+            self.assets_dir.mkdir(parents=True, exist_ok=True)
+            (self.assets_dir / gen.file).write_bytes(data)
+            owner.generations[gen.id] = gen
+            if hasattr(owner, "primary_generation_id") and not owner.primary_generation_id:
+                owner.primary_generation_id = gen.id
+            await self.save()
+            return {"id": gen.id}
 
         @self.app.websocket("/ws")
         async def websocket_endpoint(ws: WebSocket):

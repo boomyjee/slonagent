@@ -29,9 +29,9 @@ export class Chat extends Component {
         } else if (msg.type === 'processing_done') {
             this.setState(({ messages }) => ({ messages: messages.filter(m => m.kind !== 'processing') }));
         } else if (msg.type === 'approval_request') {
-            this.setState(({ messages }) => ({
-                messages: [...messages, { kind: 'approval', approvalKind: msg.kind, data: msg.data, resolved: false }],
-            }));
+            const m = { kind: 'approval', approvalKind: msg.kind, data: msg.data, resolved: false };
+            this.setState(({ messages }) => ({ messages: [...messages, m] }));
+            ApproveDialog.open(m);
         }
     }
 

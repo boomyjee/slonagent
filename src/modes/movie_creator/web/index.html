@@ -40,7 +40,9 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .entity-item .thumb { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: var(--surface3); }
 
 /* Generation gallery */
-.gen-gallery { display: flex; flex-direction: column; gap: 10px; }
+.gen-gallery { display: flex; flex-direction: column; gap: 10px; outline: none; border-radius: 8px; padding: 8px; transition: outline-color 0.15s; }
+.gen-gallery:focus { outline: 1px solid var(--border); }
+.gen-gallery.dragover { outline: 2px dashed var(--accent); background: rgba(137, 180, 250, 0.05); }
 .gen-gallery-header { display: flex; align-items: center; gap: 8px; }
 .gen-gallery-header span { flex: 1; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
 .gen-empty { padding: 16px; background: var(--surface2); border-radius: 6px; color: var(--text-dim); font-size: 12px; text-align: center; }
@@ -76,6 +78,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .field input, .field textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
 .field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); }
 .field textarea { resize: vertical; min-height: 120px; line-height: 1.6; }
+.center .field.grow textarea { min-height: 300px; }
 .field.grow textarea { flex: 1; resize: none; }
 .editor-footer { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
 .editor-footer .spacer { flex: 1; }

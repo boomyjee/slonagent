@@ -7,7 +7,7 @@ import { Resizer } from './common/Resizer.js';
 import { SceneList } from './components/SceneList.js';
 import { CharacterList } from './components/CharacterList.js';
 import { EntityView } from './common/EntityView.js';
-import { SceneForm } from './components/SceneForm.js';
+import { SceneForm, sceneExtra } from './components/SceneForm.js';
 import { CharacterForm, characterExtra } from './components/CharacterForm.js';
 import { StoryboardView } from './components/StoryboardView.js';
 import './common/Dialog.js';
@@ -68,7 +68,7 @@ class App extends Component {
         let sidebarView = null, centerView;
         if (tab === 'screenplay') {
             sidebarView = html`<${SceneList} />`;
-            centerView = html`<${EntityView} collection="scenes" label="Scene" key=${'scene-' + selected.scenes}><${SceneForm} /><//>`;
+            centerView = html`<${EntityView} collection="scenes" label="Scene" extra=${sceneExtra} key=${'scene-' + selected.scenes}><${SceneForm} /><//>`;
 
         } else if (tab === 'characters') {
             sidebarView = html`<${CharacterList} />`;

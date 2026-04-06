@@ -36,7 +36,9 @@ class Scene:
     title: str = ""
     text: str = ""
     location: str = ""
+    primary_generation_id: str = ""
     shots: dict[str, Shot] = field(default_factory=dict)
+    generations: dict[str, Generation] = field(default_factory=dict)
 
 
 @dataclass

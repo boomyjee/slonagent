@@ -79,7 +79,7 @@ class Generator:
     async def _gen_image(self, prompt: str) -> bytes:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.5-flash-image:generateContent?key={self.api_key}"
+            f"gemini-3.1-flash-image-preview:generateContent?key={self.api_key}"
         )
         proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
         proxies = {"http": proxy, "https": proxy} if proxy else None

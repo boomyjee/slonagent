@@ -13,10 +13,35 @@ import { Dialog } from '../common/Dialog.js';
 import { FormView } from '../common/FormView.js';
 import { Textarea } from '../common/Form.js';
 
+async function uploadFile(file, path, kind) {
+    const form = new FormData();
+    form.append('file', file);
+    const params = new URLSearchParams({ path: path.join('/'), kind });
+    await fetch('/api/upload?' + params, { method: 'POST', body: form });
+}
+
 export function Gallery({ entity, path, kind, defaultPrompt }) {
     const [lightbox, setLightbox] = useState(null);
+    const [dragover, setDragover] = useState(false);
     const gens = Object.values(entity.generations || {}).filter(g => g.kind === kind);
     const primaryId = entity.primary_generation_id || '';
+
+    function handleFiles(files) {
+        for (const f of files) {
+            if (f.type.startsWith('image/')) uploadFile(f, path, kind);
+        }
+    }
+
+    function onDrop(e) {
+        e.preventDefault();
+        setDragover(false);
+        handleFiles(e.dataTransfer.files);
+    }
+
+    function onPaste(e) {
+        const files = [...(e.clipboardData?.files || [])];
+        if (files.length) { e.preventDefault(); handleFiles(files); }
+    }
 
     function openPrompt(initial) {
         const title = `Generate: ${entity.name || entity.title || entity.description || 'item'}`;
@@ -44,7 +69,13 @@ export function Gallery({ entity, path, kind, defaultPrompt }) {
     }
 
     return html`
-        <div class="gen-gallery">
+        <div class=${'gen-gallery' + (dragover ? ' dragover' : '')}
+            tabindex="0"
+            onDragOver=${e => { e.preventDefault(); setDragover(true); }}
+            onDragLeave=${() => setDragover(false)}
+            onDrop=${onDrop}
+            onPaste=${onPaste}
+        >
             <div class="gen-gallery-header">
                 <span>${kind}s</span>
                 <button class="btn btn-sm btn-primary" onClick=${newGen}>+ New generation</button>
