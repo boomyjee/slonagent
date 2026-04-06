@@ -111,7 +111,7 @@ class Generator:
             raise RuntimeError(f"No request_id: {resp.text[:300]}")
 
         poll_url = f"https://api.muapi.ai/api/v1/predictions/{request_id}/result"
-        for _ in range(120):
+        while True:
             await asyncio.sleep(5)
             r = await asyncio.to_thread(requests.get, poll_url, headers=headers, timeout=30)
             data = r.json()
@@ -124,5 +124,3 @@ class Generator:
                 return img_resp.content
             elif status == "failed":
                 raise RuntimeError(f"muapi failed: {data.get('error', 'unknown')}")
-
-        raise RuntimeError("muapi generation timed out")
