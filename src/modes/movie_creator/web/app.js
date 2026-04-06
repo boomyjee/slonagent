@@ -11,6 +11,8 @@ import { SceneForm, sceneExtra } from './components/SceneForm.js';
 import { CharacterForm, characterExtra } from './components/CharacterForm.js';
 import { StoryboardView } from './components/StoryboardView.js';
 import { ShotForm, shotExtra } from './components/ShotForm.js';
+import { FolderList } from './components/FolderList.js';
+import { FolderForm, folderExtra } from './components/FolderForm.js';
 import './common/Dialog.js';
 import { Chat } from './components/Chat.js';
 
@@ -22,7 +24,7 @@ class App extends Component {
         app = this;
         this.state = {
             connected: false,
-            project: { title: '', scenes: {}, characters: {} },
+            project: { title: '', scenes: {}, characters: {}, library: {} },
             tab: 'screenplay',
             selectedPath: null,
         };
@@ -74,6 +76,8 @@ class App extends Component {
             sidebarView = html`<${SceneList} />`;
         } else if (tab === 'characters') {
             sidebarView = html`<${CharacterList} />`;
+        } else if (tab === 'library') {
+            sidebarView = html`<${FolderList} />`;
         }
 
         if (selectedPath?.length === 4 && selectedPath[2] === 'shots') {
@@ -84,6 +88,8 @@ class App extends Component {
             centerView = html`<${EntityView} path=${selectedPath} label="Scene" extra=${sceneExtra} key=${'scene-' + selKey}><${SceneForm} /><//>`;
         } else if (collection === 'characters') {
             centerView = html`<${EntityView} path=${selectedPath} label="Character" extra=${characterExtra} key=${'char-' + selKey}><${CharacterForm} /><//>`;
+        } else if (collection === 'library') {
+            centerView = html`<${EntityView} path=${selectedPath} label="Folder" extra=${folderExtra} key=${'folder-' + selKey}><${FolderForm} /><//>`;
         } else {
             centerView = html`<div class="center-empty">Select an entity</div>`;
         }
@@ -96,7 +102,7 @@ class App extends Component {
                 </span>
             </div>
             <div class="tabs">
-                ${['screenplay', 'characters', 'storyboard', 'generation'].map(t => html`
+                ${['screenplay', 'characters', 'storyboard', 'library'].map(t => html`
                     <div class=${'tab' + (tab === t ? ' active' : '')} onClick=${() => this.setState({ tab: t })}>
                         ${t.charAt(0).toUpperCase() + t.slice(1)}
                     </div>

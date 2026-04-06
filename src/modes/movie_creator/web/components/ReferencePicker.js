@@ -4,25 +4,22 @@
 import { html, useState } from '../lib.js';
 import { app } from '../app.js';
 
-function collectImages(project) {
-    const images = [];
-    for (const [id, char] of Object.entries(project.characters || {})) {
-        for (const g of Object.values(char.generations || {})) {
+function gather(images, collection, group, labelFn) {
+    for (const [id, entity] of Object.entries(collection || {})) {
+        for (const g of Object.values(entity.generations || {})) {
             if (g.status === 'done' && g.file)
-                images.push({ file: g.file, label: char.name || 'Character', group: 'characters', entityId: id });
+                images.push({ file: g.file, label: labelFn(entity, id), group, entityId: id });
         }
     }
+}
+
+function collectImages(project) {
+    const images = [];
+    gather(images, project.characters, 'characters', c => c.name || 'Character');
+    gather(images, project.library, 'library', f => f.name || 'Folder');
     for (const [id, scene] of Object.entries(project.scenes || {})) {
-        for (const g of Object.values(scene.generations || {})) {
-            if (g.status === 'done' && g.file)
-                images.push({ file: g.file, label: scene.title || 'Scene', group: 'scenes', entityId: id });
-        }
-        for (const [shotId, shot] of Object.entries(scene.shots || {})) {
-            for (const g of Object.values(shot.generations || {})) {
-                if (g.status === 'done' && g.file)
-                    images.push({ file: g.file, label: shot.description?.slice(0, 40) || `Shot ${shotId}`, group: 'shots', entityId: shotId });
-            }
-        }
+        gather(images, { [id]: scene }, 'scenes', s => s.title || 'Scene');
+        gather(images, scene.shots, 'shots', (s, sid) => s.description?.slice(0, 40) || `Shot ${sid}`);
     }
     return images;
 }
@@ -32,6 +29,7 @@ const GROUPS = [
     { key: 'characters', label: 'Characters' },
     { key: 'scenes', label: 'Scenes' },
     { key: 'shots', label: 'Shots' },
+    { key: 'library', label: 'Library' },
 ];
 
 export function ReferencePicker({ selected, onToggle }) {

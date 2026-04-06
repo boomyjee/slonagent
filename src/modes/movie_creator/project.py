@@ -52,11 +52,19 @@ class Character:
 
 
 @dataclass
+class Folder:
+    id: str = ""
+    name: str = ""
+    generations: dict[str, Generation] = field(default_factory=dict)
+
+
+@dataclass
 class Project:
     title: str = ""
     next_id: int = 1
     scenes: dict[str, Scene] = field(default_factory=dict)
     characters: dict[str, Character] = field(default_factory=dict)
+    library: dict[str, Folder] = field(default_factory=dict)
 
     def allocate_id(self) -> str:
         eid = str(self.next_id)
