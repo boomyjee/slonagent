@@ -146,6 +146,7 @@ class MovieServer:
         If ``approval_kind`` is set, user sees an approval dialog before the change.
         Path ending on a container field = create; on an id = update.
         """
+        fields = {k: v for k, v in fields.items() if k != "self"}
         target = self.project.resolve(path)
         is_create = isinstance(target, dict)
 

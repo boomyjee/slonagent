@@ -1,14 +1,14 @@
 import { html, useState } from '../lib.js';
 import { Form } from './Form.js';
 
-export function FormView({ heading, entity, left, right, children }) {
+export function FormView({ heading, entity, left, right, className, children }) {
     const [draft, setDraft] = useState(() => ({ ...entity }));
 
     const btn = ({ label, cls, onClick }) =>
         html`<button class=${'btn' + (cls ? ' btn-' + cls : '')} onClick=${onClick}>${label}</button>`;
 
     return html`
-        <div class="editor">
+        <div class=${'editor' + (className ? ' ' + className : '')}>
             <div class="editor-header"><h2>${heading}</h2></div>
             <div class="editor-body">
                 <${Form} draft=${draft} onChange=${setDraft}>

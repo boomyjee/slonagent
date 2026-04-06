@@ -28,16 +28,16 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .sidebar { width: 260px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
 .sidebar-header { display: flex; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); gap: 8px; }
 .sidebar-header span { font-size: 12px; color: var(--text-dim); text-transform: uppercase; flex: 1; }
-.scene-list { flex: 1; overflow-y: auto; }
+.entity-list { flex: 1; overflow-y: auto; }
 .list-empty { padding: 20px; color: var(--text-dim); font-size: 13px; text-align: center; }
 
 /* List items */
-.scene-item, .char-item { display: flex; align-items: center; padding: 10px 12px; cursor: pointer; border-bottom: 1px solid var(--border); gap: 8px; font-size: 13px; }
-.scene-item:hover, .char-item:hover { background: var(--surface2); }
-.scene-item.active, .char-item.active { background: var(--accent); color: #1e1e2e; }
-.scene-item .num { font-size: 11px; font-weight: 600; min-width: 20px; opacity: 0.6; }
-.scene-item .name, .char-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.char-item .thumb { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: var(--surface3); }
+.entity-item { display: flex; align-items: center; padding: 10px 12px; cursor: pointer; border-bottom: 1px solid var(--border); gap: 8px; font-size: 13px; }
+.entity-item:hover { background: var(--surface2); }
+.entity-item.active { background: var(--accent); color: #1e1e2e; }
+.entity-item .num { font-size: 11px; font-weight: 600; min-width: 20px; opacity: 0.6; }
+.entity-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entity-item .thumb { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: var(--surface3); }
 
 /* Generation gallery */
 .gen-gallery { display: flex; flex-direction: column; gap: 10px; }
@@ -89,7 +89,10 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 /* Modal */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; width: 560px; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+.modal .editor { width: 480px; }
+.editor.create_scene, .editor.update_scene, .editor.create_shots_bulk { width: 720px; }
+.editor.create_scene textarea, .editor.update_scene textarea, .editor.create_shots_bulk textarea { min-height: 300px; }
 
 /* Chat */
 .chat { flex: 1 1 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--surface); min-width: 200px; }

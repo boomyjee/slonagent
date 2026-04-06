@@ -15,6 +15,7 @@ export function ApproveView({ label, approval_message, children }) {
     return html`<${FormView}
         heading=${'AI Proposal — ' + label}
         entity=${entity}
+        className=${approval_message.approvalKind}
         left=${() => [{ label: 'Reject', cls: 'danger', onClick: () => {
             app.send({ type: 'approval_response', action: 'reject', reason: prompt('Reason (optional):') || '' });
             resolve(approval_message);
