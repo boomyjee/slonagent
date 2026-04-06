@@ -25,8 +25,6 @@ class App extends Component {
             tab: 'screenplay',
             selected: { scenes: null, characters: null },
         };
-        this._sidebarRef = null;
-        this._chatRef = null;
         this._chat = null;
     }
 
@@ -98,11 +96,11 @@ class App extends Component {
                 `)}
             </div>
             <div class="main">
-                <div class="sidebar" ref=${el => this._sidebarRef = el}>${sidebarView}</div>
-                <${Resizer} targetRef=${{ current: this._sidebarRef }} side="left" />
+                <div class="sidebar">${sidebarView}</div>
+                <${Resizer} side="left" />
                 <div class="center">${centerView}</div>
-                <${Resizer} targetRef=${{ current: this._chatRef }} side="right" />
-                <${Chat} ref=${c => this._chat = c} rootRef=${el => this._chatRef = el} />
+                <${Resizer} side="right" />
+                <${Chat} ref=${c => this._chat = c} />
             </div>
         `;
     }

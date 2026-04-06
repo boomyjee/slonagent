@@ -1,9 +1,11 @@
 import { html } from '../lib.js';
 
-export function Resizer({ targetRef, side }) {
+export function Resizer({ side }) {
     function onMouseDown(e) {
         e.preventDefault();
-        const el = targetRef.current;
+        const el = side === 'left'
+            ? e.target.previousElementSibling
+            : e.target.nextElementSibling;
         if (!el) return;
         const startX = e.clientX;
         const startW = el.getBoundingClientRect().width;
