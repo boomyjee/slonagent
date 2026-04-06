@@ -3,6 +3,7 @@
 // Selected images are tracked by file path.
 import { html, useState } from '../lib.js';
 import { app } from '../app.js';
+import { useField } from '../common/Form.js';
 
 function gather(images, collection, group, labelFn) {
     for (const [id, entity] of Object.entries(collection || {})) {
@@ -32,10 +33,16 @@ const GROUPS = [
     { key: 'library', label: 'Library' },
 ];
 
-export function ReferencePicker({ selected, onToggle }) {
+export function ReferencePicker({ name }) {
+    const f = useField(name);
+    const selected = f.value || [];
     const [filter, setFilter] = useState('');
     const images = collectImages(app.state.project);
     const filtered = filter ? images.filter(i => i.group === filter) : images;
+
+    function toggle(file) {
+        f.set(selected.includes(file) ? selected.filter(x => x !== file) : [...selected, file]);
+    }
 
     return html`
         <div class="ref-picker">
@@ -56,7 +63,7 @@ export function ReferencePicker({ selected, onToggle }) {
                     : filtered.map(img => html`
                         <div
                             class=${'ref-thumb' + (selected.includes(img.file) ? ' selected' : '')}
-                            onClick=${() => onToggle(img.file)}
+                            onClick=${() => toggle(img.file)}
                             title=${img.label}
                         >
                             <img src=${'/api/asset/' + img.file} />

@@ -10,6 +10,8 @@
 import { html, useState } from '../lib.js';
 import { app } from '../app.js';
 import { useEntity } from '../common/EntityView.js';
+import { Select, Textarea } from '../common/Form.js';
+import { FormView } from '../common/FormView.js';
 import { Dialog } from '../common/Dialog.js';
 import { ReferencePicker } from './ReferencePicker.js';
 
@@ -56,8 +58,8 @@ export function Gallery({ kind, defaultPrompt }) {
     function openPrompt(initial, model, initialRefs) {
         const title = `Generate: ${entity.name || entity.title || entity.description || 'item'}`;
         Dialog.open(html`<${GenerateDialog}
-            title=${title} initial=${initial} initialModel=${model || lastModel}
-            initialRefs=${initialRefs || []} path=${path} kind=${kind}
+            title=${title} path=${path} kind=${kind}
+            initial=${{ prompt: initial, model: model || lastModel, references: initialRefs || [] }}
         />`);
     }
 
@@ -137,46 +139,24 @@ function Tile({ gen, isPrimary, canSetPrimary, onZoom, onSetPrimary, onRemix, on
     `;
 }
 
-function GenerateDialog({ title, initial, initialModel, initialRefs, path, kind }) {
-    const [prompt, setPrompt] = useState(initial || '');
-    const [model, setModel] = useState(initialModel || lastModel);
-    const [refs, setRefs] = useState(initialRefs || []);
-
-    function toggle(file) {
-        setRefs(r => r.includes(file) ? r.filter(f => f !== file) : [...r, file]);
-    }
-
-    function generate() {
-        lastModel = model;
-        app.send({ type: 'generate', path, kind, prompt, model, references: refs });
+function GenerateDialog({ title, initial, path, kind }) {
+    function generate(draft) {
+        lastModel = draft.model;
+        app.send({ type: 'generate', path, kind, prompt: draft.prompt, model: draft.model, references: draft.references || [] });
         Dialog.close();
     }
 
     return html`
-        <div class="editor generate-dialog">
-            <div class="editor-header"><h2>${title}</h2></div>
-            <div class="editor-body">
-                <div class="field">
-                    <label>Model</label>
-                    <select value=${model} onChange=${e => setModel(e.target.value)}>
-                        ${MODELS.map(m => html`<option value=${m.id}>${m.label}</option>`)}
-                    </select>
-                </div>
-                <div class="field grow">
-                    <label>Prompt</label>
-                    <textarea
-                        value=${prompt}
-                        onInput=${e => setPrompt(e.target.value)}
-                        placeholder="Describe the image or video..."
-                    ></textarea>
-                </div>
-                <${ReferencePicker} selected=${refs} onToggle=${toggle} />
-            </div>
-            <div class="editor-footer">
-                <button class="btn" onClick=${() => Dialog.close()}>Cancel</button>
-                <div class="spacer"></div>
-                <button class="btn btn-primary" onClick=${generate}>Generate</button>
-            </div>
-        </div>
+        <${FormView}
+            heading=${title}
+            entity=${initial}
+            className="generate-dialog"
+            left=${() => [{ label: 'Cancel', onClick: () => Dialog.close() }]}
+            right=${draft => [{ label: 'Generate', cls: 'primary', onClick: () => generate(draft) }]}
+        >
+            <${Select} name="model" label="Model" options=${MODELS} />
+            <${Textarea} name="prompt" label="Prompt" placeholder="Describe the image or video..." grow />
+            <${ReferencePicker} name="references" />
+        <//>
     `;
 }
