@@ -1,39 +1,27 @@
-import { html, useState, send } from '../lib.js';
+import { html } from '../lib.js';
 import { app } from '../app.js';
-import { Form } from './Form.js';
+import { FormView } from './FormView.js';
 import { Dialog } from './Dialog.js';
+
+function resolve(msg) {
+    msg.resolved = true;
+    app.forceUpdate();
+    Dialog.close();
+}
 
 export function ApproveView({ label, approval_message, children }) {
     const entity = approval_message.data.fields || approval_message.data || {};
-    const [draft, setDraft] = useState(() => ({ ...entity }));
 
-    function approve() {
-        send({ type: 'approval_response', action: 'approve', data: draft });
-        approval_message.resolved = true;
-        app.forceUpdate();
-        Dialog.close();
-    }
-
-    function reject() {
-        send({ type: 'approval_response', action: 'reject', reason: prompt('Reason (optional):') || '' });
-        approval_message.resolved = true;
-        app.forceUpdate();
-        Dialog.close();
-    }
-
-    return html`
-        <div class="editor">
-            <div class="editor-header"><h2>AI Proposal — ${label}</h2></div>
-            <div class="editor-body">
-                <${Form} draft=${draft} onChange=${setDraft}>
-                    ${children}
-                <//>
-            </div>
-            <div class="editor-footer">
-                <button class="btn btn-danger" onClick=${reject}>Reject</button>
-                <div class="spacer"></div>
-                <button class="btn btn-primary" onClick=${approve}>Approve</button>
-            </div>
-        </div>
-    `;
+    return html`<${FormView}
+        heading=${'AI Proposal — ' + label}
+        entity=${entity}
+        left=${() => [{ label: 'Reject', cls: 'danger', onClick: () => {
+            app.send({ type: 'approval_response', action: 'reject', reason: prompt('Reason (optional):') || '' });
+            resolve(approval_message);
+        }}]}
+        right=${draft => [{ label: 'Approve', cls: 'primary', onClick: () => {
+            app.send({ type: 'approval_response', action: 'approve', data: draft });
+            resolve(approval_message);
+        }}]}
+    >${children}<//>`;
 }

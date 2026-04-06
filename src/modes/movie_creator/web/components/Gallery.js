@@ -7,28 +7,40 @@
 // Knows its own WS path and issues generate/set_primary/delete messages
 // directly. No "million callbacks" from the parent.
 
-import { html, useState, send } from '../lib.js';
+import { html, useState } from '../lib.js';
+import { app } from '../app.js';
 import { Dialog } from '../common/Dialog.js';
+import { FormView } from '../common/FormView.js';
+import { Textarea } from '../common/Form.js';
 
 export function Gallery({ entity, path, kind, defaultPrompt }) {
     const [lightbox, setLightbox] = useState(null);
     const gens = Object.values(entity.generations || {}).filter(g => g.kind === kind);
     const primaryId = entity.primary_generation_id || '';
 
-    async function openPrompt(initial) {
+    function openPrompt(initial) {
         const title = `Generate: ${entity.name || entity.title || entity.description || 'item'}`;
-        const prompt = await Dialog.prompt(title, initial);
-        if (prompt != null) send({ type: 'generate', path, kind, prompt });
+        Dialog.open(html`<${FormView}
+            heading=${title}
+            entity=${{ prompt: initial }}
+            right=${draft => [
+                { label: 'Cancel', onClick: () => Dialog.close() },
+                { label: 'Generate', cls: 'primary', onClick: () => {
+                    app.send({ type: 'generate', path, kind, prompt: draft.prompt });
+                    Dialog.close();
+                }},
+            ]}
+        ><${Textarea} name="prompt" label="Prompt" placeholder="Describe the image..." grow /><//>`);
     }
 
     function newGen() { openPrompt(defaultPrompt ? defaultPrompt() : ''); }
     function remix(g) { openPrompt(g.prompt || ''); }
     function setPrimary(g) {
-        send({ type: 'update', path, data: { primary_generation_id: g.id } });
+        app.send({ type: 'update', path, data: { primary_generation_id: g.id } });
     }
     function deleteGen(g) {
         if (!confirm('Delete this generation?')) return;
-        send({ type: 'delete', path: [...path, 'generations', g.id] });
+        app.send({ type: 'delete', path: [...path, 'generations', g.id] });
     }
 
     return html`

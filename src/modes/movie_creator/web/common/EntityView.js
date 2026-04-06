@@ -1,6 +1,6 @@
-import { html, useState, send } from '../lib.js';
+import { html } from '../lib.js';
 import { app } from '../app.js';
-import { Form } from './Form.js';
+import { FormView } from './FormView.js';
 
 export function EntityView({ collection, label, children, extra }) {
     const { project, selected } = app.state;
@@ -10,40 +10,30 @@ export function EntityView({ collection, label, children, extra }) {
         return html`<div class="center-empty">Select or create a ${label.toLowerCase()}</div>`;
     }
     const isNew = !entity.id;
-    const [draft, setDraft] = useState(() => ({ ...entity }));
+    const close = () => app.selectEntity(collection, null);
 
-    function submit() {
-        if (isNew) {
-            send({ type: 'create', path: [collection], data: draft });
-        } else {
-            send({ type: 'update', path: [collection, entity.id], data: draft });
-        }
-        app.selectEntity(collection, null);
+    function submit(draft) {
+        if (isNew) app.send({ type: 'create', path: [collection], data: draft });
+        else app.send({ type: 'update', path: [collection, entity.id], data: draft });
+        close();
     }
 
     function del() {
         if (!confirm(`Delete this ${label.toLowerCase()}?`)) return;
-        send({ type: 'delete', path: [collection, entity.id] });
-        app.selectEntity(collection, null);
+        app.send({ type: 'delete', path: [collection, entity.id] });
+        close();
     }
 
-    const heading = isNew ? `New ${label}` : `${label}: ${draft.name || draft.title || 'Untitled'}`;
-
-    return html`
-        <div class="editor">
-            <div class="editor-header"><h2>${heading}</h2></div>
-            <div class="editor-body">
-                <${Form} draft=${draft} onChange=${setDraft}>
-                    ${children}
-                <//>
-                ${!isNew && extra ? extra(entity) : null}
-            </div>
-            <div class="editor-footer">
-                ${!isNew ? html`<button class="btn btn-danger" onClick=${del}>Delete</button>` : null}
-                <div class="spacer"></div>
-                <button class="btn" onClick=${() => app.selectEntity(collection, null)}>Cancel</button>
-                <button class="btn btn-primary" onClick=${submit}>Save</button>
-            </div>
-        </div>
-    `;
+    return html`<${FormView}
+        heading=${isNew ? `New ${label}` : `${label}: ${entity.name || entity.title || 'Untitled'}`}
+        entity=${entity}
+        left=${() => !isNew ? [{ label: 'Delete', cls: 'danger', onClick: del }] : []}
+        right=${draft => [
+            { label: 'Cancel', onClick: close },
+            { label: 'Save', cls: 'primary', onClick: () => submit(draft) },
+        ]}
+    >
+        ${children}
+        ${!isNew && extra ? extra(entity) : null}
+    <//>`;
 }

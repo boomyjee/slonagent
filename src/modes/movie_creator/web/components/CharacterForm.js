@@ -1,6 +1,11 @@
-import { html, characterPrompt } from '../lib.js';
+import { html } from '../lib.js';
 import { Text, Textarea } from '../common/Form.js';
 import { Gallery } from './Gallery.js';
+
+function characterPrompt(char) {
+    const appearance = char.appearance || 'a film character';
+    return `Cinematic portrait of ${char.name || 'character'}. ${appearance}. Head and shoulders, cinematic lighting, film still, shallow depth of field.`;
+}
 
 export function CharacterForm() {
     return html`

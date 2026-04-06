@@ -1,4 +1,4 @@
-import { html, useState, useEffect, useRef, send } from '../lib.js';
+import { html, useState, useEffect, useRef } from '../lib.js';
 import { app } from '../app.js';
 import { ApproveDialog } from './ApproveDialog.js';
 
@@ -15,7 +15,7 @@ export function Chat() {
     function submit() {
         const text = input.trim();
         if (!text) return;
-        send({ type: 'chat', text });
+        app.send({ type: 'chat', text });
         setInput('');
     }
 

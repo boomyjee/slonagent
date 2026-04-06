@@ -1,7 +1,11 @@
 // Storyboard for a selected scene. Reads shots from scene.shots dict (live
 // project state). Each shot is either a compact row or a full card with
 // inline-editable description + its own gallery.
-import { html, useState, shotPrompt, send } from '../lib.js';
+import { html, useState } from '../lib.js';
+
+function shotPrompt(shot) {
+    return `Cinematic film still. ${shot.description || ''}. Cinematic lighting, shallow depth of field.`;
+}
 import { app } from '../app.js';
 import { Gallery } from './Gallery.js';
 
@@ -14,7 +18,7 @@ export function StoryboardView() {
     const shots = Object.values(scene.shots || {});
 
     function createShot() {
-        send({
+        app.send({
             type: 'create',
             path: ['scenes', scene.id, 'shots'],
             data: { description: '' },
@@ -63,13 +67,13 @@ function ShotCard({ scene, shot, index, mode }) {
 
     function commit() {
         if (draft != null && draft !== shot.description) {
-            send({ type: 'update', path: shotPath, data: { description: draft } });
+            app.send({ type: 'update', path: shotPath, data: { description: draft } });
         }
         setDraft(null);
     }
     function del() {
         if (!confirm('Delete this shot?')) return;
-        send({ type: 'delete', path: shotPath });
+        app.send({ type: 'delete', path: shotPath });
     }
 
     if (mode === 'compact') {

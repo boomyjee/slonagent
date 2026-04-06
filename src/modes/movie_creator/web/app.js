@@ -2,7 +2,7 @@
 //
 // App is a class component exposed as module-level `app` so any module can
 // read state (app.state.project, app.state.tab, ...) and call methods.
-import { render, html, Component, createWS, send } from './lib.js';
+import { render, html, Component } from './lib.js';
 import { Resizer } from './common/Resizer.js';
 import { SceneList } from './components/SceneList.js';
 import { CharacterList } from './components/CharacterList.js';
@@ -32,7 +32,14 @@ class App extends Component {
     }
 
     componentDidMount() {
-        createWS(msg => this.handleMessage(msg), c => this.setState({ connected: c }));
+        this._ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+        this._ws.onopen = () => this.setState({ connected: true });
+        this._ws.onclose = () => this.setState({ connected: false });
+        this._ws.onmessage = e => this.handleMessage(JSON.parse(e.data));
+    }
+
+    send(msg) {
+        if (this._ws && this._ws.readyState === 1) this._ws.send(JSON.stringify(msg));
     }
 
     handleMessage(msg) {
@@ -75,9 +82,9 @@ class App extends Component {
     componentDidUpdate(_, prev) {
         const { tab, selected } = this.state;
         if (tab !== prev.tab)
-            send({ type: 'tab_changed', tab });
+            this.send({ type: 'tab_changed', tab });
         if (selected !== prev.selected)
-            send({ type: 'selected_changed', selected });
+            this.send({ type: 'selected_changed', selected });
     }
 
 
