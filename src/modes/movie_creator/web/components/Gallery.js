@@ -23,7 +23,8 @@ export function Gallery({ entity, path, kind, defaultPrompt }) {
     const [lightbox, setLightbox] = useState(null);
     const [dragover, setDragover] = useState(false);
     const gens = Object.values(entity.generations || {}).filter(g => g.kind === kind);
-    const primaryId = entity.primary_generation_id || '';
+    const hasPrimary = 'primary_generation_id' in entity;
+    const primaryId = hasPrimary ? (entity.primary_generation_id || '') : '';
 
     function handleFiles(files) {
         for (const f of files) {
@@ -79,7 +80,8 @@ export function Gallery({ entity, path, kind, defaultPrompt }) {
                             <${Tile}
                                 key=${g.id}
                                 gen=${g}
-                                isPrimary=${g.id === primaryId}
+                                isPrimary=${hasPrimary && g.id === primaryId}
+                                canSetPrimary=${hasPrimary}
                                 onZoom=${src => setLightbox(src)}
                                 onSetPrimary=${() => setPrimary(g)}
                                 onRemix=${() => remix(g)}
@@ -97,7 +99,7 @@ export function Gallery({ entity, path, kind, defaultPrompt }) {
     `;
 }
 
-function Tile({ gen, isPrimary, onZoom, onSetPrimary, onRemix, onDelete }) {
+function Tile({ gen, isPrimary, canSetPrimary, onZoom, onSetPrimary, onRemix, onDelete }) {
     const done = gen.status === 'done' && gen.file;
     const failed = gen.status === 'failed';
     const src = done ? `/api/asset/${gen.file}` : null;
@@ -113,7 +115,7 @@ function Tile({ gen, isPrimary, onZoom, onSetPrimary, onRemix, onDelete }) {
             </div>
             <div class="gen-prompt" title=${gen.prompt}>${gen.prompt}</div>
             <div class="gen-actions">
-                ${done && !isPrimary
+                ${canSetPrimary && done && !isPrimary
                     ? html`<button class="btn btn-sm" onClick=${onSetPrimary}>Set primary</button>`
                     : null}
                 <button class="btn btn-sm" onClick=${onRemix}>Remix</button>

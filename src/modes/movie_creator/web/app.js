@@ -10,6 +10,7 @@ import { EntityView } from './common/EntityView.js';
 import { SceneForm, sceneExtra } from './components/SceneForm.js';
 import { CharacterForm, characterExtra } from './components/CharacterForm.js';
 import { StoryboardView } from './components/StoryboardView.js';
+import { ShotForm, shotExtra } from './components/ShotForm.js';
 import './common/Dialog.js';
 import { Chat } from './components/Chat.js';
 
@@ -23,7 +24,7 @@ class App extends Component {
             connected: false,
             project: { title: '', scenes: {}, characters: {} },
             tab: 'screenplay',
-            selected: { scenes: null, characters: null },
+            selectedPath: null,
         };
         this._chat = null;
     }
@@ -49,36 +50,42 @@ class App extends Component {
             console.warn('Unknown WS message type:', t, msg);
     }
 
-    selectEntity(collection, id) {
-        this.setState(({ selected }) => ({ selected: { ...selected, [collection]: id } }));
+    select(path) {
+        this.setState({ selectedPath: path });
     }
 
     componentDidUpdate(_, prev) {
-        const { tab, selected } = this.state;
+        const { tab, selectedPath } = this.state;
         if (tab !== prev.tab)
             this.send({ type: 'tab_changed', tab });
-        if (selected !== prev.selected)
-            this.send({ type: 'selected_changed', selected });
+        if (selectedPath !== prev.selectedPath)
+            this.send({ type: 'selected_changed', path: selectedPath });
     }
 
 
     render() {
-        const { connected, tab, selected } = this.state;
+        const { connected, tab, selectedPath } = this.state;
+        const selKey = selectedPath ? selectedPath.join('/') : '';
+
+        const collection = selectedPath?.[0];
 
         let sidebarView = null, centerView;
-        if (tab === 'screenplay') {
+        if (tab === 'screenplay' || tab === 'storyboard') {
             sidebarView = html`<${SceneList} />`;
-            centerView = html`<${EntityView} collection="scenes" label="Scene" extra=${sceneExtra} key=${'scene-' + selected.scenes}><${SceneForm} /><//>`;
-
         } else if (tab === 'characters') {
             sidebarView = html`<${CharacterList} />`;
-            centerView = html`<${EntityView} collection="characters" label="Character" extra=${characterExtra} key=${'char-' + selected.characters}><${CharacterForm} /><//>`;
+        }
 
-        } else if (tab === 'storyboard') {
-            sidebarView = html`<${SceneList} />`;
-            centerView = html`<${StoryboardView} key=${'sb-' + selected.scenes} />`;
+        if (selectedPath?.length === 4 && selectedPath[2] === 'shots') {
+            centerView = html`<${EntityView} path=${selectedPath} label="Shot" back=${selectedPath.slice(0, 2)} extra=${shotExtra} key=${'shot-' + selKey}><${ShotForm} /><//>`;
+        } else if (collection === 'scenes' && tab === 'storyboard') {
+            centerView = html`<${StoryboardView} key=${'sb-' + selKey} />`;
+        } else if (collection === 'scenes') {
+            centerView = html`<${EntityView} path=${selectedPath} label="Scene" extra=${sceneExtra} key=${'scene-' + selKey}><${SceneForm} /><//>`;
+        } else if (collection === 'characters') {
+            centerView = html`<${EntityView} path=${selectedPath} label="Character" extra=${characterExtra} key=${'char-' + selKey}><${CharacterForm} /><//>`;
         } else {
-            centerView = html`<div class="center-empty">Generation (coming soon)</div>`;
+            centerView = html`<div class="center-empty">Select an entity</div>`;
         }
 
         return html`

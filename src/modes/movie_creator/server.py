@@ -41,7 +41,7 @@ class MovieServer:
         self.app = FastAPI()
         self.ws: WebSocket | None = None
         self.active_tab: str = "screenplay"
-        self.selected: dict = {}
+        self.selected_path: list | None = None
         self._on_chat: list = []
         self._on_tab_changed: list = []
         self._pending_approval: asyncio.Future | None = None
@@ -155,7 +155,7 @@ class MovieServer:
                 cb(self.active_tab)
 
         elif t == "selected_changed":
-            self.selected = msg.get("selected", {})
+            self.selected_path = msg.get("path")
 
     async def send(self, event: str, **kwargs):
         if self.ws:

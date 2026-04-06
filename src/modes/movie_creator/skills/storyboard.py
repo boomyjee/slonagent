@@ -17,7 +17,8 @@ class StoryboardSkill(Skill):
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         project = self.server.project
-        scene_id = self.server.selected.get("scenes", "")
+        sp = self.server.selected_path
+        scene_id = sp[1] if sp and sp[0] == "scenes" else ""
         current_scene = project.scenes.get(scene_id) if scene_id else None
         current_block = ""
         if current_scene:

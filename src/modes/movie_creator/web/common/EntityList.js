@@ -5,11 +5,12 @@ import { app } from '../app.js';
 
 export function EntityList({ title, collection, canCreate, renderItem }) {
     const items = Object.values(app.state.project[collection] || {});
-    const selectedId = app.state.selected[collection];
+    const sp = app.state.selectedPath;
+    const selectedId = sp?.[0] === collection ? sp[1] : null;
     return html`
         <div class="sidebar-header">
             <span>${title}</span>
-            ${canCreate ? html`<button class="btn btn-sm btn-primary" onClick=${() => app.selectEntity(collection, '__new__')}>+ Add</button>` : null}
+            ${canCreate ? html`<button class="btn btn-sm btn-primary" onClick=${() => app.select([collection, '__new__'])}>+ Add</button>` : null}
         </div>
         <div class="entity-list">
             ${items.length === 0
@@ -17,7 +18,7 @@ export function EntityList({ title, collection, canCreate, renderItem }) {
                 : items.map((item, i) => html`
                     <div
                         class=${'entity-item' + (item.id === selectedId ? ' active' : '')}
-                        onClick=${() => app.selectEntity(collection, item.id)}
+                        onClick=${() => app.select([collection, item.id])}
                     >${renderItem(item, i)}</div>
                 `)}
         </div>

@@ -1,17 +1,12 @@
-// Storyboard for a selected scene. Reads shots from scene.shots dict (live
-// project state). Each shot is either a compact row or a full card with
-// inline-editable description + its own gallery.
-import { html, useState } from '../lib.js';
-
-function shotPrompt(shot) {
-    return `Cinematic film still. ${shot.description || ''}. Cinematic lighting, shallow depth of field.`;
-}
+// Storyboard grid for a selected scene. Click a card to open ShotView.
+import { html, useState, useRef, useEffect } from '../lib.js';
 import { app } from '../app.js';
-import { Gallery } from './Gallery.js';
 
 export function StoryboardView() {
-    const scene = app.state.project.scenes[app.state.selected.scenes] || null;
-    const [mode, setMode] = useState('compact');
+    const sp = app.state.selectedPath;
+    const sceneId = sp?.[0] === 'scenes' ? sp[1] : null;
+    const scene = sceneId ? (app.state.project.scenes[sceneId] || null) : null;
+    const [lightbox, setLightbox] = useState(null);
     if (!scene) {
         return html`<div class="center-empty">Select a scene to start storyboarding</div>`;
     }
@@ -25,89 +20,65 @@ export function StoryboardView() {
         });
     }
 
+    const bodyRef = useRef(null);
+    const prevCount = useRef(shots.length);
+    useEffect(() => {
+        if (shots.length > prevCount.current && bodyRef.current) {
+            bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+        }
+        prevCount.current = shots.length;
+    }, [shots.length]);
+
     return html`
         <div class="editor">
             <div class="editor-header">
                 <h2>Storyboard — ${scene.title || 'Untitled'}</h2>
-                <div class="sb-modes">
-                    <button
-                        class=${'btn btn-sm' + (mode === 'compact' ? ' btn-primary' : '')}
-                        onClick=${() => setMode('compact')}
-                    >Compact</button>
-                    <button
-                        class=${'btn btn-sm' + (mode === 'full' ? ' btn-primary' : '')}
-                        onClick=${() => setMode('full')}
-                    >Full</button>
-                </div>
                 <button class="btn btn-sm btn-primary" onClick=${createShot}>+ Add shot</button>
             </div>
-            <div class="editor-body">
+            <div class="editor-body" ref=${bodyRef}>
                 ${shots.length === 0
                     ? html`<div class="center-empty">No shots yet</div>`
-                    : shots.map((shot, i) => html`
-                        <${ShotCard}
-                            key=${shot.id}
-                            scene=${scene}
-                            shot=${shot}
-                            index=${i}
-                            mode=${mode}
-                        />
-                    `)}
+                    : html`<div class="shot-grid">
+                        ${shots.map((shot, i) => html`
+                            <${ShotCard} key=${shot.id} scene=${scene} shot=${shot} index=${i} onZoom=${setLightbox} />
+                        `)}
+                    </div>`}
+                ${lightbox ? html`
+                    <div class="lightbox" onClick=${() => setLightbox(null)}>
+                        <img src=${lightbox} onClick=${e => e.stopPropagation()} />
+                    </div>
+                ` : null}
             </div>
         </div>
     `;
 }
 
-function ShotCard({ scene, shot, index, mode }) {
-    const [draft, setDraft] = useState(null);
-    const value = draft != null ? draft : (shot.description || '');
+function ShotCard({ scene, shot, index, onZoom }) {
     const primary = shot.generations?.[shot.primary_generation_id];
     const thumb = primary?.file ? `/api/asset/${primary.file}` : null;
-    const shotPath = ['scenes', scene.id, 'shots', shot.id];
+    const preview = (shot.description || '').split('\n')[0] || '(empty)';
 
-    function commit() {
-        if (draft != null && draft !== shot.description) {
-            app.send({ type: 'update', path: shotPath, data: { description: draft } });
-        }
-        setDraft(null);
+    function select(e) {
+        e.stopPropagation();
+        app.select(['scenes', scene.id, 'shots', shot.id]);
     }
-    function del() {
+
+    function del(e) {
+        e.stopPropagation();
         if (!confirm('Delete this shot?')) return;
-        app.send({ type: 'delete', path: shotPath });
-    }
-
-    if (mode === 'compact') {
-        const preview = (shot.description || '').split('\n')[0] || '(empty)';
-        return html`
-            <div class="shot-card compact">
-                <span class="shot-num">${index + 1}</span>
-                <div class="shot-thumb">
-                    ${thumb ? html`<img src=${thumb} />` : null}
-                </div>
-                <div class="shot-preview">${preview}</div>
-            </div>
-        `;
+        app.send({ type: 'delete', path: ['scenes', scene.id, 'shots', shot.id] });
     }
 
     return html`
-        <div class="shot-card full">
-            <div class="shot-row">
+        <div class="shot-card" onClick=${select}>
+            <div class="shot-thumb" onClick=${e => { if (thumb) { e.stopPropagation(); onZoom(thumb); } }}>
+                ${thumb ? html`<img src=${thumb} />` : null}
                 <span class="shot-num">${index + 1}</span>
-                <textarea
-                    class="shot-desc"
-                    value=${value}
-                    placeholder="Shot description — framing, action, camera, dialogue..."
-                    onInput=${e => setDraft(e.target.value)}
-                    onBlur=${commit}
-                ></textarea>
-                <button class="btn btn-sm btn-danger" onClick=${del}>\u2715</button>
             </div>
-            <${Gallery}
-                entity=${shot}
-                path=${shotPath}
-                kind="frame"
-                defaultPrompt=${() => shotPrompt(shot)}
-            />
+            <div class="shot-compact-footer">
+                <div class="shot-preview">${preview}</div>
+                <button class="btn-icon btn-danger" onClick=${del}>\u2715</button>
+            </div>
         </div>
     `;
 }
