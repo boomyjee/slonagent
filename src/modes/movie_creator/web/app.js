@@ -6,8 +6,9 @@ import { render, html, Component, createWS, send } from './lib.js';
 import { Resizer } from './common/Resizer.js';
 import { SceneList } from './components/SceneList.js';
 import { CharacterList } from './components/CharacterList.js';
-import { SceneView } from './components/SceneView.js';
-import { CharacterView } from './components/CharacterView.js';
+import { EntityView } from './common/EntityView.js';
+import { SceneForm } from './components/SceneForm.js';
+import { CharacterForm, characterExtra } from './components/CharacterForm.js';
 import { StoryboardView } from './components/StoryboardView.js';
 import './common/Dialog.js';
 import { Chat } from './components/Chat.js';
@@ -62,26 +63,21 @@ class App extends Component {
                     approvalKind: msg.kind,
                     data: msg.data,
                     resolved: false,
-                    idx: messages.length,
                 }],
             }));
         }
     }
 
-    switchTab(newTab) {
-        this.setState({ tab: newTab });
-        send({ type: 'tab_changed', tab: newTab });
-        const scope = newTab === 'storyboard'
-            ? { scene_id: this.state.selected.scenes || '' }
-            : {};
-        send({ type: 'scope_changed', scope });
-    }
-
     selectEntity(collection, id) {
         this.setState(({ selected }) => ({ selected: { ...selected, [collection]: id } }));
-        if (this.state.tab === 'storyboard' && collection === 'scenes') {
-            send({ type: 'scope_changed', scope: { scene_id: id } });
-        }
+    }
+
+    componentDidUpdate(_, prev) {
+        const { tab, selected } = this.state;
+        if (tab !== prev.tab)
+            send({ type: 'tab_changed', tab });
+        if (selected !== prev.selected)
+            send({ type: 'selected_changed', selected });
     }
 
 
@@ -91,10 +87,12 @@ class App extends Component {
         let sidebarView = null, centerView;
         if (tab === 'screenplay') {
             sidebarView = html`<${SceneList} />`;
-            centerView = html`<${SceneView} key=${'scene-' + selected.scenes} />`;
+            centerView = html`<${EntityView} collection="scenes" label="Scene" key=${'scene-' + selected.scenes}><${SceneForm} /><//>`;
+
         } else if (tab === 'characters') {
             sidebarView = html`<${CharacterList} />`;
-            centerView = html`<${CharacterView} key=${'char-' + selected.characters} />`;
+            centerView = html`<${EntityView} collection="characters" label="Character" extra=${characterExtra} key=${'char-' + selected.characters}><${CharacterForm} /><//>`;
+
         } else if (tab === 'storyboard') {
             sidebarView = html`<${SceneList} />`;
             centerView = html`<${StoryboardView} key=${'sb-' + selected.scenes} />`;
@@ -111,7 +109,7 @@ class App extends Component {
             </div>
             <div class="tabs">
                 ${['screenplay', 'characters', 'storyboard', 'generation'].map(t => html`
-                    <div class=${'tab' + (tab === t ? ' active' : '')} onClick=${() => this.switchTab(t)}>
+                    <div class=${'tab' + (tab === t ? ' active' : '')} onClick=${() => this.setState({ tab: t })}>
                         ${t.charAt(0).toUpperCase() + t.slice(1)}
                     </div>
                 `)}

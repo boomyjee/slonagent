@@ -33,9 +33,7 @@ class CharactersSkill(Skill):
         appearance: Annotated[str, "Внешность (возраст, рост, волосы, одежда)"] = "",
     ) -> dict:
         return await self.server.edit(
-            ["characters"],
-            {"name": name, "description": description, "appearance": appearance},
-            approval=True,
+            ["characters"], locals(), approval_kind="create_character",
         )
 
     @tool("Обновить существующего персонажа по ID. Пользователь сможет отредактировать и одобрить.")
@@ -47,9 +45,7 @@ class CharactersSkill(Skill):
         appearance: Annotated[str, "Новая внешность (пусто = не менять)"] = "",
     ) -> dict:
         return await self.server.edit(
-            ["characters", id],
-            {"name": name, "description": description, "appearance": appearance},
-            approval=True,
+            ["characters", id], locals(), approval_kind="update_character",
         )
 
     @tool("Сгенерировать портрет персонажа. Передай полный промпт для image-модели. "
@@ -62,7 +58,7 @@ class CharactersSkill(Skill):
         char = self.server.project.characters.get(character_id)
         if not char:
             return {"error": f"Character {character_id} not found"}
-        result = await self.server.request_approval("portrait", {
+        result = await self.server.send_approval("generate_portrait", {
             "character_id": character_id,
             "character_name": char.name,
             "prompt": prompt,

@@ -7,7 +7,7 @@ introspection) and `dump` (LLM-facing formatter).
 Ordering invariant for nested ``dict[str, Entity]``: **insertion order is
 display order**. Callers append on create — nothing in this module sorts.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, get_args, get_type_hints
 
 
@@ -88,7 +88,8 @@ class Project:
         if cls is None:
             return None
         eid = self.allocate_id()
-        container[eid] = cls(id=eid, **data)
+        valid = {f.name for f in fields(cls)} - {"id"}
+        container[eid] = cls(id=eid, **{k: v for k, v in data.items() if k in valid})
         return eid
 
     def update(self, path: list[str], data: dict) -> bool:

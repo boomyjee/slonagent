@@ -29,9 +29,7 @@ class ScreenplaySkill(Skill):
         text: Annotated[str, "Текст сцены (действие, диалоги)"] = "",
     ) -> dict:
         return await self.server.edit(
-            ["scenes"],
-            {"title": title, "location": location, "text": text},
-            approval=True,
+            ["scenes"], locals(), approval_kind="create_scene",
         )
 
     @tool("Обновить существующую сцену по ID. Пользователь сможет отредактировать и одобрить.")
@@ -43,7 +41,5 @@ class ScreenplaySkill(Skill):
         text: Annotated[str, "Новый текст (пусто = не менять)"] = "",
     ) -> dict:
         return await self.server.edit(
-            ["scenes", id],
-            {"title": title, "location": location, "text": text},
-            approval=True,
+            ["scenes", id], locals(), approval_kind="update_scene",
         )

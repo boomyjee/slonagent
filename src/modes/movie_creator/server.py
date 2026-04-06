@@ -41,18 +41,20 @@ class MovieServer:
         self.app = FastAPI()
         self.ws: WebSocket | None = None
         self.active_tab: str = "screenplay"
-        self.active_scope: dict = {}
+        self.selected: dict = {}
         self._on_chat: list = []
         self._on_tab_changed: list = []
         self._pending_approval: asyncio.Future | None = None
         self._setup_routes()
 
-    def save(self):
+    async def save(self):
         self.project_path.parent.mkdir(parents=True, exist_ok=True)
+        data = asdict(self.project)
         self.project_path.write_text(
-            json.dumps(asdict(self.project), ensure_ascii=False, indent=2),
+            json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        await self.send("project_updated", project=data)
 
     def _setup_routes(self):
         no_cache = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
@@ -80,7 +82,7 @@ class MovieServer:
         async def websocket_endpoint(ws: WebSocket):
             await ws.accept()
             self.ws = ws
-            await self.send_project()
+            await self.send("project_updated", project=asdict(self.project))
             try:
                 while True:
                     data = await ws.receive_text()
@@ -98,8 +100,7 @@ class MovieServer:
 
         if t in ("create", "update", "delete"):
             if getattr(self.project, t)(path, data):
-                self.save()
-                await self.send_project()
+                await self.save()
 
         elif t == "generate":
             owner = self.project.resolve(path)
@@ -124,55 +125,34 @@ class MovieServer:
             for cb in self._on_tab_changed:
                 cb(self.active_tab)
 
-        elif t == "scope_changed":
-            self.active_scope = msg.get("scope", {}) or {}
+        elif t == "selected_changed":
+            self.selected = msg.get("selected", {})
 
-    # ── send to client ──
-
-    async def send_project(self):
-        if self.ws:
-            await self.ws.send_text(json.dumps({
-                "type": "project_updated",
-                "project": asdict(self.project),
-            }))
-
-    async def send_chat(self, text: str, role: str = "assistant", stream_id=None, final: bool = False):
-        if self.ws:
-            msg = {"type": "message", "role": role, "text": text}
-            if stream_id is not None:
-                msg["stream_id"] = stream_id
-            if final:
-                msg["final"] = True
-            await self.ws.send_text(json.dumps(msg))
-
-    async def send_event(self, event: str, **kwargs):
+    async def send(self, event: str, **kwargs):
         if self.ws:
             await self.ws.send_text(json.dumps({"type": event, **kwargs}))
 
-    async def request_approval(self, kind: str, data: dict) -> dict:
+    async def send_approval(self, kind: str, data: dict) -> dict:
         """Ask user to approve/edit/reject. Returns {action, data?, reason?}."""
         self._pending_approval = asyncio.get_event_loop().create_future()
-        await self.send_event("approval_request", kind=kind, data=data)
+        await self.send("approval_request", kind=kind, data=data)
         result = await self._pending_approval
         self._pending_approval = None
         return result
 
-    async def edit(self, path: list, fields: dict, approval: bool = False) -> dict:
+    async def edit(self, path: list, fields: dict, *, approval_kind: str = "") -> dict:
         """Create or update an entity at ``path``, optionally with user approval.
 
-        Path ending on a container field = create inside it;
-        path ending on an id inside a container = update that entity.
-        For update approvals: empty fields fall back to current values (so the AI
-        can pass "" for "don't change").
+        If ``approval_kind`` is set, user sees an approval dialog before the change.
+        Path ending on a container field = create; on an id = update.
         """
         target = self.project.resolve(path)
         is_create = isinstance(target, dict)
 
-        if approval:
+        if approval_kind:
             if not is_create and target is not None:
                 fields = {k: (v if v else getattr(target, k, "")) for k, v in fields.items()}
-            kind = (path[-1] if is_create else path[-2]).rstrip("s")
-            result = await self.request_approval(kind, {"path": path, "fields": fields})
+            result = await self.send_approval(approval_kind, {"path": path, "fields": fields})
             if result.get("action") == "reject":
                 return {"status": "rejected", "reason": result.get("reason", "")}
             fields = result.get("data") or {}
@@ -181,14 +161,12 @@ class MovieServer:
             eid = self.project.create(path, fields)
             if eid is None:
                 return {"status": "error", "error": f"invalid path {path}"}
-            self.save()
-            await self.send_project()
+            await self.save()
             return {"status": "created", "id": eid}
         else:
             if not self.project.update(path, fields):
                 return {"status": "error", "error": f"not found {path}"}
-            self.save()
-            await self.send_project()
+            await self.save()
             return {"status": "updated", "id": path[-1]}
 
     def on_chat(self, callback):

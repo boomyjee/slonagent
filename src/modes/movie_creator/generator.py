@@ -33,8 +33,7 @@ class Generator:
             prompt=prompt,
         )
         owner.generations[gen.id] = gen
-        self.server.save()
-        await self.server.send_project()
+        await self.server.save()
 
         await self._queue.put((owner, gen.id))
         if self._worker is None or self._worker.done():
@@ -54,8 +53,7 @@ class Generator:
         if not gen:
             return
         gen.status = "generating"
-        self.server.save()
-        await self.server.send_project()
+        await self.server.save()
 
         try:
             if gen.media_type == "image":
@@ -76,8 +74,7 @@ class Generator:
             gen.status = "failed"
             gen.error = str(e)
 
-        self.server.save()
-        await self.server.send_project()
+        await self.server.save()
 
     async def _gen_image(self, prompt: str) -> bytes:
         url = (

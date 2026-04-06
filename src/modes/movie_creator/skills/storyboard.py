@@ -17,7 +17,7 @@ class StoryboardSkill(Skill):
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         project = self.server.project
-        scene_id = self.server.active_scope.get("scene_id", "")
+        scene_id = self.server.selected.get("scenes", "")
         current_scene = project.scenes.get(scene_id) if scene_id else None
         current_block = ""
         if current_scene:
@@ -46,9 +46,7 @@ class StoryboardSkill(Skill):
         description: Annotated[str, "Описание кадра — крупность, действие, камера, диалог в одном тексте"],
     ) -> dict:
         return await self.server.edit(
-            ["scenes", scene_id, "shots"],
-            {"description": description},
-            approval=True,
+            ["scenes", scene_id, "shots"], locals(), approval_kind="create_shot",
         )
 
     @tool(
@@ -60,7 +58,7 @@ class StoryboardSkill(Skill):
         scene_id: Annotated[str, "ID сцены"],
         descriptions: Annotated[list[str], "Список описаний кадров по порядку"],
     ) -> dict:
-        result = await self.server.request_approval("shots_bulk", {
+        result = await self.server.send_approval("create_shots_bulk", {
             "scene_id": scene_id,
             "text": SHOT_SEPARATOR.join(descriptions),
         })
@@ -77,8 +75,7 @@ class StoryboardSkill(Skill):
                 eid = self.server.project.create(shots_path, {"description": desc})
                 if eid:
                     ids.append(eid)
-        self.server.save()
-        await self.server.send_project()
+        await self.server.save()
         return {"status": "created", "ids": ids, "count": len(ids)}
 
     @tool("Обновить описание существующего кадра. Пользователь сможет отредактировать и одобрить.")
@@ -89,7 +86,5 @@ class StoryboardSkill(Skill):
         description: Annotated[str, "Новое описание кадра"],
     ) -> dict:
         return await self.server.edit(
-            ["scenes", scene_id, "shots", id],
-            {"description": description},
-            approval=True,
+            ["scenes", scene_id, "shots", id], locals(), approval_kind="update_shot",
         )
