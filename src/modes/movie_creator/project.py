@@ -20,6 +20,7 @@ class Generation:
     prompt: str = ""
     references: list[str] = field(default_factory=list)
     file: str = ""
+    character_id: str = ""
     status: str = "generating"
     error: str = ""
 

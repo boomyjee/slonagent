@@ -18,6 +18,7 @@ import { ReferencePicker } from './ReferencePicker.js';
 const MODELS = [
     { id: 'gemini-image', label: 'Nano Banana 2' },
     { id: 'seedream-v5', label: 'Seedream 5.0' },
+    { id: 'seedance-character', label: 'Seedance Character' },
 ];
 let lastModel = 'gemini-image';
 

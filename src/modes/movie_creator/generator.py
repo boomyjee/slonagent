@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 MODELS = {
     "gemini-image": {"label": "Nano Banana 2"},
     "seedream-v5": {"label": "Seedream 5.0"},
+    "seedance-character": {"label": "Seedance Character"},
 }
 
 
@@ -43,7 +44,10 @@ class Generator:
             if gen.model == "gemini-image":
                 data = await self._gemini_image(gen.prompt, refs)
             elif gen.model == "seedream-v5":
-                data = await self._muapi_image("bytedance-seedream-v5.0", gen.prompt)
+                data = await self._muapi_image("seedream-5.0", gen.prompt)
+            elif gen.model == "seedance-character":
+                data, character_id = await self._muapi_character(gen.prompt, refs)
+                gen.character_id = character_id
             else:
                 raise NotImplementedError(f"Unknown model: {gen.model}")
 
@@ -101,17 +105,62 @@ class Generator:
 
     # -- muapi.ai --
 
+    def _muapi_headers(self):
+        return {"Content-Type": "application/json", "x-api-key": self.muapi_key}
+
+    async def _muapi_poll(self, request_id) -> dict:
+        headers = self._muapi_headers()
+        poll_url = f"https://api.muapi.ai/api/v1/predictions/{request_id}/result"
+        while True:
+            await asyncio.sleep(5)
+            r = await asyncio.to_thread(requests.get, poll_url, headers=headers, timeout=30)
+            data = r.json()
+            status = data.get("status", "")
+            if status == "completed":
+                return data
+            elif status == "failed":
+                raise RuntimeError(f"muapi failed: {data.get('error', 'unknown')}")
+
+    async def _muapi_character(self, prompt: str, refs: list) -> tuple[bytes, str]:
+        """Create character sheet, return (image_bytes, character_id)."""
+        if not self.muapi_key:
+            raise RuntimeError("MUAPI_API_KEY not set")
+        images_list = []
+        for ref_path in refs:
+            if ref_path.exists():
+                mime = "image/png" if ref_path.suffix == ".png" else "image/jpeg"
+                data = base64.b64encode(ref_path.read_bytes()).decode()
+                images_list.append(f"data:{mime};base64,{data}")
+        payload = {"prompt": prompt}
+        if images_list:
+            payload["images_list"] = images_list
+        resp = await asyncio.to_thread(
+            requests.post,
+            "https://api.muapi.ai/api/v1/seedance-2-character",
+            json=payload, headers=self._muapi_headers(), timeout=60,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"muapi {resp.status_code}: {resp.text[:300]}")
+        request_id = resp.json().get("request_id")
+        if not request_id:
+            raise RuntimeError(f"No request_id: {resp.text[:300]}")
+        result = await self._muapi_poll(request_id)
+        outputs = result.get("outputs") or []
+        if not outputs:
+            raise RuntimeError("Completed but no outputs")
+        img_resp = await asyncio.to_thread(requests.get, outputs[0], timeout=120)
+        return img_resp.content, request_id
+
     async def _muapi_image(self, endpoint: str, prompt: str) -> bytes:
         """Submit to muapi.ai, poll for result, download image."""
         if not self.muapi_key:
             raise RuntimeError("MUAPI_API_KEY not set")
 
-        headers = {"Content-Type": "application/json", "x-api-key": self.muapi_key}
         resp = await asyncio.to_thread(
             requests.post,
             f"https://api.muapi.ai/api/v1/{endpoint}",
             json={"prompt": prompt, "aspect_ratio": "16:9", "quality": "high"},
-            headers=headers, timeout=60,
+            headers=self._muapi_headers(), timeout=60,
         )
         if resp.status_code != 200:
             raise RuntimeError(f"muapi {resp.status_code}: {resp.text[:300]}")
@@ -120,17 +169,9 @@ class Generator:
         if not request_id:
             raise RuntimeError(f"No request_id: {resp.text[:300]}")
 
-        poll_url = f"https://api.muapi.ai/api/v1/predictions/{request_id}/result"
-        while True:
-            await asyncio.sleep(5)
-            r = await asyncio.to_thread(requests.get, poll_url, headers=headers, timeout=30)
-            data = r.json()
-            status = data.get("status", "")
-            if status == "completed":
-                outputs = data.get("outputs") or []
-                if not outputs:
-                    raise RuntimeError("Completed but no outputs")
-                img_resp = await asyncio.to_thread(requests.get, outputs[0], timeout=120)
-                return img_resp.content
-            elif status == "failed":
-                raise RuntimeError(f"muapi failed: {data.get('error', 'unknown')}")
+        result = await self._muapi_poll(request_id)
+        outputs = result.get("outputs") or []
+        if not outputs:
+            raise RuntimeError("Completed but no outputs")
+        img_resp = await asyncio.to_thread(requests.get, outputs[0], timeout=120)
+        return img_resp.content
