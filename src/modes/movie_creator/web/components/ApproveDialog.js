@@ -5,6 +5,7 @@ import { ApproveView } from '../common/ApproveView.js';
 import { Textarea } from '../common/Form.js';
 import { SceneForm } from './SceneForm.js';
 import { CharacterForm } from './CharacterForm.js';
+import { ShotForm } from './ShotForm.js';
 
 export const ApproveDialog = {
     open(m) {
@@ -16,9 +17,7 @@ export const ApproveDialog = {
         else if (kind === 'create_character' || kind === 'update_character')
             view = html`<${ApproveView} label="Character" approval_message=${m}><${CharacterForm} /><//>`;
         else if (kind === 'create_shot' || kind === 'update_shot')
-            view = html`<${ApproveView} label="Shot" approval_message=${m}>
-                <${Textarea} name="description" label="Description" placeholder="Framing, action, camera, dialogue..." grow />
-            <//>`;
+            view = html`<${ApproveView} label="Shot" approval_message=${m}><${ShotForm} /><//>`;
         else if (kind === 'create_shots_bulk')
             view = html`<${ApproveView} label="Storyboard" approval_message=${m}>
                 <${Textarea} name="text" label="Shot descriptions (separated by ---)" grow />
