@@ -4,7 +4,7 @@ import { Gallery } from './Gallery.js';
 
 export function ShotForm() {
     return html`
-        <${Textarea} name="description" label="Description" placeholder="Framing, action, camera, dialogue..." grow />
+        <${Textarea} name="description" label="Description" placeholder="Framing, action, camera, dialogue..." />
         <${Gallery} kind="frame" defaultPrompt=${shot =>
             `Cinematic film still. ${shot.description || ''}. Cinematic lighting, shallow depth of field.`
         } />

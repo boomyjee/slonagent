@@ -95,18 +95,15 @@ class App extends Component {
         }
 
         return html`
-            <div class="header">
-                <h1>Movie Creator</h1>
-                <span class="status" style=${{ color: connected ? 'var(--green)' : 'var(--red)' }}>
-                    ${connected ? 'connected' : 'disconnected'}
-                </span>
-            </div>
             <div class="tabs">
                 ${['screenplay', 'characters', 'storyboard', 'library'].map(t => html`
                     <div class=${'tab' + (tab === t ? ' active' : '')} onClick=${() => this.setState({ tab: t })}>
                         ${t.charAt(0).toUpperCase() + t.slice(1)}
                     </div>
                 `)}
+                <span class="status" style=${{ color: connected ? 'var(--green)' : 'var(--red)' }}>
+                    ${connected ? '\u25CF' : '\u25CB'}
+                </span>
             </div>
             <div class="main">
                 <div class="sidebar">${sidebarView}</div>
