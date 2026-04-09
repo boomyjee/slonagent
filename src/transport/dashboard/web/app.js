@@ -88,9 +88,9 @@ cl.header = css`
 `;
 cl.main = css`flex: 1; display: flex; overflow: hidden;`;
 cl.left = css`flex: 1; display: flex; flex-direction: column; overflow: hidden;`;
-cl.pane = css`flex: 1; overflow-y: auto; padding: 12px;`;
+cl.pane = css`flex: 1; overflow: auto; padding: 12px;`;
 cl.log = css`
-  font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all;
+  font-size: 12px; line-height: 1.7; white-space: pre;
   & .ts { color: var(--text-dim); margin-right: 8px; font-size: 11px; }
   &.DEBUG { color: var(--text-dim); }
   &.INFO { color: var(--green); }
