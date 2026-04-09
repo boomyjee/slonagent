@@ -55,6 +55,11 @@ export class Chat extends Component {
                 if (ev.active) return { messages: [...messages, { kind: 'processing' }] };
                 return { messages: messages.filter(x => x.kind !== 'processing') };
             });
+        } else if (m === 'send_system_prompt') {
+            const preview = ev.text.split('\n')[0].slice(0, 80);
+            this.setState(({ messages }) => ({
+                messages: [...messages, { kind: 'tool', name: preview, args: null, result: ev.text }]
+            }));
         } else if (m === 'inject_message') {
             this.setState(({ messages }) => ({
                 messages: [...messages, { kind: 'msg', role: 'inject', text: ev.text }]
