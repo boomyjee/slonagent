@@ -3,57 +3,31 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 
 os.chdir(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-with open("scripts/diary_enrichment/.config.json", encoding="utf-8") as f:
-    config = json.load(f)
+with open("scripts/diary_enrichment/.config.json", encoding="utf-8") as f: config = json.load(f)
 os.environ.update(config.get("env", {}))
-
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message
-from aiogram.client.session.aiohttp import AiohttpSession
-
-import tempfile
 
 from agent import Agent
 from src.transport.telegram import TelegramTransport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-
 async def main():
-    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-    bot = Bot(token=config["telegram"]["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
-    dp = Dispatcher()
-
-    allowed = config["telegram"]["allowed_user_ids"]
-    chat_id = allowed[0]
-
-    TelegramTransport.bot = bot
-    transport = TelegramTransport(chat_id=chat_id, thread_id=None, verbose=False)
-    agent = Agent.from_config(config["agent"],
-        id="diary",
-        agent_dir=tempfile.mkdtemp(),
-        transport=transport,
-    )
-    await agent.start(run_loop=False)
-
-    skill = next(s for s in agent.skills if hasattr(s, 'start_enrichment'))
-
-    async def run_enrichment():
-        await skill.start_enrichment()
-        await dp.stop_polling()
-
-    async def on_message(message: Message):
-        if not message.from_user or message.from_user.id not in allowed: return
-        await agent.transport.handle_message(message)
-
-    dp.message()(on_message)
-    await bot.get_updates(offset=-1)
-    asyncio.create_task(run_enrichment())
-    await dp.start_polling(bot)
-
+    async def make_agent(agent_id, tg, **_):
+        if not agent_id=="main": return None
+        agent = Agent.from_config(config["agent"], id="main", transport=tg, agent_dir=tempfile.mkdtemp())
+        await agent.start(run_loop=False)
+        async def run_skill():
+            skill = next(s for s in agent.skills if hasattr(s, "start_enrichment"))
+            try: await skill.start_enrichment()
+            except Exception: logging.exception("enrichment stop")
+            finally: asyncio.get_running_loop().stop()
+        asyncio.create_task(run_skill())
+        return agent
+    await TelegramTransport.listen(config["telegram"], make_agent)
 
 if __name__ == "__main__":
     try:
