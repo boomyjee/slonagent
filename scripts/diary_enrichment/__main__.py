@@ -43,7 +43,7 @@ async def main():
 
     async def run_enrichment():
         await skill.start_enrichment()
-        dp.stop_polling()
+        await dp.stop_polling()
 
     async def on_message(message: Message):
         if not message.from_user or message.from_user.id not in allowed: return

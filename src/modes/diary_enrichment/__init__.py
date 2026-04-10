@@ -244,7 +244,7 @@ class DiaryEnrichmentSkill(Skill):
         super().__init__()
         self._data_dir = Path(data_dir)
         self._photos_dir = Path(photos_dir)
-        self._years = years or list(range(2014, 2025))
+        self._years = years or list(range(2014, 2026))
         self._model_name = model_name
         self._api_key = api_key
         self._base_url = base_url
