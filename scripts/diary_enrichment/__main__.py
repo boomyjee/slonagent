@@ -1,17 +1,10 @@
 """Run diary enrichment as a standalone app with its own Telegram bot."""
-import asyncio
-import json
-import logging
-import os
-import tempfile
-
-os.chdir(os.path.join(os.path.dirname(__file__), "..", ".."))
+import asyncio, json, logging, os, tempfile
+from agent import Agent
+from src.transport.telegram import TelegramTransport
 
 with open("scripts/diary_enrichment/.config.json", encoding="utf-8") as f: config = json.load(f)
 os.environ.update(config.get("env", {}))
-
-from agent import Agent
-from src.transport.telegram import TelegramTransport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
