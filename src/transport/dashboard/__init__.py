@@ -94,7 +94,7 @@ class DashboardTransport(WebTransport):
 
     async def _ws(self, ws: WebSocket):
         await ws.accept()
-        for event in self._buffer:
+        for event in list(self._buffer):
             await ws.send_text(json.dumps(event, ensure_ascii=False))
         self._clients.add(ws)
         try:
