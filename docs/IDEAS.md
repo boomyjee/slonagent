@@ -36,3 +36,23 @@
 
 ## Стриминг выволнения команд в докере
 Проблема в том, что вывод может быть очень большой и сейчас агенту отдается ограниченное число строк, вопрос как это стримить в телеграм. Наверное телеграм выводит всегда последние строки не более 2000 символов, будто консоль работает внутри сообщения.
+
+## Contentless FTS5 для facts_fts
+
+Сейчас в [src/memory/providers/fact/storage.py](../src/memory/providers/fact/storage.py) виртуальная таблица `facts_fts` создана как обычный FTS5:
+
+```sql
+CREATE VIRTUAL TABLE facts_fts USING fts5(fact_id UNINDEXED, fact);
+```
+
+Текст факта дублируется: раз в `facts.fact`, раз в `facts_fts.fact`. На больших memory это лишние гигабайты.
+
+Вариант — перейти на **contentless FTS5**:
+
+```sql
+CREATE VIRTUAL TABLE facts_fts USING fts5(fact, content='facts', content_rowid='rowid');
+```
+
+Индекс не хранит копию текста, при выдаче результатов достаёт его из `facts` по `rowid`. Экономия ~30-40% места. Миграция требует drop + recreate таблицы и триггеров. Не срочно — пока память небольшая, дублирование некритично.
+
+Подсмотрено в prism-mcp (`lib/prism-mcp`), у них так сделано изначально.
