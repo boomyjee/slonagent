@@ -159,11 +159,12 @@ class CheckersSkill(Skill):
                 f"Вызови comment чтобы прокомментировать оба хода."
             )
             await commentator.memory.add_turn({"role": "user", "content": prompt})
-            tool_calls, text = await commentator.llm(tool_choice="commentator_comment")
-            if tool_calls:
-                await commentator.dispatch_tool_calls(tool_calls)
-            elif text:
-                await commentator.memory.add_turn({"role": "assistant", "content": text})
+            turn = await commentator.llm(tool_choice="commentator_comment")
+            if turn.get("tool_calls"):
+                result_turns = await commentator.dispatch_tool_calls(turn)
+                await commentator.memory.add_turn(turn, *result_turns)
+            else:
+                await commentator.memory.add_turn(turn)
         except Exception as e:
             log.warning("[checkers] LLM comment failed: %s", e)
             await self.agent.transport.send_message(f"Не удалось сгенерировать комментарий: {e}")

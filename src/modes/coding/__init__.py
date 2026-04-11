@@ -114,24 +114,28 @@ class CodingModeSkill(Skill):
                 await server.send_chat(msg, role="user")
                 await sub.memory.add_turn({"role": "user", "content": content_parts})
 
-                tool_calls, text = await sub.llm()
-                if text:
-                    await server.send_chat(text)
+                turn = await sub.llm()
+                if turn.get("content"):
+                    await server.send_chat(turn["content"])
 
-                while tool_calls:
-                    for tc in tool_calls:
+                while turn.get("tool_calls"):
+                    for tc in turn["tool_calls"]:
                         name = tc["function"]["name"]
                         args = json.loads(tc["function"].get("arguments") or "{}")
                         await server.send_tool_call(name, args)
 
-                    await sub.dispatch_tool_calls(tool_calls)
+                    result_turns = await sub.dispatch_tool_calls(turn)
+                    await sub.memory.add_turn(turn, *result_turns)
 
                     if finish_skill.finished:
                         break
 
-                    tool_calls, text = await sub.llm()
-                    if text:
-                        await server.send_chat(text)
+                    turn = await sub.llm()
+                    if turn.get("content"):
+                        await server.send_chat(turn["content"])
+
+                if not turn.get("tool_calls"):
+                    await sub.memory.add_turn(turn)
 
                 if finish_skill.finished:
                     break

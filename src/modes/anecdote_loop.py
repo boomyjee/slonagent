@@ -1,3 +1,4 @@
+import json
 from typing import Annotated
 
 from agent import Skill, tool
@@ -42,10 +43,12 @@ class AnecdoteLoopSkill(Skill):
 
         while True:
             await sub.transport.send_processing(True)
-            tool_calls, _ = await sub.llm(tool_choice="telljoke_tell_joke")
+            turn = await sub.llm(tool_choice="telljoke_tell_joke")
             await sub.transport.send_processing(False)
-            results = await sub.dispatch_tool_calls(tool_calls)
+            result_turns = await sub.dispatch_tool_calls(turn)
+            await sub.memory.add_turn(turn, *result_turns)
 
+            results = [json.loads(t["content"]) for t in result_turns if t.get("role") == "tool"]
             for r in results:
                 if r.get("rating"):
                     ratings.append(r["rating"])

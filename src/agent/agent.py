@@ -1,8 +1,9 @@
-import asyncio, base64, io, json, os, logging, weakref
+import asyncio, base64, io, json, os, logging, re, weakref
 import numpy as np
 import soundfile as sf
 from datetime import datetime
 import httpx
+from openai.lib.streaming.chat import ChatCompletionStreamState
 from src.memory.memory import Memory
 from src.agent.agent_skill import AgentSkill
 
@@ -216,95 +217,79 @@ class Agent:
                 kwargs["extra_body"] = {"extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
 
                 stream = await self.client.chat.completions.create(**kwargs)
-                text = ""
-                thinking_text = ""
-                self._stream_counter += 1
-                thinking_id = self._stream_counter
-                self._stream_counter += 1
-                stream_id = self._stream_counter
-                accumulated_calls: dict[int, dict] = {}
+
+                state = ChatCompletionStreamState()
+                display_text = ""
+                display_thinking = ""
+                thinking_id = self._stream_counter = self._stream_counter + 1
+                stream_id = self._stream_counter = self._stream_counter + 1
+                is_thought = False
+                tc_counter = 0
+                seen_role = False
 
                 async for chunk in stream:
-                    if self._stop_event.is_set():
-                        break
+                    # Google-fix: tool_calls шлёт без index, role="assistant" в каждом чанке
+                    if chunk.choices:
+                        delta = chunk.choices[0].delta
+                        for tc in delta.tool_calls or ():
+                            if tc.index is None:
+                                tc.index = tc_counter
+                                tc_counter += 1
+                        if delta.role:
+                            if seen_role:
+                                delta.model_fields_set.discard("role")
+                                delta.role = None
+                            else:
+                                seen_role = True
+                    state.handle_chunk(chunk)
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
 
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            idx = tc.index if tc.index is not None else len(accumulated_calls)
-                            entry = accumulated_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                            if tc.id:
-                                entry["id"] = tc.id
-                            if tc.function and tc.function.name:
-                                entry["name"] += tc.function.name
-                            if tc.function and tc.function.arguments:
-                                entry["arguments"] += tc.function.arguments
-                            # Gemini thinking models attach a thought_signature to tool calls.
-                            # Path: tc.model_extra['extra_content']['google']['thought_signature']
-                            # It must be preserved and sent back in subsequent requests.
-                            tc_extra = getattr(tc, "model_extra", None) or {}
-                            sig = (tc_extra
-                                   .get("extra_content", {})
-                                   .get("google", {})
-                                   .get("thought_signature"))
-                            if sig:
-                                entry["thought_signature"] = sig
-
                     delta_extra = getattr(delta, "model_extra", None) or {}
-                    # Gemini: мысли приходят в delta.content с флагом extra_content.google.thought=True
-                    # OpenAI o1: мысли в delta.model_extra.reasoning_content
-                    # Gemini: thinking chunks помечены флагом extra_content.google.thought=True
-                    # и приходят в delta.content
-                    is_thought = delta_extra.get("extra_content", {}).get("google", {}).get("thought")
-                    if delta.content:
-                        if is_thought:
-                            thinking_text += delta.content.removeprefix("<thought>")
-                            await self.transport.send_thinking(thinking_text, thinking_id)
-                        else:
-                            content = delta.content.removeprefix("</thought>")
-                            if content:
-                                if thinking_text and not text:
-                                    await self.transport.send_thinking(thinking_text, thinking_id, final=True)
-                                text += content
-                                await self.transport.send_message(text, stream_id, final=False)
-                    # OpenAI o1: reasoning_content, OpenRouter: reasoning
                     thought_extra = delta_extra.get("reasoning_content") or delta_extra.get("reasoning")
                     if thought_extra and isinstance(thought_extra, str):
-                        thinking_text += thought_extra
-                        await self.transport.send_thinking(thinking_text, thinking_id)
+                        display_thinking += thought_extra
+                        await self.transport.send_thinking(display_thinking, thinking_id)
 
-                    known = {"content", "tool_calls", "role", "refusal"}
-                    unexpected = (delta.model_fields_set or set()) - known
-                    if unexpected:
-                        logging.warning("[stream] unknown delta fields: %s", unexpected)
+                    # Gemini заворачивает мысли в литералы <thought>...</thought> прямо в content
+                    if content := delta.content or "":
+                        text = ""
+                        if "<thought>" in content: is_thought = True
+                        if is_thought:
+                            thought, *rest = content.removeprefix("<thought>").split("</thought>")
+                            if rest:
+                                is_thought = False
+                                text = rest[0]
+                            display_thinking += thought
+                            await self.transport.send_thinking(display_thinking, thinking_id, final=not is_thought)
+                        else:
+                            text = content
+                            
+                        if text:
+                            display_text += text
+                            await self.transport.send_message(display_text, stream_id, final=False)
 
-                if thinking_text and not text:
-                    await self.transport.send_thinking(thinking_text, thinking_id, final=True)
-                if text and stream_id:
-                    await self.transport.send_message(text, stream_id, final=True)
+                if display_thinking and not display_text:
+                    await self.transport.send_thinking(display_thinking, thinking_id, final=True)
+                if display_text:
+                    await self.transport.send_message(display_text, stream_id, final=True)
 
-                finish_reason = chunk.choices[0].finish_reason if chunk and chunk.choices else None
+                final = state.get_final_completion()
+                finish_reason = final.choices[0].finish_reason if final.choices else None
                 if finish_reason and finish_reason not in ("stop", "tool_calls"):
                     raise BadFinishReason(finish_reason)
 
-                tool_calls = []
-                for idx in sorted(accumulated_calls):
-                    call = accumulated_calls[idx]
-                    logging.info("[stream] function_call: %s", call["name"])
-                    tc_dict = {
-                        "id": call["id"], "type": "function",
-                        "function": {"name": call["name"], "arguments": call["arguments"]},
-                    }
-                    # Gemini thinking models return thought_signature in extra_content.google.
-                    # Must be echoed back at the same level in subsequent requests.
-                    if call.get("thought_signature"):
-                        tc_dict["extra_content"] = {"google": {"thought_signature": call["thought_signature"]}}
-                    tool_calls.append(tc_dict)
+                turn = final.choices[0].message.model_dump(exclude_none=True)
+                if turn.get("content"):
+                    turn["content"] = re.sub(r"<thought>.*?</thought>", "", turn["content"], flags=re.DOTALL).strip() or None
+
+                for tc in turn.get("tool_calls") or ():
+                    tc.pop("index", None)
+                    logging.info("[stream] function_call: %s", tc["function"]["name"])
 
                 logging.info("[agent] ← LLM %s", self.model_name)
-                return tool_calls, text
+                return turn
             except BadFinishReason:
                 raise
             except Exception as e:
@@ -392,11 +377,11 @@ class Agent:
                 return
         await self._message_queue.put((content_parts, user_message_id, trigger_answer))
 
-    async def dispatch_tool_calls(self, tool_calls: list) -> list[dict]:
+    async def dispatch_tool_calls(self, turn: dict) -> list[dict]:
+        tool_calls = turn.get("tool_calls") or []
         tool_to_skill = {decl["function"]["name"]: skill for skill in self.skills for decl in skill.get_tools()}
         extra_parts = []
         tool_turns = []
-        results = []
         for fc in tool_calls:
             name = fc["function"]["name"]
             args = json.loads(fc["function"].get("arguments") or "{}")
@@ -406,7 +391,6 @@ class Agent:
                 logging.warning("Tool %s not found in skills", name)
                 tool_turns.append({"role": "tool", "tool_call_id": fc["id"], "name": name,
                                    "content": json.dumps({"error": f"Tool {name} not found"})})
-                results.append({"error": f"Tool {name} not found"})
                 continue
 
             await self.transport.on_tool_call(name, args)
@@ -422,14 +406,10 @@ class Agent:
                 "role": "tool", "tool_call_id": fc["id"], "name": name,
                 "content": json.dumps(result if isinstance(result, dict) else {"result": result}, ensure_ascii=False),
             })
-            results.append(result if isinstance(result, dict) else {"result": result})
 
-        await self.memory.add_turn({"role": "assistant", "content": None, "tool_calls": tool_calls})
-        for tool_turn in tool_turns:
-            await self.memory.add_turn(tool_turn)
         if extra_parts:
-            await self.memory.add_turn({"role": "user", "content": extra_parts})
-        return results
+            tool_turns.append({"role": "user", "content": extra_parts})
+        return tool_turns
 
 
     async def loop(self):
@@ -442,18 +422,20 @@ class Agent:
                 try:
                     await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
                     if not trigger_answer: return
-                    
+
                     await self.transport.send_processing(True)
-                    tool_calls, text = await self.llm()
+                    turn = await self.llm()
                     iteration = 0
-                    while tool_calls and iteration < self.max_iterations:
-                        await self.dispatch_tool_calls(tool_calls)
+                    while turn.get("tool_calls") and iteration < self.max_iterations:
+                        result_turns = await self.dispatch_tool_calls(turn)
+                        await self.memory.add_turn(turn, *result_turns)
                         iteration += 1
-                        tool_calls, text = await self.llm()
-                    if tool_calls:
+                        turn = await self.llm()
+                    if turn.get("tool_calls"):
                         logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
                         await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
-                    await self.memory.add_turn({"role": "assistant", "content": text or ""})
+                    else:
+                        await self.memory.add_turn(turn)
                 except Exception as e:
                     logging.warning("Ошибка агента: %s", e, exc_info=True)
                     await self.transport.send_message(f"Ошибка: {e}")

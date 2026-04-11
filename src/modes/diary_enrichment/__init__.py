@@ -406,7 +406,7 @@ class DiaryEnrichmentSkill(Skill):
             await transport.send_message(f"_🤔 LLM думает (итерация {iteration + 1})..._")
             await sub.transport.send_processing(True)
             try:
-                tool_calls, text = await sub.llm()
+                turn = await sub.llm()
             except BadFinishReason as e:
                 await sub.transport.send_processing(False)
                 if self._fallback_model_name and model_name != self._fallback_model_name:
@@ -423,12 +423,13 @@ class DiaryEnrichmentSkill(Skill):
                 return False
             await sub.transport.send_processing(False)
 
+            tool_calls = turn.get("tool_calls") or []
             if tool_calls:
                 names = ", ".join(c["function"]["name"] for c in tool_calls)
                 await transport.send_message(f"🔧 Инструменты: {names}")
 
             if not tool_calls:
-                await sub.memory.add_turn({"role": "assistant", "content": text or ""})
+                await sub.memory.add_turn(turn)
                 await sub.memory.add_turn({"role": "user", "content": (
                     "Ты не вызвал enrich_diary. Обработай неделю и вызови enrich_diary со всеми днями."
                 )})
@@ -438,9 +439,11 @@ class DiaryEnrichmentSkill(Skill):
             _glossary_names = {"enrichment_glossary_add", "enrichment_glossary_update"}
             glossary_calls = [c for c in tool_calls if c["function"]["name"] in _glossary_names]
             other_calls = [c for c in tool_calls if c["function"]["name"] not in _glossary_names]
+            turn["tool_calls"] = glossary_calls + other_calls
 
             skill.glossary_rejected = False
-            await sub.dispatch_tool_calls(glossary_calls + other_calls)
+            result_turns = await sub.dispatch_tool_calls(turn)
+            await sub.memory.add_turn(turn, *result_turns)
 
             if skill.enrich_approved:
                 return True

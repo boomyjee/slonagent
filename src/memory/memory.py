@@ -191,11 +191,12 @@ class Memory:
 
         return self._turns
 
-    async def add_turn(self, turn: dict):
-        if "_timestamp" not in turn:
-            turn = {**turn, "_timestamp": datetime.now(timezone.utc).isoformat()}
-        self._turns.append(turn)
-        if turn.get("role") == "assistant" and not turn.get("tool_calls"):
-            self.save()
-        for provider in self.providers:
-            await provider.add_turn(turn)
+    async def add_turn(self, *turns: dict):
+        for turn in turns:
+            if "_timestamp" not in turn:
+                turn = {**turn, "_timestamp": datetime.now(timezone.utc).isoformat()}
+            self._turns.append(turn)
+            if turn.get("role") == "assistant" and not turn.get("tool_calls"):
+                self.save()
+            for provider in self.providers:
+                await provider.add_turn(turn)

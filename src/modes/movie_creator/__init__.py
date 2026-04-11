@@ -70,13 +70,14 @@ class MovieCreatorSkill(Skill):
             await sub.transport.send_processing(True)
             try:
                 await sub.memory.add_turn({"role": "user", "content": content_parts})
-                tool_calls, text = await sub.llm()
+                turn = await sub.llm()
 
-                while tool_calls:
-                    await sub.dispatch_tool_calls(tool_calls)
-                    tool_calls, text = await sub.llm()
+                while turn.get("tool_calls"):
+                    result_turns = await sub.dispatch_tool_calls(turn)
+                    await sub.memory.add_turn(turn, *result_turns)
+                    turn = await sub.llm()
 
-                await sub.memory.add_turn({"role": "assistant", "content": text or ""})
+                await sub.memory.add_turn(turn)
             except Exception as e:
                 log.exception("[movie_creator] error in chat loop")
                 await sub.transport.send_message(f"Ошибка: {e}")
