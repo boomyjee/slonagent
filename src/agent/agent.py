@@ -378,7 +378,11 @@ class Agent:
         user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
         for skill in self.skills:
             if skill.is_bypass_command(user_query):
-                result = await skill.dispatch_bypass(user_query)
+                self._tool_stop_event.clear()
+                result = await stoppable(skill.dispatch_bypass(user_query), self._tool_stop_event)
+                if self.transport.agent is not self: self.transport.set_agent(self)
+                if result is None:
+                    await self.transport.send_message("⚠️ Прервано пользователем.")
                 if result:
                     await self.transport.send_message(result)
                 return
@@ -405,8 +409,7 @@ class Agent:
             result = await stoppable(skill.dispatch_tool_call(fc), self._tool_stop_event)
             if result is None:
                 result = {"error": "прервано пользователем"}
-            if self.transport.agent is not self:
-                self.transport.set_agent(self)
+            if self.transport.agent is not self: self.transport.set_agent(self)
             await self.transport.on_tool_result(name, result)
             extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
             tool_turns.append({
