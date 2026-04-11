@@ -1,32 +1,20 @@
 """WebAgent mode — a worker sub-agent reachable from a bookmarklet chat widget.
 
-Architecture
-------------
-One tool invocation = one sub-agent "worker". The sub captures the parent's
-transport (Telegram + Dashboard) via a MultiTransport that fans out to both
-the parent's transport stack AND a fresh `WebAgentTransport`. When the tool
-exits, the parent's dispatch loop auto-restores its transport back to itself
-(agent.py:401).
+One tool invocation = one sub-agent. Its transport is a MultiTransport that
+fans out to both the parent's transport stack AND a fresh `WebAgentTransport`;
+when the tool exits, agent.py's dispatch loop restores the parent's transport
+automatically (agent.py:401).
 
-Agent loop is 1:1 with upstream page-agent `PageAgentCore.execute`
-([PageAgentCore.ts:196-349](lib/page-agent/packages/core/src/PageAgentCore.ts#L196-L349)):
+Agent loop mirrors upstream page-agent
+[PageAgentCore.execute](lib/page-agent/packages/core/src/PageAgentCore.ts#L196-L349):
+the user message is rebuilt every step from <agent_state>+<agent_history>+
+<browser_state> and stuffed into `sub.memory` as a single turn (so `sub.llm()`
+sees `[system, user]` every time). `self.history` lives here, not in
+`sub.memory` — memory is just a carrier for the synthesized user prompt.
 
-- System prompt is static (see `PageSkill.SYSTEM_PROMPT`).
-- The user message is rebuilt every step from `<agent_state>` (task+step),
-  `<agent_history>` (past `<step_N>` blocks), and `<browser_state>`. We
-  throw away `sub.memory` each step and stuff a single synthesized user turn
-  in — `sub.llm()` ends up seeing `[system, user]`, exactly like upstream.
-- One forced macro-tool `AgentOutput` per step (`tool_choice="AgentOutput"`),
-  whose `action` branch carries the actual command. `done` terminates the
-  task, `ask_user` blocks on the next user message, everything else is
-  dispatched through `PageSkill.execute_action`.
-- `self.history` lives in this file, not in `sub.memory` — memory is just a
-  transport for the rebuilt user prompt.
-
-- **WebAgentTransport** is a regular `WebTransport` mounted at
-  `/{sub_id}/web_agent/`. The dashboard routes the widget needs for `lib.js`
-  come from the parent's DashboardTransport getting `set_agent(sub)` as part
-  of the MultiTransport cascade — they end up mounted under the sub's id too.
+`WebAgentTransport` mounts at `/{sub_id}/web_agent/`. The dashboard routes
+the widget's lib.js needs are served at `/{sub_id}/dashboard/` thanks to the
+MultiTransport cascading `set_agent(sub)` into the parent's DashboardTransport.
 """
 import asyncio, json, logging, uuid
 from datetime import datetime
@@ -44,26 +32,23 @@ log = logging.getLogger(__name__)
 
 
 class WebAgentTransport(WebTransport):
-    """Adds a request/response RPC layer on top of the chat-transport WebSocket.
-
-    The widget's run.js receives `{type: 'action', method, args, request_id}`,
-    calls into its embedded `Page` controller, and replies with
-    `{type: 'action_result', request_id, result|error}`. `call_action` below
-    turns that into a plain Python coroutine the skill can await.
+    """Adds a request/response RPC layer on top of the chat WebSocket: the
+    widget replies to `{type:'action', method, args, request_id}` with
+    `{type:'action_result', ...}`, turned into an awaitable by `call_action`.
     """
 
     def __init__(self, verbose: bool = False):
         super().__init__(prefix="/web_agent", verbose=verbose)
         self.ws: WebSocket | None = None
-        # method stored alongside the future so we know how to recover when
-        # a new connection supersedes the old one mid-action.
+        # `method` kept alongside the future so _on_ws_connect knows how to
+        # recover when a new widget supersedes the old one mid-action
+        # (getBrowserState → fail; everything else → "navigation success").
         self._pending: dict[str, tuple[str, asyncio.Future]] = {}
-        # Incremented on every widget reconnect. The main task loop snapshots
-        # this before observe and checks after LLM — if it changed, the widget
-        # was replaced (e.g. user hit F5) and the step's plan is stale; we
-        # discard it and retry from observe. Without this, pending actions
-        # are resolved as "🔄 navigation success" by _on_ws_connect and the
-        # agent happily dispatches clicks to a fresh, un-indexed PageController.
+        # Bumped on every widget reconnect. _execute_task snapshots this
+        # before observe and rechecks after LLM — if it changed, the plan
+        # is stale (the widget got replaced, e.g. F5 or agent's own click
+        # caused navigation) and we retry the step. Without this, the agent
+        # would dispatch clicks to a fresh, un-indexed PageController.
         self.generation = 0
 
     async def call_action(self, method: str, *args, timeout: float = 30.0):
@@ -73,12 +58,7 @@ class WebAgentTransport(WebTransport):
         fut = asyncio.get_event_loop().create_future()
         self._pending[request_id] = (method, fut)
         try:
-            await self.send({
-                "type": "action",
-                "method": method,
-                "args": list(args),
-                "request_id": request_id,
-            })
+            await self.send({"type": "action","method": method,"args": list(args),"request_id": request_id})
             return await asyncio.wait_for(fut, timeout=timeout)
         finally:
             self._pending.pop(request_id, None)
@@ -96,10 +76,10 @@ class WebAgentTransport(WebTransport):
         await super()._handle_ws_message(msg)
 
     async def send(self, event: dict):
-        # action — это RPC (клик/ввод/скролл). Его нельзя буферить: иначе при
-        # реконнекте после навигации (которую сам же этот клик вызвал) новый
-        # виджет увидит старый action в replay и выполнит его ещё раз →
-        # бесконечный цикл навигаций. Буферим только transport-события (чат).
+        # Do NOT buffer `action` events — on reconnect after the click that
+        # caused the navigation, the new widget would replay the old action
+        # and re-click, causing an infinite navigation loop. Only chat
+        # (transport) events go into the replay buffer.
         if event.get("type") != "action":
             self._buffer.append(event)
         if self.ws:
@@ -109,15 +89,11 @@ class WebAgentTransport(WebTransport):
                 self.ws = None
 
     async def _on_ws_connect(self, ws: WebSocket):
-        """Single-tab transport with full lifecycle override.
-
-        New connection kicks the previous widget out (code 4001 → run.js
-        removes it from the old page). In-flight actions are treated as
-        'click caused navigation, succeeded' — so the agent gets a success
-        result for the click and just keeps going on the new page.
-        getBrowserState in flight during nav is the degenerate case: we
-        fail it, and PageSkill.get_context_prompt swallows the RuntimeError
-        and returns empty (next iteration re-reads from the new page)."""
+        """Single-tab transport: a new widget kicks the old one out (close
+        code 4001 → run.js removes itself from the old page). In-flight
+        actions get resolved as "navigation success" except getBrowserState,
+        which gets failed so PageSkill can retry the observe on the new page.
+        """
         if self.ws:
             try: await self.ws.close(code=4001)
             except Exception: pass
@@ -128,8 +104,7 @@ class WebAgentTransport(WebTransport):
             await ws.send_text(json.dumps(event, ensure_ascii=False))
 
         for method, fut in self._pending.values():
-            if fut.done():
-                continue
+            if fut.done(): continue
             if method == "getBrowserState":
                 fut.set_exception(RuntimeError("widget reconnected"))
             else:
@@ -151,13 +126,6 @@ class WebAgentTransport(WebTransport):
             if self.ws is ws:
                 self.ws = None
 
-
-
-def _extract_text(content_parts: list) -> str:
-    return " ".join(
-        p.get("text", "") for p in content_parts
-        if isinstance(p, dict) and "text" in p
-    ).strip()
 
 
 def _assemble_user_prompt(task: str, history: list, browser_state: dict | None, step: int) -> str:
@@ -194,11 +162,10 @@ def _assemble_user_prompt(task: str, history: list, browser_state: dict | None, 
         out.append(browser_state.get("content", ""))
         out.append(browser_state.get("footer", ""))
     else:
-        # Happens when the agent navigated (e.g. clicked an external link)
-        # to a page where the userscript doesn't match → no widget → no WS.
-        # The agent has NO way to recover from this: we can't navigate back
-        # from Python because only the widget can do that, and it isn't
-        # there. The only valid move is `done` with a failure text.
+        # Agent navigated to a page where no widget could be injected
+        # (bookmarklet: didn't re-click; extension: content script blocked
+        # by page CSP). Python can't recover from this — the only valid
+        # action is `done` with success=false.
         out.append(
             "⚠️ The widget is NOT available on the current page. "
             "A previous action navigated the browser to a URL that is outside "
@@ -235,7 +202,10 @@ class WebAgentModeSkill(Skill):
             await self.agent.transport.send_message(first_msg)
             while True:
                 content_parts, _, trigger_answer = await sub.next_message()
-                task = _extract_text(content_parts)
+                task = " ".join(
+                    p.get("text", "") for p in content_parts
+                    if isinstance(p, dict) and "text" in p
+                ).strip()
                 if not task or not trigger_answer:
                     continue
                 try:
@@ -249,24 +219,14 @@ class WebAgentModeSkill(Skill):
             web_transport.remove_routes()
 
     async def _execute_task(self, sub, page_skill: PageSkill, task: str):
-        """Page-agent-style React loop: observe → think → act → loop until `done`.
-
-        Mirrors [PageAgentCore.execute](lib/page-agent/packages/core/src/PageAgentCore.ts#L196).
-        Uses standard `sub.dispatch_tool_calls` so the widget renders a normal
-        tool card for `AgentOutput`. `done` is detected via `action_name` in
-        the dispatch return value.
-
-        Navigation robustness: widget snapshots its `generation` counter
-        before observe; if it changes by dispatch time (agent's own click
-        caused navigation → new widget), the step is discarded and retried.
-        `stepDelay` at the tail gives navigations time to settle.
+        """observe → think → act loop, mirrors upstream
+        [PageAgentCore.execute](lib/page-agent/packages/core/src/PageAgentCore.ts#L196).
         """
         web_transport: WebAgentTransport = page_skill.transport
         history: list[dict] = []
         last_url = ""
 
         await sub.transport.send_processing(True)
-
         for step in range(MAX_STEPS):
             generation = web_transport.generation
 
@@ -277,19 +237,17 @@ class WebAgentModeSkill(Skill):
                 history.append({"type": "observation", "content": f"Page navigated to → {current_url}"})
                 last_url = current_url
 
-            # assemble user prompt and swap it into sub.memory
             user_prompt = _assemble_user_prompt(task, history, browser_state, step)
             sub.memory.clear()
             await sub.memory.add_turn({"role": "user", "content": user_prompt})
 
-            # think — one forced AgentOutput call, single action guaranteed
+            # think
             turn = await sub.llm(tool_choice="AgentOutput", parallel_tool_calls=False)
             tool_calls = turn.get("tool_calls") or []
             if not tool_calls:
-                # Gemini sometimes drops the forced tool call after emitting a
-                # thinking block (stream ends mid-thought, no </thought>, no
-                # tool_calls). Instead of aborting the whole task, push a sys
-                # observation telling the model what went wrong and retry.
+                # Gemini sometimes drops the forced tool call after a
+                # thinking block (stream ends mid-thought). Push a <sys>
+                # nudge and retry the step instead of aborting.
                 log.warning("[web_agent] step %d: no tool_calls, turn=%r", step, turn)
                 history.append({
                     "type": "observation",
@@ -301,15 +259,12 @@ class WebAgentModeSkill(Skill):
                 })
                 continue
 
-            # Widget reconnected between observe and now → state is stale,
-            # whatever the LLM decided is based on the wrong page. Discard.
+            # Stale plan: widget reconnected between observe and now.
             if web_transport.generation != generation:
                 log.info("[web_agent] widget reconnected during step %d (gen %d → %d), retrying",
                          step, generation, web_transport.generation)
                 continue
 
-            # Reflection fields live in the tool_call args — grab them before
-            # dispatch so we can stuff them into `<step_N>` blocks.
             args = json.loads(tool_calls[0]["function"].get("arguments") or "{}")
             reflection = {
                 "evaluation_previous_goal": args.get("evaluation_previous_goal") or "",
@@ -317,8 +272,7 @@ class WebAgentModeSkill(Skill):
                 "next_goal": args.get("next_goal") or "",
             }
 
-            # act — standard dispatch emits the tool card and runs our
-            # PageSkill.dispatch_tool_call override.
+            # act
             tool_turns = await sub.dispatch_tool_calls(turn)
             tool_content = json.loads(tool_turns[0]["content"]) if tool_turns else {}
             action_name = tool_content.get("action_name")
@@ -328,15 +282,10 @@ class WebAgentModeSkill(Skill):
                 await sub.transport.send_message(result)
                 return
 
-            history.append({
-                "type": "step",
-                "step": step + 1,
-                "reflection": reflection,
-                "result": result,
-            })
+            history.append({"type": "step","step": step + 1,"reflection": reflection,"result": result})
 
-            # Let navigation (if any) start before next observe — upstream
-            # PageAgentCore uses stepDelay=0.4 for the same reason.
+            # Give navigation time to settle before the next observe
+            # (upstream PageAgentCore uses stepDelay=0.4).
             await asyncio.sleep(0.5)
 
         await sub.transport.send_message(f"⚠️ Достигнут лимит шагов ({MAX_STEPS})")

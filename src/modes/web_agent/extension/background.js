@@ -1,15 +1,9 @@
 /**
- * Slonagent extension service worker.
+ * Service worker: opens the side panel on action click and proxies
+ * PAGE_CONTROL RPCs from the sidepanel to the active tab's content script.
  *
- * Two jobs:
- *  1) Open the side panel when the toolbar action is clicked.
- *  2) Proxy PAGE_CONTROL RPCs from the sidepanel to the active tab's content
- *     script, forwarding the reply back.
- *
- * "Active tab" = the last-focused tab in the same window as the sidepanel,
- * resolved at the moment each call arrives. This way switching tabs in the
- * same window naturally redirects actions to whatever the user is looking
- * at without any extra state on our side.
+ * "Active tab" is resolved at each call, so switching tabs in the same
+ * window naturally redirects actions to whatever the user is looking at.
  */
 
 chrome.sidePanel
@@ -22,9 +16,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
         let tabId;
         try {
-            // Sidepanel lives in a window — find the active tab of that
-            // same window. Falling back to lastFocusedWindow covers the
-            // case where the message came from a background context.
+            // sender.tab is absent for messages from the sidepanel — fall
+            // back to the last-focused window to find the right active tab.
             const windowId = sender.tab?.windowId
                 ?? (await chrome.windows.getLastFocused({ populate: false })).id;
             const [tab] = await chrome.tabs.query({ active: true, windowId });
@@ -42,12 +35,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             });
             sendResponse(reply ?? { error: 'no reply from content script' });
         } catch (err) {
-            // "Could not establish connection. Receiving end does not exist"
-            // — the content script is gone. Almost always because the
-            // previous action caused navigation and the old CS got torn
-            // down mid-call. Mirror WebAgentTransport._on_ws_connect's
-            // policy: treat as navigation success for action methods, hard
-            // error for getBrowserState (PageSkill will swallow and retry).
+            // "Receiving end does not exist" = content script is gone,
+            // almost always because the previous action navigated mid-call.
+            // Mirror WebAgentTransport._on_ws_connect: navigation success
+            // for actions, hard error for getBrowserState (PageSkill retries).
             const dead = /receiving end does not exist|could not establish connection/i.test(err?.message || '');
             if (dead && msg.method !== 'getBrowserState') {
                 sendResponse({ result: '🔄 Действие вызвало переход на новую страницу' });

@@ -174,8 +174,8 @@ Here are examples of good output patterns. Use them as reference but never copy 
 """
 
 
-# Action schemas — verbatim from page-agent tools/index.ts.
-# Each entry is one branch of the `action` oneOf in the AgentOutput macro tool.
+# Verbatim from page-agent tools/index.ts — each entry is one branch of
+# the `action` oneOf in the AgentOutput macro tool.
 ACTION_SCHEMAS: dict[str, dict] = {
     "done": {
         "description": "Complete task. Text is your final response to the user — keep it concise unless the user explicitly asks for detail.",
@@ -293,9 +293,8 @@ class PageSkill(Skill):
         }]
 
     async def get_browser_state(self, reconnect_timeout: float = 10.0) -> dict | None:
-        # After an agent action that causes navigation, there's a gap between
-        # widget #1 dying and widget #2 connecting — self.ws is None in that
-        # window. Poll briefly instead of giving up immediately.
+        # Nav actions leave a gap between widget #1 dying and #2 connecting —
+        # poll briefly instead of failing immediately.
         deadline = asyncio.get_event_loop().time() + reconnect_timeout
         while self.transport.ws is None:
             if asyncio.get_event_loop().time() > deadline:
@@ -307,13 +306,12 @@ class PageSkill(Skill):
             return None
 
     async def dispatch_tool_call(self, tool_call: dict) -> dict:
-        """Parse AgentOutput, execute one action, return result as dict.
+        """Parse AgentOutput, execute one action, return `{action_name, result}`.
 
-        Returns a dict with `action_name` (for the main loop to detect `done`
-        and to build `<agent_history>`) and `result` (the action's output
-        string). The standard dispatch flow in `Agent.dispatch_tool_calls`
-        will json-serialize this whole dict as the tool result content —
-        visible in the widget card too.
+        The main loop reads `action_name` to detect `done` and to build
+        `<agent_history>`. Agent.dispatch_tool_calls json-serializes the
+        whole dict as the tool result content (so it also shows up in the
+        widget tool card).
         """
         try:
             args = json.loads(tool_call["function"].get("arguments") or "{}")
@@ -326,9 +324,8 @@ class PageSkill(Skill):
         if action_name is None:
             return {"error": "AgentOutput.action is missing"}
 
-        # done — the main loop checks action_name and exits after the tool
-        # card has been emitted. We just return the text so it shows up in
-        # the card's result.
+        # Main loop exits on action_name == "done" after the tool card is
+        # emitted — we just put the text in the result here.
         if action_name == "done":
             return {"action_name": "done", "result": action_args.get("text") or "(готово)"}
 

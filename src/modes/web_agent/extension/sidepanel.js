@@ -1,13 +1,10 @@
 /**
- * Slonagent sidepanel — loads the chat UI from the user-configured
- * slonagent server in an iframe, and relays PAGE_CONTROL messages
- * between the iframe and the extension's background worker.
+ * Sidepanel: loads the chat UI from the user-configured slonagent server in
+ * an iframe, relays PAGE_CONTROL messages between the iframe and background.
  *
- * Why an iframe: MV3 extension pages forbid loading remote scripts
- * (script-src 'self'), so we can't import chat-widget.js directly here.
- * An iframe pointed at our own server side-steps that — the iframe runs
- * under the tunnel origin with its own (permissive) CSP and can import
- * everything it needs.
+ * The iframe hop exists because MV3 extension pages forbid remote scripts
+ * (script-src 'self'); an iframe pointed at the tunnel origin side-steps
+ * that and can import chat-widget.js normally.
  */
 
 const STORAGE_KEY = 'slonagent_base_url';
@@ -28,7 +25,6 @@ function showConfig(prefill = '') {
 }
 
 function showFrame(baseUrl) {
-    // Normalize: strip trailing slash, append /ext.html if not already pointing at a file.
     let url = baseUrl.replace(/\/+$/, '');
     if (!/\.html?$/.test(url)) url += '/ext.html';
     config.classList.remove('visible');
@@ -58,11 +54,7 @@ resetBtn.addEventListener('click', () => {
     });
 });
 
-// --- iframe ↔ background relay ---
-//
-// iframe (ext.js) posts {channel:'SLON_WEB_AGENT', type:'action', method, args, request_id}
-// We forward to background, await its reply, and postMessage the result
-// back to the iframe. Background handles talking to the content script.
+// iframe (ext.js) → background → content script, reply back through us.
 window.addEventListener('message', async (e) => {
     if (e.source !== frame.contentWindow) return;
     const msg = e.data;

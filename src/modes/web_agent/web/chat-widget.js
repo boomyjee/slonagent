@@ -1,14 +1,12 @@
 /**
- * Shared chat widget bootstrap — used by both the bookmarklet (run.js) and
- * the Chrome extension's sidepanel iframe (ext.js). Builds a Preact <WidgetApp>
- * that wraps the dashboard's <Chat/>, manages the WebSocket, and forwards
- * `action` RPCs to a caller-provided PageController (real one in the
- * bookmarklet, a postMessage shim in the extension).
+ * Shared chat widget — used by both run.js (bookmarklet) and ext.js (extension
+ * sidepanel iframe). Wraps the dashboard's <Chat/> and forwards `action` RPCs
+ * to a caller-provided PageController (real one in run.js, postMessage shim
+ * in ext.js).
  *
- * Why a factory instead of top-level imports: the bookmarklet needs to set
- * `stylesHost.target = shadowRoot` BEFORE Chat.js runs its top-level `css`
- * calls. Deferring the Chat import into this function lets the caller
- * configure stylesHost first — module caching still keeps Chat.js single-shot.
+ * Factory (not top-level imports) so the bookmarklet can set
+ * `stylesHost.target = shadowRoot` BEFORE Chat.js module-eval runs its
+ * top-level `css` calls.
  */
 
 export async function createWidgetApp({ agentId, host, protocol, page, onSuperseded }) {
@@ -48,7 +46,6 @@ export async function createWidgetApp({ agentId, host, protocol, page, onSuperse
                     }
                     this._chat?.handleMessage(ev);
                 } else if (ev.type === 'action') {
-                    // Python agent tool call → dispatch to Page, reply with result.
                     let result, error;
                     try {
                         const fn = page?.[ev.method];

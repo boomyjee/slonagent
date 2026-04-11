@@ -1,17 +1,12 @@
 /**
- * Main-world content script — runs with page JS privileges (subject to page
- * CSP) so it can dynamically import @page-agent/page-controller from esm.sh
- * without tripping the extension's own MV3 CSP (which forbids remote imports).
+ * Main-world CS — runs with page JS privileges (subject to page CSP) so it
+ * can import @page-agent/page-controller from esm.sh, which the extension's
+ * own MV3 CSP (script-src 'self') would forbid in isolated/background land.
  *
- * Creates one PageController per page load and exposes it to the
- * isolated-world content script via window.postMessage on the
- * SLON_PAGE_CTRL_MAIN channel. The isolated script has chrome.runtime and
- * handles the RPC plumbing with the background worker — we just do the
- * actual DOM work here.
- *
- * If the page's CSP blocks the esm.sh import (strict script-src), the
- * controller simply never comes up and every RPC returns an error — same
- * failure mode as the bookmarklet.
+ * One PageController per page load, exposed to content-isolated.js via
+ * SLON_PAGE_CTRL_MAIN postMessages. If the page CSP blocks the esm.sh
+ * import, the controller never comes up and every RPC errors — same
+ * failure mode as the bookmarklet on a locked-down page.
  */
 
 (async () => {

@@ -1,14 +1,10 @@
 /**
- * SlonAgent chat widget — mounted into a host page via bookmarklet.
+ * SlonAgent bookmarklet entry — `javascript:import('.../web_agent/run.js')`.
  *
- * Bookmarklet: javascript:import('http://host:8765/{agent_id}/web_agent/run.js')
- *
- * Thin shell around the shared chat-widget.js — this file owns the floating
- * panel, shadow DOM, and local PageController. Everything chat/WebSocket
- * related lives in chat-widget.js (also used by the Chrome extension).
- *
- * Module caching protects against repeat bookmarklet clicks: a second
- * import of the same URL returns the cached module, top-level code runs once.
+ * Owns the floating panel, shadow DOM, and local PageController; delegates
+ * chat/WebSocket to the shared chat-widget.js (also used by the extension).
+ * Repeat bookmarklet clicks are harmless — ES module caching makes the
+ * second import a no-op.
  */
 
 const selfUrl = new URL(import.meta.url);
@@ -18,19 +14,14 @@ const AGENT_ID = match[1];
 const DASH = `${selfUrl.protocol}//${selfUrl.host}/${AGENT_ID}/dashboard`;
 const BASE = `${selfUrl.protocol}//${selfUrl.host}/${AGENT_ID}/web_agent`;
 
-// Imported BEFORE chat-widget.js so we can set `stylesHost.target = shadow`
+// Imported before chat-widget.js so we can set `stylesHost.target = shadow`
 // before Chat.js module-eval runs its top-level `css` calls.
 const lib = await import(`${DASH}/lib.js`);
 const { render, html, stylesHost } = lib;
 
-// Shadow DOM isolates the widget from host-page CSS. `mode: 'closed'` is
-// critical — without it, dom_tree.js (used by the agent's own page controller)
-// would walk into the widget's shadow root and index its own buttons, so the
-// agent would "see itself" in browser_state.
-// Size persists per host-page domain via localStorage. Widget is anchored
-// to the viewport's bottom-right corner, so the resize handle has to be
-// at its TOP-LEFT corner (the opposite side). Native CSS `resize` only
-// paints a bottom-right handle, so we build a custom one below.
+// `mode: 'closed'` is critical — without it, dom_tree.js (used by the
+// agent's own PageController) walks into the widget's shadow root and
+// indexes its own buttons, so the agent "sees itself" in browser_state.
 const SIZE_KEY = 'slonagent-widget-size';
 let savedSize;
 try { savedSize = JSON.parse(localStorage.getItem(SIZE_KEY) || 'null'); } catch { savedSize = null; }
@@ -50,19 +41,14 @@ document.body.appendChild(host);
 const shadow = host.attachShadow({ mode: 'closed' });
 stylesHost.target = shadow;
 
-// @page-agent/page-controller from esm.sh — same CDN we use for preact/htm
-// in lib.js. esm.sh resolves its own sibling chunks (SimulatorMask mjs,
-// ai-motion, etc.) against its origin, so we don't need to mirror them
-// locally. enableMask shows an animated cursor overlay so the user can
-// see what the agent is doing on the page.
+// esm.sh resolves its own sibling chunks (SimulatorMask, ai-motion, ...)
+// against its origin, so we don't mirror them locally.
 const { PageController } = await import('https://esm.sh/@page-agent/page-controller@1.7.1');
 const page = new PageController({ enableMask: true });
 
-// Root element inside the shadow — holds CSS vars, layout, and visual chrome.
 // Shadow DOM blocks outer selectors but NOT inheritance of properties like
-// text-align/color/font from the host element. `all: initial` hard-resets
-// every property to its initial value, giving Chat a clean slate regardless
-// of what the host page sets on <body>.
+// color/font from the host element — `all: initial` is a hard reset so the
+// widget looks the same no matter what the host page sets on <body>.
 const root = document.createElement('div');
 root.style.cssText = `
     all: initial;
@@ -88,12 +74,11 @@ const WidgetApp = await createWidgetApp({
 });
 render(html`<${WidgetApp} />`, root);
 
-// Custom resize handle at top-left corner (host is anchored bottom-right,
-// so dragging the top-left outward grows the widget). Appended AFTER the
-// preact render because preact reuses existing DOM children of the render
-// target — if we appended first, preact would mutate this div into the
-// chat root, inherit its inline `opacity: 0.6` + our mouseenter/leave
-// listeners, and the whole chat would dim on mouseleave.
+// Custom resize handle at top-left (host is anchored bottom-right, native
+// CSS `resize` only draws a bottom-right handle). Must be appended AFTER
+// the preact render — preact reuses existing children of the render target,
+// so inserting first would turn this resizer div into the chat root and
+// leak its opacity/listeners to the whole chat.
 const resizer = document.createElement('div');
 resizer.style.cssText = `
     position: absolute; left: 0; top: 0; width: 18px; height: 18px;

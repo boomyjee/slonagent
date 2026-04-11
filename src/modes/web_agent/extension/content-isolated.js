@@ -1,13 +1,10 @@
 /**
- * Isolated-world content script — the side with `chrome.runtime` access.
+ * Isolated-world CS — has chrome.runtime, talks to the main world via
+ * window.postMessage on SLON_PAGE_CTRL_MAIN. Bridges background RPCs to
+ * the real PageController (which lives in content-main.js).
  *
- * Translates chrome.runtime messages (from the background worker) into
- * window.postMessage'd RPCs to the main-world content script where the
- * real PageController lives, and routes replies back.
- *
- * We track whether the main world has signalled `ready` so background
- * calls that arrive before the esm.sh import finishes get a clean error
- * instead of hanging forever.
+ * Tracks main-world `ready`/`init_failed` so calls arriving before the
+ * esm.sh import finishes return a clean error instead of hanging.
  */
 
 let mainReady = false;
@@ -49,9 +46,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         method: msg.method, args: msg.args, request_id,
     }, '*');
 
-    // Safety net — if the main world never replies (e.g. PageController
-    // method hangs indefinitely), time out so the agent sees an error
-    // instead of a stuck step.
+    // Safety net: if main world never replies, surface an error to the
+    // agent instead of hanging the step forever.
     setTimeout(() => {
         if (pending.has(request_id)) {
             pending.delete(request_id);

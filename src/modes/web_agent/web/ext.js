@@ -1,16 +1,12 @@
 /**
- * Chrome extension sidepanel iframe entry point.
+ * Extension sidepanel iframe entry. Mirrors run.js but without the floating
+ * panel / shadow DOM / local PageController — chat-widget.js gets a
+ * postMessage shim instead, RPCing up through the sidepanel → background →
+ * content script → real PageController in the active tab's main world.
  *
- * Mirrors run.js but without the floating panel / shadow DOM / local
- * PageController. Instead of a real PageController we hand chat-widget.js a
- * postMessage shim that RPCs up to the sidepanel parent window → background
- * → content script → the real PageController living in the active tab's
- * main world.
- *
- * The iframe is loaded from our web server origin (via the tunnel), so ES
- * module imports to the dashboard path work the same as in the bookmarklet.
- * The extension sidepanel itself is a `chrome-extension://` page that can't
- * import remote modules due to MV3 CSP — that's why we need the iframe hop.
+ * The iframe is served from our tunnel origin (not chrome-extension://),
+ * so remote ES module imports work; the sidepanel itself couldn't import
+ * them due to MV3 CSP, which is why we need the iframe hop at all.
  */
 
 const selfUrl = new URL(import.meta.url);
@@ -23,11 +19,8 @@ const DASH = `${selfUrl.protocol}//${selfUrl.host}/${AGENT_ID}/dashboard`;
 const lib = await import(`${DASH}/lib.js`);
 const { render, html } = lib;
 
-// RemotePageController shim. Each method-invocation turns into a postMessage
-// to parent (sidepanel) with a request_id; sidepanel relays through the
-// extension's background service worker to the active tab's content script,
-// then back. The Proxy makes `page.clickElement(...)` just work without
-// enumerating methods — mirrors the real PageController's surface.
+// RemotePageController shim — Proxy + postMessage RPC to the active tab's
+// real PageController (via sidepanel → background → content script).
 const _pending = new Map();
 window.addEventListener('message', (e) => {
     const msg = e.data;
@@ -50,12 +43,8 @@ function rpc(method, args) {
     });
 }
 
-// `dispose` is a local lifecycle hook on the real PageController — there's
-// nothing to tear down on the RPC side, so short-circuit it. Everything
-// else (click, type, getBrowserState, showMask, hideMask, ...) goes over
-// the bridge to the content script's PageController in the active tab.
-// Symbol keys and `then` are filtered so the Proxy doesn't accidentally
-// turn `page` itself into a thenable.
+// `dispose` is a local-only lifecycle hook — nothing to tear down over
+// RPC. The `then` filter prevents `page` from looking like a thenable.
 const page = new Proxy({}, {
     get(_, method) {
         if (typeof method !== 'string') return undefined;
