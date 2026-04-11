@@ -21,6 +21,13 @@ export async function createWidgetApp({ agentId, host, protocol, page, onSuperse
             super(props);
             this.state = { connected: false };
             this._chat = null;
+            // Tracks the desired mask visibility (flipped by send_processing).
+            // In the extension the widget is persistent across page navigations
+            // but each nav creates a fresh PageController with shown=false —
+            // we re-assert showMask after every action while _maskOn is true.
+            // show()/hide() are idempotent per-instance so that's a no-op on
+            // the same page.
+            this._maskOn = false;
         }
 
         componentDidMount() { this._connect(); }
@@ -41,7 +48,8 @@ export async function createWidgetApp({ agentId, host, protocol, page, onSuperse
                     // send_processing brackets a task on the Python side —
                     // toggle the PageController mask + AI cursor in sync.
                     if (ev.method === 'send_processing') {
-                        if (ev.active) page?.showMask?.();
+                        this._maskOn = !!ev.active;
+                        if (this._maskOn) page?.showMask?.();
                         else page?.hideMask?.();
                     }
                     this._chat?.handleMessage(ev);
@@ -54,6 +62,10 @@ export async function createWidgetApp({ agentId, host, protocol, page, onSuperse
                     } catch (err) {
                         error = err?.message || String(err);
                     }
+                    // Re-assert the mask after each action — if the action was
+                    // getBrowserState on a post-nav fresh PageController, this
+                    // is where the mask actually appears on the new page.
+                    if (this._maskOn && !error) page?.showMask?.();
                     this.send({ type: 'action_result', request_id: ev.request_id, result, error });
                 }
             };

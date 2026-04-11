@@ -13,9 +13,11 @@ text in the result (the main loop sees `action == "done"` and exits after
 the card is rendered). `ask_user` blocks on `self.agent.next_message()`
 and returns the answer as the tool result.
 """
-import asyncio, json
+import asyncio, json, logging
 
 from agent import Skill
+
+log = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You are an AI agent designed to operate in an iterative loop to automate browser tasks. Your ultimate goal is accomplishing the task provided in <user_request>.
@@ -292,18 +294,31 @@ class PageSkill(Skill):
             },
         }]
 
-    async def get_browser_state(self, reconnect_timeout: float = 10.0) -> dict | None:
-        # Nav actions leave a gap between widget #1 dying and #2 connecting —
-        # poll briefly instead of failing immediately.
+    async def get_browser_state(self, reconnect_timeout: float = 15.0) -> dict | None:
+        # Post-navigation the sidepanel ws is usually already reconnected,
+        # but the new tab's content-main.js is still importing @page-agent
+        # from esm.sh — any getBrowserState in that window errors with
+        # "not ready"/"timed out"/"receiving end"/bfcache/"widget reconnected".
+        # Poll through those instead of bailing to the LLM (which would emit
+        # done/success=false on the scary "no widget" warning).
+        TRANSIENT = ("not ready", "timed out", "receiving end",
+                     "back/forward cache", "could not establish",
+                     "widget reconnected", "no page connected")
         deadline = asyncio.get_event_loop().time() + reconnect_timeout
-        while self.transport.ws is None:
-            if asyncio.get_event_loop().time() > deadline:
-                return None
-            await asyncio.sleep(0.1)
-        try:
-            return await self.transport.call_action("getBrowserState")
-        except RuntimeError:
-            return None
+        last_err = None
+        while asyncio.get_event_loop().time() < deadline:
+            if self.transport.ws is None:
+                await asyncio.sleep(0.2)
+                continue
+            try:
+                return await self.transport.call_action("getBrowserState")
+            except Exception as e:
+                last_err = str(e)
+                if not any(t in last_err.lower() for t in TRANSIENT):
+                    raise
+                await asyncio.sleep(0.4)
+        log.warning("get_browser_state gave up after %.0fs: %s", reconnect_timeout, last_err)
+        return None
 
     async def dispatch_tool_call(self, tool_call: dict) -> dict:
         """Parse AgentOutput, execute one action, return `{action_name, result}`.

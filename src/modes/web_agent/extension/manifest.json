@@ -28,5 +28,11 @@
             "all_frames": false,
             "world": "MAIN"
         }
+    ],
+    "web_accessible_resources": [
+        {
+            "resources": ["vendor/*.mjs"],
+            "matches": ["<all_urls>"]
+        }
     ]
 }

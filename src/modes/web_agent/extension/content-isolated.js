@@ -4,8 +4,14 @@
  * the real PageController (which lives in content-main.js).
  *
  * Tracks main-world `ready`/`init_failed` so calls arriving before the
- * esm.sh import finishes return a clean error instead of hanging.
+ * page-controller import finishes return a clean error instead of hanging.
  */
+
+// Hand the vendored page-controller URL to the main-world CS. Dataset
+// writes from isolated world are visible in main world synchronously, and
+// content-isolated.js is declared first in manifest so it runs before
+// content-main.js — no postMessage race needed.
+document.documentElement.dataset.slonPcUrl = chrome.runtime.getURL('vendor/page-controller.mjs');
 
 let mainReady = false;
 let initError = null;

@@ -1,18 +1,22 @@
 /**
- * Main-world CS — runs with page JS privileges (subject to page CSP) so it
- * can import @page-agent/page-controller from esm.sh, which the extension's
- * own MV3 CSP (script-src 'self') would forbid in isolated/background land.
+ * Main-world CS — runs with page JS privileges to drive page-agent's
+ * PageController from inside the site's own context. One controller per page
+ * load, exposed to content-isolated.js via SLON_PAGE_CTRL_MAIN postMessages.
  *
- * One PageController per page load, exposed to content-isolated.js via
- * SLON_PAGE_CTRL_MAIN postMessages. If the page CSP blocks the esm.sh
- * import, the controller never comes up and every RPC errors — same
- * failure mode as the bookmarklet on a locked-down page.
+ * page-controller + its lazy chunks are vendored into extension/vendor/ and
+ * loaded via chrome-extension:// URL (passed in by content-isolated.js via
+ * `documentElement.dataset.slonPcUrl`). We used to import from esm.sh, but
+ * page CSP / service workers / import maps on third-party sites broke the
+ * chain's relative dynamic imports unpredictably; chrome-extension URLs are
+ * exempt from all of that.
  */
 
 (async () => {
     let page;
     try {
-        const { PageController } = await import('https://esm.sh/@page-agent/page-controller@1.7.1');
+        const pcUrl = document.documentElement.dataset.slonPcUrl;
+        if (!pcUrl) throw new Error('slonPcUrl not set by content-isolated.js');
+        const { PageController } = await import(pcUrl);
         page = new PageController({ enableMask: true });
     } catch (err) {
         console.warn('[slonagent] PageController init failed:', err);
