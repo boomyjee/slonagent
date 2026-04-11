@@ -7,7 +7,18 @@ export class Chat extends Component {
         super(props);
         this.state = { messages: [], input: '', expanded: {} };
         this._streams = {};
+        // Sticky-bottom flag. Starts true so initial buffer replay (where
+        // scrollTop=0 but scrollHeight is already huge) still snaps down.
+        // Flipped off when the user scrolls up, back on when they scroll
+        // to within 120px of the bottom.
+        this._stick = true;
     }
+
+    _onScroll = () => {
+        const el = this._scroll;
+        if (!el) return;
+        this._stick = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    };
 
     handleMessage(ev) {
         const m = ev.method;
@@ -74,11 +85,17 @@ export class Chat extends Component {
         }
     }
 
-    componentDidUpdate(_, prev) {
-        const el = this._scroll;
-        if (el && prev.messages.length < this.state.messages.length
-            && el.scrollHeight - el.scrollTop - el.clientHeight < 80)
-            el.scrollTop = el.scrollHeight;
+    componentDidMount() {
+        // Snap down once the initial buffer replay has rendered.
+        if (this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
+    }
+
+    componentDidUpdate() {
+        // Honor the sticky flag — proximity is recomputed only on user
+        // scroll, not on every render, so in-flight updates that grow
+        // scrollHeight past the threshold don't disable autoscroll.
+        if (this._stick && this._scroll)
+            this._scroll.scrollTop = this._scroll.scrollHeight;
     }
 
     _submit() {
@@ -111,7 +128,7 @@ export class Chat extends Component {
         return html`
             <div class=${cl.chat}>
                 <div class=${cl.header}>Chat</div>
-                <div class=${cl.messages} ref=${el => this._scroll = el}>
+                <div class=${cl.messages} ref=${el => this._scroll = el} onScroll=${this._onScroll}>
                     ${messages.map((m, i) => {
                         if (m.kind === 'msg') return html`
                             <div class="${cl.msg} ${m.role}">${m.text}</div>
@@ -161,14 +178,15 @@ export class Chat extends Component {
 // --- styles ---
 
 cl.chat = css`
-  flex: 1 1 0; min-width: 200px; display: flex; flex-direction: column;
+  flex: 1 1 0; min-width: 200px; min-height: 0; display: flex; flex-direction: column;
   border-left: 1px solid var(--border); background: var(--surface);
+  &, & * { box-sizing: border-box; }
 `;
 cl.header = css`
   padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px;
   color: var(--text-dim); text-transform: uppercase;
 `;
-cl.messages = css`flex: 1; overflow-y: auto; padding: 12px;`;
+cl.messages = css`flex: 1; min-height: 0; overflow-y: auto; padding: 12px;`;
 cl.msg = css`
   margin-bottom: 10px; font-size: 13px; line-height: 1.5; padding: 8px 12px;
   border-radius: 8px; max-width: 90%; white-space: pre-wrap; word-break: break-word;

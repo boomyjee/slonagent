@@ -179,7 +179,7 @@ class Agent:
         return result
 
 
-    async def llm(self, tool_choice: str = None):
+    async def llm(self, tool_choice: str = None, parallel_tool_calls: bool = None):
         if self._system_instruction is None:
             user_query = " ".join(p.get("text", "") for p in self._current_content_parts if isinstance(p, dict) and "text" in p).strip()
             system_parts = []
@@ -214,6 +214,8 @@ class Agent:
                         kwargs["tool_choice"] = tool_choice
                     elif tool_choice:
                         kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
+                    if parallel_tool_calls is not None:
+                        kwargs["parallel_tool_calls"] = parallel_tool_calls
                 kwargs["extra_body"] = {"extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
 
                 stream = await self.client.chat.completions.create(**kwargs)
@@ -225,10 +227,14 @@ class Agent:
                 stream_id = self._stream_counter = self._stream_counter + 1
                 is_thought = False
                 tc_counter = 0
-                seen_role = False
+                seen = {}
 
                 async for chunk in stream:
-                    # Google-fix: tool_calls шлёт без index, role="assistant" в каждом чанке
+                    # openai accumulate_delta склеивает строки и суммирует числа (bool
+                    # наследуется от int!). Gemini шлёт role="assistant" в каждом чанке
+                    # и thought=true в каждом thinking-чанке — в итоге role становится
+                    # "assistantassistant...", thought становится 2/3/... Оба поля
+                    # оставляем из первого чанка, из остальных — вычищаем.
                     if chunk.choices:
                         delta = chunk.choices[0].delta
                         for tc in delta.tool_calls or ():
@@ -236,11 +242,13 @@ class Agent:
                                 tc.index = tc_counter
                                 tc_counter += 1
                         if delta.role:
-                            if seen_role:
-                                delta.model_fields_set.discard("role")
-                                delta.role = None
-                            else:
-                                seen_role = True
+                            if "role" in seen: delta.role = None
+                            seen["role"] = True
+                        google = ((delta.model_extra or {}).get("extra_content") or {}).get("google") or {}
+                        if google.get("thought"):
+                            if "thought" in seen: google.pop("thought")
+                            seen["thought"] = True
+
                     state.handle_chunk(chunk)
                     if not chunk.choices:
                         continue

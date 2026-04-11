@@ -74,6 +74,7 @@ async def run_cli():
 
 async def run_telegram():
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
+    DashboardTransport.set_server_config(**config.get("web", {}))
 
     async def make_agent(agent_id, transport, force_create: bool, copy_memory_from=None):
         is_main_agent = (agent_id == "main")
@@ -96,7 +97,7 @@ async def run_telegram():
             with open(config_path, encoding="utf-8") as f:
                 agent_cfg = json.load(f)["agent"]
 
-        transport = MultiTransport([transport, DashboardTransport(**config.get("web", {}))])
+        transport = MultiTransport([transport, DashboardTransport()])
         agent = Agent.from_config(resolve(agent_cfg), id=agent_id, agent_dir=agent_dir, transport=transport)
         if copy_memory_from:
             agent.memory.copy_from(copy_memory_from.agent.memory)
