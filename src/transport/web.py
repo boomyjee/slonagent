@@ -162,9 +162,12 @@ class WebTransport(BaseTransport):
         WebTransport._server_task = asyncio.create_task(_run())
 
         if WebTransport._sish_domain:
-            import uuid
-            # Stable per-machine subdomain so bookmarklets survive restarts.
-            subdomain = "web-" + f"{uuid.getnode():x}"[-6:]
+            import uuid, sys, os
+            # Stable per-(machine, entry script) subdomain so bookmarklets
+            # survive restarts, but two checkouts on the same box don't
+            # collide on the same tunnel hostname.
+            key = f"{uuid.getnode()}:{os.path.abspath(sys.argv[0])}"
+            subdomain = "web-" + hashlib.sha1(key.encode()).hexdigest()[:6]
             WebTransport._tunnel_ready = asyncio.Event()
             async def _tunnel():
                 try:

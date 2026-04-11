@@ -21,7 +21,7 @@ from datetime import datetime
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from agent import Skill, tool
+from agent import Skill, tool, bypass
 from src.modes.web_agent.page_skill import PageSkill
 from src.transport.multi import MultiTransport
 from src.transport.web import WebTransport
@@ -181,8 +181,16 @@ def _assemble_user_prompt(task: str, history: list, browser_state: dict | None, 
 
 
 class WebAgentModeSkill(Skill):
+    def __init__(self, expose_tool: bool = True):
+        super().__init__()
+        self._expose_tool = expose_tool
+
+    def get_tools(self):
+        return super().get_tools() if self._expose_tool else []
+
+    @bypass("webagent", "Запустить web-agent", standalone=True)
     @tool("Запустить web-agent: возвращает ссылку на страницу с букмарклетом для вставки чат-виджета на произвольный сайт. Создаётся один саб-агент-воркер, захватывающий управление основным чатом. Блокируется до /stop от пользователя.")
-    async def start_web_agent(self):
+    async def launch(self, args: str = ""):
         web_transport = WebAgentTransport(verbose=False)
         page_skill = PageSkill(web_transport)
         sub = await self.agent.spawn_subagent("web_agent",

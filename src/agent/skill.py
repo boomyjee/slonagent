@@ -45,7 +45,7 @@ class Skill:
                 schema["description"] = desc
             return schema
 
-        class_name = type(self).__name__.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider")
+        class_name = type(self).__name__.removesuffix("Skill").removesuffix("Mode").removesuffix("Memory").removesuffix("Provider")
         self._tools = []
         for name, fn in inspect.getmembers(type(self), predicate=inspect.isfunction):
             if not getattr(fn, "_is_tool", False): continue
@@ -94,7 +94,11 @@ class Skill:
         cmd = parts[0][1:]
         args = parts[1] if len(parts) > 1 else ""
         fn = self._bypass_handlers[cmd]
-        result = fn(self, args) if not inspect.iscoroutinefunction(fn) else await fn(self, args)
+        try:
+            result = fn(self, args) if not inspect.iscoroutinefunction(fn) else await fn(self, args)
+        except Exception as e:
+            logging.exception("[skill] bypass /%s failed", cmd)
+            return f"⚠️ /{cmd}: {e}"
         return str(result)
 
     async def get_context_prompt(self, user_text: str = "") -> str:
