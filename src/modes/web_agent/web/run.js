@@ -64,12 +64,13 @@ root.style.cssText = `
 `;
 shadow.appendChild(root);
 
-const { createWidgetApp } = await import(`${BASE}/chat-widget.js`);
-const WidgetApp = await createWidgetApp({
-    agentId: AGENT_ID,
-    host: selfUrl.host,
-    protocol: selfUrl.protocol,
-    page,
+const [{ Chat }, { createWidgetApp }] = await Promise.all([
+    import(`${DASH}/components/Chat.js`),
+    import(`${BASE}/chat-widget.js`),
+]);
+const wsUrl = `${selfUrl.protocol === 'https:' ? 'wss' : 'ws'}://${selfUrl.host}/${AGENT_ID}/web_agent/ws`;
+const WidgetApp = createWidgetApp({
+    lib, Chat, wsUrl, page,
     onSuperseded: () => host.remove(),
 });
 render(html`<${WidgetApp} />`, root);
