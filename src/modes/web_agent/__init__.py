@@ -250,6 +250,7 @@ class WebAgentModeSkill(Skill):
 
             user_prompt = _assemble_user_prompt(task, history, browser_state, step)
             sub.memory.clear()
+            await sub.transport.send_system_prompt(f'[WebAgent] {user_prompt}')
             await sub.memory.add_turn({"role": "user", "content": user_prompt})
 
             # think

@@ -35,11 +35,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             });
             sendResponse(reply ?? { error: 'no reply from content script' });
         } catch (err) {
-            // "Receiving end does not exist" = content script is gone,
-            // almost always because the previous action navigated mid-call.
-            // Mirror WebAgentTransport._on_ws_connect: navigation success
-            // for actions, hard error for getBrowserState (PageSkill retries).
-            const dead = /receiving end does not exist|could not establish connection/i.test(err?.message || '');
+            // Content script unreachable — either gone (navigation tore it
+            // down mid-call → "Receiving end does not exist") or the tab
+            // got parked in Chrome's back/forward cache ("moved into
+            // back/forward cache"). Both mean the agent no longer controls
+            // the page; treat as navigation success for actions, hard
+            // error for getBrowserState (PageSkill will retry).
+            const dead = /receiving end does not exist|could not establish connection|back\/forward cache/i.test(err?.message || '');
             if (dead && msg.method !== 'getBrowserState') {
                 sendResponse({ result: '🔄 Действие вызвало переход на новую страницу' });
             } else {
