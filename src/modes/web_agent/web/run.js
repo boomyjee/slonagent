@@ -53,9 +53,12 @@ const shadow = host.attachShadow({ mode: 'closed' });
 stylesHost.target = shadow;
 
 const { Chat } = await import(`${DASH}/components/Chat.js`);
-const { PageController } = await import(new URL('./page-controller.js', selfUrl).href);
-// Bundled @page-agent/page-controller@1.7.1 (MIT). enableMask shows an animated
-// cursor overlay so the user can see what the agent is doing on the page.
+// @page-agent/page-controller from esm.sh — same CDN we use for preact/htm
+// in lib.js. esm.sh resolves its own sibling chunks (SimulatorMask mjs,
+// ai-motion, etc.) against its origin, so we don't need to mirror them
+// locally. enableMask shows an animated cursor overlay so the user can
+// see what the agent is doing on the page.
+const { PageController } = await import('https://esm.sh/@page-agent/page-controller@1.7.1');
 const page = new PageController({ enableMask: true });
 
 // Root element inside the shadow — holds CSS vars, layout, and visual chrome.
@@ -101,6 +104,15 @@ class WidgetApp extends Component {
         this._ws.onmessage = async e => {
             const ev = JSON.parse(e.data);
             if (ev.type === 'transport') {
+                // send_processing brackets a task run on the Python side —
+                // toggle the PageController mask + AI cursor overlay in sync
+                // with it. Upstream PageAgentCore does the equivalent around
+                // execute() (showMask/hideMask), but from the widget side
+                // this is just "agent is busy = show overlay".
+                if (ev.method === 'send_processing') {
+                    if (ev.active) page.showMask();
+                    else page.hideMask();
+                }
                 this._chat?.handleMessage(ev);
             } else if (ev.type === 'action') {
                 // Python agent tool call → dispatch to Page, reply with result.

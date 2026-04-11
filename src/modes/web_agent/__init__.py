@@ -286,11 +286,20 @@ class WebAgentModeSkill(Skill):
             turn = await sub.llm(tool_choice="AgentOutput", parallel_tool_calls=False)
             tool_calls = turn.get("tool_calls") or []
             if not tool_calls:
-                log.warning("[web_agent] LLM returned no tool_calls, turn=%r", turn)
-                await sub.transport.send_message(
-                    f"⚠️ LLM не вызвал AgentOutput — прерываю. turn={turn}"
-                )
-                return
+                # Gemini sometimes drops the forced tool call after emitting a
+                # thinking block (stream ends mid-thought, no </thought>, no
+                # tool_calls). Instead of aborting the whole task, push a sys
+                # observation telling the model what went wrong and retry.
+                log.warning("[web_agent] step %d: no tool_calls, turn=%r", step, turn)
+                history.append({
+                    "type": "observation",
+                    "content": (
+                        "⚠️ Your previous response did not call AgentOutput. "
+                        "You MUST emit exactly one AgentOutput tool call per step. "
+                        "Try again now."
+                    ),
+                })
+                continue
 
             # Widget reconnected between observe and now → state is stale,
             # whatever the LLM decided is based on the wrong page. Discard.

@@ -296,7 +296,7 @@ class Agent:
                     tc.pop("index", None)
                     logging.info("[stream] function_call: %s", tc["function"]["name"])
 
-                logging.info("[agent] ← LLM %s", self.model_name)
+                logging.info("[agent] ← LLM %s finish=%s", self.model_name, finish_reason)
                 return turn
             except BadFinishReason:
                 raise
