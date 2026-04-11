@@ -249,6 +249,10 @@ class WebTransport(BaseTransport):
         """Dispatch one inbound WS message. Subclasses may override to add
         custom message types; unknown types should call super()."""
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
+            # Echo back through send() so it lands in the buffer and gets
+            # replayed on reconnect. Chat.js no longer adds user messages
+            # to local state — it renders them when this event comes in.
+            await self.send(msg)
             await self.process_message(
                 content_parts=msg.get("content_parts", []),
                 user_message_id=msg.get("user_message_id"),

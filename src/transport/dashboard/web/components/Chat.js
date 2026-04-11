@@ -105,10 +105,10 @@ export class Chat extends Component {
             type: 'transport', method: 'process_message',
             content_parts: [{ type: 'text', text }],
         });
-        this.setState(({ messages }) => ({
-            input: '',
-            messages: [...messages, { kind: 'msg', role: 'user', text }],
-        }));
+        // Don't add to local state — the server echoes process_message back
+        // through the event buffer, which renders via handleMessage. This
+        // way the message survives page reloads (buffer replay).
+        this.setState({ input: '' });
     }
 
     _formatArgs(args) {

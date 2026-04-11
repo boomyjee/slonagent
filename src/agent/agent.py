@@ -235,8 +235,8 @@ class Agent:
                     # и thought=true в каждом thinking-чанке — в итоге role становится
                     # "assistantassistant...", thought становится 2/3/... Оба поля
                     # оставляем из первого чанка, из остальных — вычищаем.
-                    if chunk.choices:
-                        delta = chunk.choices[0].delta
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta is not None:
                         for tc in delta.tool_calls or ():
                             if tc.index is None:
                                 tc.index = tc_counter
@@ -250,9 +250,8 @@ class Agent:
                             seen["thought"] = True
 
                     state.handle_chunk(chunk)
-                    if not chunk.choices:
+                    if delta is None:
                         continue
-                    delta = chunk.choices[0].delta
 
                     delta_extra = getattr(delta, "model_extra", None) or {}
                     thought_extra = delta_extra.get("reasoning_content") or delta_extra.get("reasoning")
