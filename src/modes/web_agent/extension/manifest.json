@@ -1,0 +1,32 @@
+{
+    "manifest_version": 3,
+    "name": "Slonagent",
+    "version": "0.1.0",
+    "description": "Persistent chat sidepanel driving a page-agent in the active tab.",
+    "permissions": ["sidePanel", "tabs", "storage", "scripting"],
+    "host_permissions": ["<all_urls>"],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "action": {
+        "default_title": "Slonagent"
+    },
+    "side_panel": {
+        "default_path": "sidepanel.html"
+    },
+    "content_scripts": [
+        {
+            "matches": ["<all_urls>"],
+            "js": ["content-isolated.js"],
+            "run_at": "document_idle",
+            "all_frames": false
+        },
+        {
+            "matches": ["<all_urls>"],
+            "js": ["content-main.js"],
+            "run_at": "document_idle",
+            "all_frames": false,
+            "world": "MAIN"
+        }
+    ]
+}

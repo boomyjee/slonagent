@@ -3,10 +3,9 @@
  *
  * Bookmarklet: javascript:import('http://host:8765/{agent_id}/web_agent/run.js')
  *
- * Reuses the dashboard's Preact <Chat/> component 1:1 — we just wrap it in a
- * floating panel and wire a WebSocket. Chat.js resolves `../lib.js` relative
- * to its own URL, so importing both from the dashboard path gives us the
- * same Preact/bau-css module instance.
+ * Thin shell around the shared chat-widget.js — this file owns the floating
+ * panel, shadow DOM, and local PageController. Everything chat/WebSocket
+ * related lives in chat-widget.js (also used by the Chrome extension).
  *
  * Module caching protects against repeat bookmarklet clicks: a second
  * import of the same URL returns the cached module, top-level code runs once.
@@ -17,18 +16,17 @@ const match = selfUrl.pathname.match(/^\/([^/]+)\/web_agent\/run\.js$/);
 if (!match) throw new Error('[slonagent] run.js mounted from unexpected URL: ' + selfUrl.pathname);
 const AGENT_ID = match[1];
 const DASH = `${selfUrl.protocol}//${selfUrl.host}/${AGENT_ID}/dashboard`;
-const WS_URL = `${selfUrl.protocol === 'https:' ? 'wss' : 'ws'}://${selfUrl.host}/${AGENT_ID}/web_agent/ws`;
+const BASE = `${selfUrl.protocol}//${selfUrl.host}/${AGENT_ID}/web_agent`;
 
+// Imported BEFORE chat-widget.js so we can set `stylesHost.target = shadow`
+// before Chat.js module-eval runs its top-level `css` calls.
 const lib = await import(`${DASH}/lib.js`);
-const { render, html, Component, stylesHost } = lib;
+const { render, html, stylesHost } = lib;
 
-// Shadow DOM isolates the widget from host-page CSS. bau-css must emit its
-// <style> tags into the shadow root instead of document.head — set this
-// BEFORE importing Chat.js (whose top-level `css` calls run on module eval).
-//
-// `mode: 'closed'` is critical — without it, dom_tree.js (used by the
-// agent's own page controller) would walk into the widget's shadow root and
-// index its own buttons, so the agent would "see itself" in browser_state.
+// Shadow DOM isolates the widget from host-page CSS. `mode: 'closed'` is
+// critical — without it, dom_tree.js (used by the agent's own page controller)
+// would walk into the widget's shadow root and index its own buttons, so the
+// agent would "see itself" in browser_state.
 // Size persists per host-page domain via localStorage. Widget is anchored
 // to the viewport's bottom-right corner, so the resize handle has to be
 // at its TOP-LEFT corner (the opposite side). Native CSS `resize` only
@@ -52,7 +50,6 @@ document.body.appendChild(host);
 const shadow = host.attachShadow({ mode: 'closed' });
 stylesHost.target = shadow;
 
-const { Chat } = await import(`${DASH}/components/Chat.js`);
 // @page-agent/page-controller from esm.sh — same CDN we use for preact/htm
 // in lib.js. esm.sh resolves its own sibling chunks (SimulatorMask mjs,
 // ai-motion, etc.) against its origin, so we don't need to mirror them
@@ -81,64 +78,14 @@ root.style.cssText = `
 `;
 shadow.appendChild(root);
 
-class WidgetApp extends Component {
-    constructor(props) {
-        super(props);
-        this.state = { connected: false };
-        this._chat = null;
-    }
-
-    componentDidMount() { this._connect(); }
-
-    _connect() {
-        this._ws = new WebSocket(WS_URL);
-        this._ws.onopen = () => { this.setState({ connected: true }); };
-        this._ws.onclose = e => {
-            this.setState({ connected: false });
-            // 4001 = superseded — another tab took over. Remove the widget from
-            // the page and stop reconnecting.
-            if (e.code === 4001) { host.remove(); return; }
-            setTimeout(() => this._connect(), 2000);
-        };
-        this._ws.onerror = () => this._ws.close();
-        this._ws.onmessage = async e => {
-            const ev = JSON.parse(e.data);
-            if (ev.type === 'transport') {
-                // send_processing brackets a task run on the Python side —
-                // toggle the PageController mask + AI cursor overlay in sync
-                // with it. Upstream PageAgentCore does the equivalent around
-                // execute() (showMask/hideMask), but from the widget side
-                // this is just "agent is busy = show overlay".
-                if (ev.method === 'send_processing') {
-                    if (ev.active) page.showMask();
-                    else page.hideMask();
-                }
-                this._chat?.handleMessage(ev);
-            } else if (ev.type === 'action') {
-                // Python agent tool call → dispatch to Page, reply with result.
-                // Errors come back as {error} so the Python side can surface them.
-                let result, error;
-                try {
-                    const fn = page[ev.method];
-                    if (typeof fn !== 'function') throw new Error(`unknown action: ${ev.method}`);
-                    result = await fn.apply(page, ev.args || []);
-                } catch (err) {
-                    error = err?.message || String(err);
-                }
-                this.send({ type: 'action_result', request_id: ev.request_id, result, error });
-            }
-        };
-    }
-
-    send(msg) {
-        if (this._ws?.readyState === WebSocket.OPEN) this._ws.send(JSON.stringify(msg));
-    }
-
-    render(_, { connected }) {
-        return html`<${Chat} ref=${c => this._chat = c} app=${this} connected=${connected} />`;
-    }
-}
-
+const { createWidgetApp } = await import(`${BASE}/chat-widget.js`);
+const WidgetApp = await createWidgetApp({
+    agentId: AGENT_ID,
+    host: selfUrl.host,
+    protocol: selfUrl.protocol,
+    page,
+    onSuperseded: () => host.remove(),
+});
 render(html`<${WidgetApp} />`, root);
 
 // Custom resize handle at top-left corner (host is anchored bottom-right,
