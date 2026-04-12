@@ -64,7 +64,7 @@ class App extends Component {
                             })}
                         </div>
                     </div>
-                    <${Resizer} side="right" />
+                    <${Resizer} side="right" persistKey="chat" />
                     <${Chat} ref=${c => this._chat = c} app=${this} connected=${connected} />
                 </div>
             </div>
