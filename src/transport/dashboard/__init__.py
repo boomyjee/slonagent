@@ -29,7 +29,10 @@ class _LogHandler(logging.Handler):
             record.agent_id = agent_id
             text = self.format(record)
             event = {"type": "log", "category": category, "level": record.levelname, "text": text}
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
             loop.call_soon_threadsafe(asyncio.ensure_future, transport.send(event, replay=True))
         except Exception:
             self.handleError(record)

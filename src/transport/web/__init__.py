@@ -180,11 +180,14 @@ class WebTransport(BaseTransport):
                     WebTransport._tunnel_url = url
                     # Warm up the reverse-port-forward channel so the first
                     # real request doesn't pay a 2s cold-start penalty.
-                    import urllib.request, ssl
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    await asyncio.to_thread(urllib.request.urlopen, url, context=ctx, timeout=5)
+                    try:
+                        import urllib.request, ssl
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        await asyncio.to_thread(urllib.request.urlopen, url, context=ctx, timeout=5)
+                    except Exception:
+                        pass
                 except Exception as e:
                     log.warning("Tunnel failed: %s", e)
                 finally:
@@ -200,7 +203,11 @@ class WebTransport(BaseTransport):
         super().set_agent(agent)
         if not self._mount:
             return
+        self.remove_routes()
         self._ensure_server()
+        self.register_routes()
+
+    def register_routes(self):
         self.register_route("websocket", "/ws", self._ws)
         self.register_route("get", "/{filename:path}", self._static)
 

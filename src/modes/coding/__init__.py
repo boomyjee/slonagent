@@ -30,17 +30,12 @@ class CodingTransport(WebTransport):
         self.workspace_host_dir = None
         self._watch_task = None
 
-    def set_agent(self, agent):
-        # API routes must be registered before the catch-all static route
-        # that super().set_agent adds, so we ensure server + agent first,
-        # register API routes, then let super add ws + static.
-        self.agent = agent
-        self._ensure_server()
+    def register_routes(self):
         self.register_route("get", "/api/config", self._api_config)
         self.register_route("get", "/api/files", self._api_list_files)
         self.register_route("get", "/api/file", self._api_read_file)
         self.register_route("put", "/api/file", self._api_write_file)
-        super().set_agent(agent)
+        super().register_routes()
 
     def start_watcher(self):
         if self.workspace_host_dir:
