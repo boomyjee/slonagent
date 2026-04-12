@@ -53,3 +53,7 @@ class MultiTransport(BaseTransport):
     async def inject_message(self, text):
         for t in self.transports:
             await t.inject_message(text)
+
+    async def send_app_url(self, url, text, button=""):
+        for t in self.transports:
+            await t.send_app_url(url, text, button)

@@ -411,6 +411,13 @@ class TelegramTransport(BaseTransport):
     async def inject_message(self, text: str):
         sent = await self._send("[→]" + text)
 
+    async def send_app_url(self, url: str, text: str, button: str = ""):
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=button or text, web_app=WebAppInfo(url=url))
+        ]])
+        await self.bot.send_message(self.chat_id, text, reply_markup=kb, message_thread_id=self.thread_id)
+
     async def send_system_prompt(self, text: str):
         if not self.verbose: return
         await self._answer(text, expandable=True, prefix="🔧 ", max_chunks=1)

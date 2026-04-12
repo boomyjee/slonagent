@@ -1,5 +1,6 @@
 import asyncio, base64, contextlib, hashlib, inspect, json, logging
 from collections import deque
+from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -51,6 +52,16 @@ class WebTransport(BaseTransport):
     _sish_key: str = ""
     _password_hash: str = ""
 
+    @staticmethod
+    def make_auth_token(day: date = None) -> str:
+        d = day or date.today()
+        return hashlib.sha256(f"{d.isoformat()}{WebTransport._password_hash}".encode()).hexdigest()[:16]
+
+    @staticmethod
+    def check_auth_token(token: str) -> bool:
+        today = date.today()
+        return token in (WebTransport.make_auth_token(today), WebTransport.make_auth_token(today - timedelta(days=1)))
+
     # Subclasses bound to a pre-accepted WebSocket (e.g. PageTransport, which
     # WebAgentTransport hands a ws on each new bookmarklet connection) set this
     # to False to skip HTTP-route registration in set_agent.
@@ -87,6 +98,14 @@ class WebTransport(BaseTransport):
         WebTransport._sish_key = sish_key
         WebTransport._password_hash = password_hash
 
+    async def get_auth_url(self, sub_path: str = "") -> str:
+        """URL with a daily auth token appended (for sharing in Telegram etc)."""
+        url = await self.get_url(sub_path)
+        if self._password_hash:
+            sep = "&" if "?" in url else "?"
+            url += f"{sep}token={self.make_auth_token()}"
+        return url
+
     async def get_url(self, sub_path: str = "", force_localhost: bool = False) -> str:
         """Return a fully-qualified URL inside this transport's namespace
         (`/{agent_id}{prefix}{sub_path}`). Uses the tunnel URL if one is
@@ -118,9 +137,19 @@ class WebTransport(BaseTransport):
                 # and can't carry credentials. The actual gate is the WebSocket.
                 if request.url.path.endswith(".js"):
                     return await call_next(request)
-                # Cookie from a previous successful Basic prompt.
+                # Cookie from a previous successful auth.
                 if request.cookies.get("auth") == WebTransport._password_hash:
                     return await call_next(request)
+                # Daily token in query string (for Telegram WebApp etc).
+                token = request.query_params.get("token", "")
+                if token and WebTransport.check_auth_token(token):
+                    response = await call_next(request)
+                    response.set_cookie(
+                        "auth", WebTransport._password_hash,
+                        max_age=30 * 24 * 3600,
+                        httponly=True, secure=True, samesite="none", path="/",
+                    )
+                    return response
                 auth = request.headers.get("authorization", "")
                 if auth.startswith("Basic "):
                     try:

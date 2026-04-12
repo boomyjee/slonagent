@@ -41,3 +41,6 @@ class BaseTransport:
 
     async def inject_message(self, text: str):
         pass
+
+    async def send_app_url(self, url: str, text: str, button: str = ""):
+        await self.send_message(f"{text}: {url}")
