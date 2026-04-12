@@ -1,4 +1,4 @@
-import { render, html, Component, css } from './lib.js';
+import { render, html, Component, css, persist } from './lib.js';
 import { Chat } from './components/common/Chat.js';
 import { Resizer } from './components/common/Resizer.js';
 
@@ -54,7 +54,7 @@ const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
 
 const cl = {};
 
-// --- File Tree ---
+// --- File Tree Store ---
 
 const FILE_ICONS = {
     py: ['Py', '#4584b6'], js: ['JS', '#f7df1e'], ts: ['TS', '#3178c6'],
@@ -78,42 +78,80 @@ function fileIcon(name) {
     return html`<span class=${cl.fileIcon} style=${{color: 'var(--text-dim)'}}>F</span>`;
 }
 
-class DirNode extends Component {
-    constructor(props) {
-        super(props);
-        this.state = { open: false, children: null };
-    }
-    async toggle() {
-        if (!this.state.open && !this.state.children) {
-            const data = await api(`api/files?path=${encodeURIComponent(this.props.path)}`);
-            if (!data.error) {
-                const sorted = data.entries.sort((a, b) =>
-                    a.is_dir !== b.is_dir ? (a.is_dir ? -1 : 1) : a.name.localeCompare(b.name));
-                this.setState({ children: sorted, open: true });
-                return;
-            }
+const tree = {
+    expanded: new Set(persist.get('tree.expanded', [])),
+    children: {},
+    _listener: null,
+
+    isOpen(path) { return this.expanded.has(path); },
+
+    async toggle(path) {
+        if (this.expanded.has(path)) {
+            this.expanded.delete(path);
+        } else {
+            this.expanded.add(path);
+            if (!this.children[path]) await this._fetch(path);
         }
-        this.setState(s => ({ open: !s.open }));
-    }
-    render({ name, depth, onOpen }, { open, children }) {
-        const pad = (8 + depth * 8) + 'px';
-        return html`<div>
-            <div class=${cl.node} style=${{paddingLeft: pad}} onClick=${() => this.toggle()}>
-                <span class=${cl.chevron}>${open ? '\u25BE' : '\u25B8'}</span><span>${name}</span>
-            </div>
-            ${open && children && children.map(e => e.is_dir
-                ? html`<${DirNode} key=${e.path} path=${e.path} name=${e.name} depth=${depth + 1} onOpen=${onOpen} />`
-                : html`<div class=${cl.node} style=${{paddingLeft: (8 + (depth+1) * 8) + 'px'}}
-                            onClick=${() => onOpen(e.path, e.name)}>
-                            <span class=${cl.chevron}></span>${fileIcon(e.name)}<span>${e.name}</span></div>`
-            )}
-        </div>`;
-    }
+        persist.set('tree.expanded', [...this.expanded]);
+        this._notify();
+    },
+
+    async _fetch(path) {
+        const data = await api(`api/files?path=${encodeURIComponent(path)}`);
+        if (!data.error) {
+            this.children[path] = data.entries.sort((a, b) =>
+                a.is_dir !== b.is_dir ? (a.is_dir ? -1 : 1) : a.name.localeCompare(b.name));
+        } else {
+            this.expanded.delete(path);
+            delete this.children[path];
+        }
+    },
+
+    async refresh(changedPaths) {
+        const dirs = new Set();
+        for (const p of changedPaths) {
+            const dir = p.substring(0, p.lastIndexOf('/')) || '/';
+            if (this.expanded.has(dir)) dirs.add(dir);
+        }
+        await Promise.all([...dirs].map(d => this._fetch(d)));
+        this._notify();
+    },
+
+    async restoreExpanded() {
+        await Promise.all([...this.expanded].map(p => this._fetch(p)));
+        this._notify();
+    },
+
+    _notify() { this._listener?.(); },
+};
+
+// --- File Tree Components ---
+
+function DirNode({ path, name, depth, onOpen }) {
+    const open = tree.isOpen(path);
+    const children = tree.children[path];
+    const pad = (8 + depth * 8) + 'px';
+    return html`<div>
+        <div class=${cl.node} style=${{paddingLeft: pad}} onClick=${() => tree.toggle(path)}>
+            <span class=${cl.chevron}>${open ? '\u25BE' : '\u25B8'}</span><span>${name}</span>
+        </div>
+        ${open && children && children.map(e => e.is_dir
+            ? html`<${DirNode} key=${e.path} path=${e.path} name=${e.name} depth=${depth + 1} onOpen=${onOpen} />`
+            : html`<div class=${cl.node} style=${{paddingLeft: (8 + (depth+1) * 8) + 'px'}}
+                        onClick=${() => onOpen(e.path, e.name)}>
+                        <span class=${cl.chevron}></span>${fileIcon(e.name)}<span>${e.name}</span></div>`
+        )}
+    </div>`;
 }
 
 class FileTree extends Component {
-    render({ rootPath, onOpen, treeKey }) {
-        return html`<${DirNode} key=${treeKey} path=${rootPath} name=${rootPath} depth=${0} onOpen=${onOpen} />`;
+    componentDidMount() {
+        tree._listener = () => this.forceUpdate();
+        tree.restoreExpanded();
+    }
+    componentWillUnmount() { tree._listener = null; }
+    render({ rootPath, onOpen }) {
+        return html`<${DirNode} path=${rootPath} name=${rootPath} depth=${0} onOpen=${onOpen} />`;
     }
 }
 
@@ -131,6 +169,18 @@ class Editor extends Component {
             minimap: { enabled: true }, fontSize: 13,
             automaticLayout: true, scrollBeyondLastLine: false,
         });
+        const saved = persist.get('tabs', []);
+        if (saved.length) this._restoreTabs(saved);
+    }
+    async _restoreTabs(paths) {
+        for (const p of paths) {
+            const name = p.split('/').pop();
+            await this.openFile(p, name);
+        }
+    }
+    _persistTabs() {
+        persist.set('tabs', this.state.tabs.map(t => t.path));
+        persist.set('activeTab', this.state.tabs[this.state.activeIdx]?.path || null);
     }
     async openFile(path, name) {
         const { tabs } = this.state;
@@ -141,7 +191,7 @@ class Editor extends Component {
         const model = monaco.editor.createModel('Loading...', LANG[ext] || 'plaintext');
         const tab = { path, name, model, saved: '', dirty: false, diskChanged: false };
         const next = [...tabs, tab];
-        this.setState({ tabs: next, activeIdx: next.length - 1 });
+        this.setState({ tabs: next, activeIdx: next.length - 1 }, () => this._persistTabs());
         this._editor.setModel(model);
 
         const data = await api(`api/file?path=${encodeURIComponent(path)}`);
@@ -155,7 +205,7 @@ class Editor extends Component {
         });
     }
     _activate(idx) {
-        this.setState({ activeIdx: idx });
+        this.setState({ activeIdx: idx }, () => this._persistTabs());
         this._editor.setModel(this.state.tabs[idx].model);
     }
     _close(idx) {
@@ -167,7 +217,7 @@ class Editor extends Component {
             act = Math.min(idx, next.length - 1);
             if (act >= 0) this._editor.setModel(next[act].model);
         } else if (idx < activeIdx) act--;
-        this.setState({ tabs: next, activeIdx: act });
+        this.setState({ tabs: next, activeIdx: act }, () => this._persistTabs());
     }
     async save() {
         const { tabs, activeIdx } = this.state;
@@ -220,7 +270,7 @@ class Editor extends Component {
 class App extends Component {
     constructor(props) {
         super(props);
-        this.state = { connected: false, rootPath: '/', treeKey: 0 };
+        this.state = { connected: false, rootPath: '/' };
         this._chat = null;
         this._editor = null;
     }
@@ -244,7 +294,7 @@ class App extends Component {
             if (msg.type === 'transport') this._chat?.handleMessage(msg);
             else if (msg.type === 'files_changed') {
                 this._editor?.handleFilesChanged(msg.paths);
-                if (msg.tree) this.setState(s => ({ treeKey: s.treeKey + 1 }));
+                if (msg.tree) tree.refresh(msg.paths);
             }
         };
     }
@@ -254,19 +304,19 @@ class App extends Component {
             this._ws.send(JSON.stringify(msg));
     }
 
-    render(_, { connected, rootPath, treeKey }) {
+    render(_, { connected, rootPath }) {
         return html`
             <div class=${cl.app}>
                 <div class=${cl.sidebar}>
                     <div class=${cl.sidebarHdr}>Explorer</div>
                     <div class=${cl.tree}>
-                        <${FileTree} rootPath=${rootPath} treeKey=${treeKey}
+                        <${FileTree} rootPath=${rootPath}
                                      onOpen=${(p, n) => this._editor?.openFile(p, n)} />
                     </div>
                 </div>
-                <${Resizer} side="left" />
+                <${Resizer} side="left" persistKey="sidebar" />
                 <${Editor} ref=${c => this._editor = c} />
-                <${Resizer} side="right" />
+                <${Resizer} side="right" persistKey="chat" />
                 <${Chat} ref=${c => this._chat = c} app=${this} connected=${connected} />
             </div>`;
     }

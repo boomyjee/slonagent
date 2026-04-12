@@ -38,3 +38,10 @@ function bauCss(n){let{document:a}=n?.window??window,t=o=>(e,...l)=>{let c=m(e,l
 // host-page CSS.
 export const stylesHost = {};
 export const { css, createGlobalStyles } = bauCss(stylesHost);
+
+// localStorage persistence scoped by page path
+const _pfx = () => 'slon:' + location.pathname.replace(/\/+$/, '');
+export const persist = {
+    get(key, def) { try { const v = localStorage.getItem(`${_pfx()}:${key}`); return v !== null ? JSON.parse(v) : def; } catch { return def; } },
+    set(key, val) { localStorage.setItem(`${_pfx()}:${key}`, JSON.stringify(val)); },
+};
