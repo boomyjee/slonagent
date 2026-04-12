@@ -1,5 +1,5 @@
 import { render, html, Component, css, createGlobalStyles } from './lib.js';
-import { Chat } from './components/Chat.js';
+import { Chat } from './components/common/Chat.js';
 import { Resizer } from './components/common/Resizer.js';
 
 const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');

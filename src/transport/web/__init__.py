@@ -29,7 +29,8 @@ class WebTransport(BaseTransport):
     Class-level: lazily starts one uvicorn server per process.
 
     Instance-level: each subclass gets, under /{agent_id}{prefix}/ —
-    - static files from a `web/` directory next to the subclass source file,
+    - static files with cascading lookup: subclass `ui/` first, then
+      `WebTransport/ui/` (shared lib.js, Chat.js, etc.),
     - a WebSocket endpoint at `/ws` speaking the chat wire protocol,
     - buffered event replay on new client connections.
 
@@ -199,22 +200,36 @@ class WebTransport(BaseTransport):
 
     # --- static serving ---
 
+    _BASE_UI = Path(__file__).resolve().parent / "ui"
+
     @property
-    def _web_dir(self) -> Path:
-        """`web/` directory adjacent to the concrete subclass source file."""
-        return Path(inspect.getfile(type(self))).parent / "web"
+    def _ui_dirs(self) -> list[Path]:
+        """Directories to search for static files, most-specific first.
+
+        Subclass's `ui/` (next to the subclass source file) is checked first;
+        `WebTransport/ui/` is the fallback with shared components (lib.js,
+        Chat.js, etc.). Subclasses override individual files by placing them
+        in their own `ui/` directory.
+        """
+        own = Path(inspect.getfile(type(self))).resolve().parent / "ui"
+        dirs = []
+        if own != self._BASE_UI and own.is_dir():
+            dirs.append(own)
+        dirs.append(self._BASE_UI)
+        return dirs
 
     async def _static(self, filename: str = "index.html"):
-        web_dir = self._web_dir
-        path = web_dir / (filename or "index.html")
-        if not path.is_file() or not path.resolve().is_relative_to(web_dir.resolve()):
-            return PlainTextResponse("Not found", status_code=404)
-        mime = self._MIME.get(path.suffix.lstrip("."), "text/plain")
-        return PlainTextResponse(
-            path.read_text(encoding="utf-8"),
-            media_type=mime,
-            headers=self._STATIC_HEADERS,
-        )
+        filename = filename or "index.html"
+        for ui_dir in self._ui_dirs:
+            path = ui_dir / filename
+            if path.is_file() and path.resolve().is_relative_to(ui_dir.resolve()):
+                mime = self._MIME.get(path.suffix.lstrip("."), "text/plain")
+                return PlainTextResponse(
+                    path.read_text(encoding="utf-8"),
+                    media_type=mime,
+                    headers=self._STATIC_HEADERS,
+                )
+        return PlainTextResponse("Not found", status_code=404)
 
     # --- chat WebSocket: input routing + buffered broadcast ---
 
