@@ -1,4 +1,7 @@
-from agent import Skill
+import asyncio
+from typing import Annotated
+
+from agent import Skill, tool
 
 CODING_PROMPT = r"""You are a coding agent specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.
 
@@ -155,5 +158,16 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
 
 
 class CodingSkill(Skill):
+    def __init__(self):
+        super().__init__()
+        self.done = asyncio.Event()
+        self.result = ""
+
     async def get_context_prompt(self, user_text: str = "") -> str:
         return CODING_PROMPT
+
+    @tool("Завершить кодинг режим и вернуть результат основному агенту")
+    async def finish(self, result: Annotated[str, "Краткий итог что было сделано"]) -> dict:
+        self.result = result
+        self.done.set()
+        return {"status": "finishing"}

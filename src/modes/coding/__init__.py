@@ -1,146 +1,174 @@
-import asyncio
-import json
-import logging
+"""CodingMode — IDE sub-agent with Monaco editor, file tree, and shared chat.
+
+Spawns a sub-agent whose transport is a MultiTransport fanning out to both
+the parent's transport (Telegram etc.) and a CodingTransport (web IDE).
+CodingTransport inherits from WebTransport so it reuses the shared server,
+tunnel, auth, static serving, and the chat wire protocol. On top of that
+it adds file API routes and a file watcher.
+"""
+import asyncio, logging, os
+from pathlib import Path
 from typing import Annotated
+
+from fastapi import Query, Request
+from fastapi.responses import JSONResponse
+
 from agent import Skill, tool
-from src.modes.coding.server import CodingServer
+from src.transport.multi import MultiTransport
+from src.transport.web import WebTransport
 
 log = logging.getLogger(__name__)
 
 
-async def start_tunnel(port, subdomain, sish_domain, sish_port, sish_key):
-    import asyncssh
-    logging.getLogger("asyncssh").setLevel(logging.WARNING)
-    key = asyncssh.import_private_key(sish_key)
-    conn = await asyncssh.connect(
-        sish_domain, sish_port, known_hosts=None, client_keys=[key], username="tunnel",
-    )
-    await conn.forward_remote_port(subdomain, 80, "localhost", port)
-    url = f"https://{subdomain}.{sish_domain}:8443"
-    log.info("[coding] tunnel URL: %s", url)
-    return url, conn
+class CodingTransport(WebTransport):
+    """Web IDE transport: file API + file watcher on top of WebTransport."""
 
+    def __init__(self, root_path: str):
+        super().__init__(prefix="/coding", verbose=False)
+        self.root_path = root_path
+        self.resolve_path = None
+        self.workspace_host_dir = None
+        self._watch_task = None
 
-class FinishSkill(Skill):
-    """Subagent skill — allows LLM to finish coding mode and return result."""
-    def __init__(self):
-        super().__init__()
-        self.finished = False
-        self.result = ""
+    def set_agent(self, agent):
+        # API routes must be registered before the catch-all static route
+        # that super().set_agent adds, so we ensure server + agent first,
+        # register API routes, then let super add ws + static.
+        self.agent = agent
+        self._ensure_server()
+        self.register_route("get", "/api/config", self._api_config)
+        self.register_route("get", "/api/files", self._api_list_files)
+        self.register_route("get", "/api/file", self._api_read_file)
+        self.register_route("put", "/api/file", self._api_write_file)
+        super().set_agent(agent)
 
-    @tool("Завершить кодинг режим и вернуть результат основному агенту")
-    async def finish(self, result: Annotated[str, "Краткий итог что было сделано"]) -> dict:
-        self.finished = True
-        self.result = result
-        return {"status": "finishing"}
+    def start_watcher(self):
+        if self.workspace_host_dir:
+            self._watch_task = asyncio.create_task(self._watch_files())
+
+    def cleanup(self):
+        if self._watch_task:
+            self._watch_task.cancel()
+        super().cleanup()
+
+    async def _api_config(self):
+        return JSONResponse({"root_path": self.root_path})
+
+    async def _api_list_files(self, path: str = Query("/")):
+        host_path = self.resolve_path(path)
+        if host_path is None:
+            return JSONResponse({"error": f"Access denied: {path}"}, 403)
+        if not os.path.isdir(host_path):
+            return JSONResponse({"error": f"Not a directory: {path}"}, 400)
+        entries = []
+        for name in sorted(os.listdir(host_path)):
+            if name.startswith("."):
+                continue
+            full = os.path.join(host_path, name)
+            entries.append({
+                "name": name,
+                "is_dir": os.path.isdir(full),
+                "path": path.rstrip("/") + "/" + name,
+            })
+        return JSONResponse({"entries": entries})
+
+    async def _api_read_file(self, path: str = Query(...)):
+        host_path = self.resolve_path(path)
+        if host_path is None:
+            return JSONResponse({"error": f"Access denied: {path}"}, 403)
+        if not os.path.isfile(host_path):
+            return JSONResponse({"error": f"Not a file: {path}"}, 400)
+        try:
+            with open(host_path, encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            return JSONResponse({"path": path, "content": content})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    async def _api_write_file(self, request: Request):
+        data = await request.json()
+        path, content = data.get("path"), data.get("content")
+        host_path = self.resolve_path(path)
+        if host_path is None:
+            return JSONResponse({"error": f"Access denied: {path}"}, 403)
+        try:
+            os.makedirs(os.path.dirname(host_path), exist_ok=True)
+            with open(host_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return JSONResponse({"status": "ok"})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, 500)
+
+    async def _watch_files(self):
+        from watchfiles import awatch, Change
+        try:
+            host_base = Path(self.workspace_host_dir)
+            async for changes in awatch(self.workspace_host_dir):
+                paths = []
+                has_create_delete = False
+                for change_type, path in changes:
+                    try:
+                        rel = "/" + Path(path).relative_to(host_base).as_posix()
+                    except ValueError:
+                        continue
+                    paths.append(rel)
+                    if change_type in (Change.added, Change.deleted):
+                        has_create_delete = True
+                if paths:
+                    await self.send({"type": "files_changed", "paths": paths, "tree": has_create_delete})
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.warning("[coding] file watcher crashed", exc_info=True)
 
 
 class CodingModeSkill(Skill):
-    def __init__(self, port: int = 3200, sish_port: int = 2222, sish_domain: str = "", sish_key: str = ""):
-        super().__init__()
-        self._port = port
-        self._sish_port = sish_port
-        self._sish_domain = sish_domain
-        self._sish_key = sish_key
-
     @tool("Запустить кодинг режим с веб-интерфейсом для работы с кодом")
-    async def start_coding(
+    async def launch(
         self,
         task: Annotated[str, "Задача для кодинг-агента"] = "",
-        project_path: Annotated[str, "Путь к проекту (например /workspace или /mnt/c/dev/myproject)"] = "/workspace",
+        project_path: Annotated[str, "Путь к проекту"] = "/workspace",
     ) -> dict:
-        transport = self.agent.transport
-
-        from src.skills.coding import CodingSkill
+        from src.modes.coding.coding_skill import CodingSkill
         from src.skills.sandbox import SandboxSkill
         from src.skills.web import WebSkill
 
-        # Shared workspace with parent
         parent_sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         parent_web = next((s for s in self.agent.skills if isinstance(s, WebSkill)), None)
         workspace_dir = parent_sandbox.workspace_dir if parent_sandbox else None
 
-        log.info("[coding] parent_sandbox=%s workspace_dir=%s", parent_sandbox, workspace_dir)
-        finish_skill = FinishSkill()
+        coding_transport = CodingTransport(project_path)
+        coding_skill = CodingSkill()
         sub = await self.agent.spawn_subagent(
             "coding_mode",
             memory_providers=[],
             skills=[
-                CodingSkill(),
+                coding_skill,
                 SandboxSkill(workspace_dir=workspace_dir),
                 WebSkill(parent_web.api_key if parent_web else ""),
-                finish_skill,
             ],
+            transport=MultiTransport([self.agent.transport, coding_transport]),
         )
+
+        sub_sandbox = next(s for s in sub.skills if isinstance(s, SandboxSkill))
+        coding_transport.resolve_path = sub_sandbox.resolve_path
+        coding_transport.workspace_host_dir = sub_sandbox.workspace_dir
+        coding_transport.start_watcher()
+
         initial = f"Project root: {project_path}"
         if task:
             initial += f"\n\nTask: {task}"
         await sub.memory.add_turn({"role": "user", "content": initial})
 
-        sub_sandbox = next(s for s in sub.skills if isinstance(s, SandboxSkill))
-        server = CodingServer(self._port, sub_sandbox.resolve_path, project_path,
-                              workspace_host_dir=sub_sandbox.workspace_dir)
-        await server.start()
+        url = await coding_transport.get_url('/')
+        await self.agent.transport.send_message(
+            f"\U0001f4bb Coding mode: {url}\nДля выхода: /stop"
+        )
 
-        # Tunnel
-        tunnel_conn = None
-        import random, string
-        session_id = ''.join(random.choices(string.ascii_lowercase, k=6))
+        from src.agent.agent import stoppable
         try:
-            url, tunnel_conn = await asyncio.wait_for(
-                start_tunnel(self._port, f"code-{session_id}", self._sish_domain, self._sish_port, self._sish_key),
-                timeout=10,
-            )
-        except Exception as e:
-            await transport.send_message(f"Не удалось запустить туннель: {e}")
-            return {"error": str(e)}
-
-        await transport.send_message(f"💻 Coding mode: {url}")
-
-        # Route ws messages into subagent queue + show in Telegram
-        async def _ws_to_agent():
-            while True:
-                text = await server.wait_for_chat()
-                await transport.inject_message(text)
-                await transport.process_message(content_parts=[{"type": "text", "text": text}])
-
-        asyncio.create_task(_ws_to_agent())
-
-        # Chat loop — listens to subagent queue (both ws and Telegram)
-        try:
-            while True:
-                content_parts, _ = await sub.next_message()
-                msg = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict)).strip()
-                await server.send_chat(msg, role="user")
-                await sub.memory.add_turn({"role": "user", "content": content_parts})
-
-                turn = await sub.llm()
-                if turn.get("content"):
-                    await server.send_chat(turn["content"])
-
-                while turn.get("tool_calls"):
-                    for tc in turn["tool_calls"]:
-                        name = tc["function"]["name"]
-                        args = json.loads(tc["function"].get("arguments") or "{}")
-                        await server.send_tool_call(name, args)
-
-                    result_turns = await sub.dispatch_tool_calls(turn)
-                    await sub.memory.add_turn(turn, *result_turns)
-
-                    if finish_skill.finished:
-                        break
-
-                    turn = await sub.llm()
-                    if turn.get("content"):
-                        await server.send_chat(turn["content"])
-
-                if not turn.get("tool_calls"):
-                    await sub.memory.add_turn(turn)
-
-                if finish_skill.finished:
-                    break
+            await stoppable(sub.loop(), coding_skill.done)
         finally:
-            if tunnel_conn:
-                tunnel_conn.close()
+            coding_transport.cleanup()
 
-        return {"result": finish_skill.result} if finish_skill.finished else {"status": "interrupted"}
+        return {"result": coding_skill.result} if coding_skill.done.is_set() else {"status": "interrupted"}

@@ -183,20 +183,26 @@ class WebTransport(BaseTransport):
                     WebTransport._tunnel_ready.set()
             asyncio.create_task(_tunnel())
 
+    def register_route(self, method, path, handler):
+        url = f"/{self.agent.id}{self._prefix}{path}"
+        getattr(self._app, method)(url)(handler)
+        self._routes.append(self._app.router.routes[-1])
+
     def set_agent(self, agent):
         super().set_agent(agent)
         if not self._mount:
             return
         self._ensure_server()
-        base = f"/{agent.id}{self._prefix}"
-        self._app.websocket(f"{base}/ws")(self._ws)
-        self._app.get(f"{base}/{{filename:path}}")(self._static)
-        self._routes = self._app.router.routes[-2:]
+        self.register_route("websocket", "/ws", self._ws)
+        self.register_route("get", "/{filename:path}", self._static)
 
     def remove_routes(self):
         for r in self._routes:
             self._app.router.routes.remove(r)
         self._routes = []
+
+    def cleanup(self):
+        self.remove_routes()
 
     # --- static serving ---
 

@@ -17,27 +17,25 @@ const userscriptSnippet =
 // with no state, so it renders once and never re-renders to pick up late cl values.
 
 createGlobalStyles`
-    body { background: #1e1e2e; color: #cdd6f4;
-           font: 14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-           margin: 0; padding: 48px; line-height: 1.6; }
-    h1 { font-size: 22px; margin: 0 0 24px; color: #89b4fa; }
-    h2 { font-size: 16px; color: #89b4fa; margin: 40px 0 12px; }
-    p { color: #a6adc8; }
-    ol { color: #a6adc8; padding-left: 22px; }
-    a { color: #89b4fa; }
-    code { background: #2a2a3d; padding: 2px 6px; border-radius: 4px; font-size: 12px; color: #f9e2af; }
-    pre { background: #2a2a3d; padding: 14px 16px; border-radius: 8px;
-          overflow-x: auto; font-size: 12px; color: #f9e2af; margin: 8px 0;
-          border-left: 3px solid #89b4fa; padding-right: 90px; }
-    hr { border: none; border-top: 1px solid #313147; margin: 32px 0; }
+    body { padding: 48px; line-height: 1.6; overflow: auto; }
+    h1 { font-size: 22px; margin: 0 0 24px; color: var(--accent); }
+    h2 { font-size: 16px; color: var(--accent); margin: 40px 0 12px; }
+    p { color: var(--text-dim); }
+    ol { color: var(--text-dim); padding-left: 22px; }
+    a { color: var(--accent); }
+    code { background: var(--surface2); padding: 2px 6px; border-radius: 4px; font-size: 12px; color: var(--warn); }
+    pre { background: var(--surface2); padding: 14px 16px; border-radius: 8px;
+          overflow-x: auto; font-size: 12px; color: var(--warn); margin: 8px 0;
+          border-left: 3px solid var(--accent); padding-right: 90px; }
+    hr { border: none; border-top: 1px solid var(--surface3); margin: 32px 0; }
     .bookmarklet {
         display: inline-block; margin: 24px 0; padding: 14px 28px;
-        background: #89b4fa; color: #1e1e2e; text-decoration: none;
+        background: var(--accent); color: var(--bg); text-decoration: none;
         border-radius: 8px; font-weight: bold; font-size: 15px;
         cursor: grab; user-select: none;
     }
-    .bookmarklet:hover { background: #b4befe; }
-    .hint { color: #6c7086; font-size: 12px; margin-top: 8px; }
+    .bookmarklet:hover { opacity: 0.85; }
+    .hint { color: var(--text-dim); font-size: 12px; margin-top: 8px; }
 `;
 
 const cl = {

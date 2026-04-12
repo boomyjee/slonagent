@@ -1,4 +1,4 @@
-import { render, html, Component, css, createGlobalStyles } from './lib.js';
+import { render, html, Component, css } from './lib.js';
 import { Chat } from './components/common/Chat.js';
 import { Resizer } from './components/common/Resizer.js';
 
@@ -99,15 +99,3 @@ cl.log = css`
   &.CRITICAL { color: var(--red); font-weight: bold; }
 `;
 
-createGlobalStyles`
-  :root {
-    --bg: #1e1e2e; --surface: #252536; --surface2: #2a2a3d; --surface3: #313147;
-    --border: #333350; --text: #cdd6f4; --text-dim: #6c7086;
-    --accent: #89b4fa; --green: #a6e3a1; --warn: #f9e2af; --red: #f38ba8;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; height: 100vh; }
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-track { background: var(--bg); }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-`;
