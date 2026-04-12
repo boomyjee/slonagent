@@ -89,9 +89,9 @@ class ClaudeCodeSkill(Skill):
                         tool_input_buf = ""
 
                     elif block_type == "thinking" and thinking_buf:
-                        await transport.send_thinking(thinking_buf, stream_id=thinking_msgs, final=True)
+                        await transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
                         thinking_buf = ""
-                        thinking_msgs = []
+                        thinking_stream_id = None
 
                     block_type = None
 
@@ -102,11 +102,10 @@ class ClaudeCodeSkill(Skill):
                         await transport.on_tool_result(block.tool_use_id, result)
 
             elif isinstance(message, AssistantMessage):
-                # Flush remaining text
                 if text_buf:
-                    await transport.send_message(text_buf, stream_id=text_msgs)
+                    await transport.send_message(text_buf, stream_id=text_stream_id)
                     text_buf = ""
-                    text_msgs = []
+                    text_stream_id = None
 
             elif isinstance(message, ResultMessage):
                 await transport.send_processing(False)
@@ -175,7 +174,11 @@ class ClaudeCodeSkill(Skill):
                     continue
                 if text.lower() in ("/stop", "/exit", "стоп", "выход"):
                     break
-                await self._send_query(client, multi, text)
+                try:
+                    await self._send_query(client, multi, text)
+                except Exception as e:
+                    log.warning("[claude_code] query failed: %s", e, exc_info=True)
+                    await multi.send_message(f"Ошибка: {e}")
 
             self._client = None
 
