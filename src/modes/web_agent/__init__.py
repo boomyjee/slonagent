@@ -18,7 +18,7 @@ sees `[system, user]` every time). `self.history` lives here, not in
 import asyncio, json, logging, uuid
 from datetime import datetime
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 
 from agent import Skill, tool, bypass
 from src.modes.web_agent.page_skill import PageSkill
@@ -38,20 +38,11 @@ class WebAgentTransport(WebTransport):
 
     def __init__(self, verbose: bool = False):
         super().__init__(prefix="/web_agent", verbose=verbose)
-        self.ws: WebSocket | None = None
-        # `method` kept alongside the future so _on_ws_connect knows how to
-        # recover when a new widget supersedes the old one mid-action
-        # (getBrowserState → fail; everything else → "navigation success").
         self._pending: dict[str, tuple[str, asyncio.Future]] = {}
-        # Bumped on every widget reconnect. _execute_task snapshots this
-        # before observe and rechecks after LLM — if it changed, the plan
-        # is stale (the widget got replaced, e.g. F5 or agent's own click
-        # caused navigation) and we retry the step. Without this, the agent
-        # would dispatch clicks to a fresh, un-indexed PageController.
         self.generation = 0
 
     async def call_action(self, method: str, *args, timeout: float = 30.0):
-        if not self.ws:
+        if not self._clients:
             raise RuntimeError("No page connected — open the bookmarklet first")
         request_id = uuid.uuid4().hex
         fut = asyncio.get_event_loop().create_future()
@@ -62,7 +53,7 @@ class WebAgentTransport(WebTransport):
         finally:
             self._pending.pop(request_id, None)
 
-    async def _handle_ws_message(self, msg: dict):
+    async def ws_handle_message(self, msg: dict):
         if msg.get("type") == "action_result":
             entry = self._pending.get(msg.get("request_id"))
             if entry and not entry[1].done():
@@ -72,35 +63,20 @@ class WebAgentTransport(WebTransport):
                 else:
                     fut.set_result(msg.get("result"))
             return
-        await super()._handle_ws_message(msg)
+        await super().ws_handle_message(msg)
 
-    async def send(self, event: dict):
-        # Do NOT buffer `action` events — on reconnect after the click that
-        # caused the navigation, the new widget would replay the old action
-        # and re-click, causing an infinite navigation loop. Only chat
-        # (transport) events go into the replay buffer.
-        if event.get("type") != "action":
-            self._buffer.append(event)
-        if self.ws:
-            try:
-                await self.ws.send_text(json.dumps(event, ensure_ascii=False))
-            except Exception:
-                self.ws = None
-
-    async def _on_ws_connect(self, ws: WebSocket):
+    async def ws_connect(self, ws: WebSocket):
         """Single-tab transport: a new widget kicks the old one out (close
         code 4001 → run.js removes itself from the old page). In-flight
         actions get resolved as "navigation success" except getBrowserState,
         which gets failed so PageSkill can retry the observe on the new page.
         """
-        if self.ws:
-            try: await self.ws.close(code=4001)
+        for old in self._clients:
+            try: await old.close(code=4001)
             except Exception: pass
-        self.ws = ws
-        self.generation += 1
+        self._clients = set()
 
-        for event in list(self._buffer):
-            await ws.send_text(json.dumps(event, ensure_ascii=False))
+        self.generation += 1
 
         for method, fut in self._pending.values():
             if fut.done(): continue
@@ -110,20 +86,7 @@ class WebAgentTransport(WebTransport):
                 fut.set_result("🔄 Действие вызвало переход на новую страницу")
         self._pending.clear()
 
-        try:
-            while True:
-                data = await ws.receive_text()
-                try:
-                    msg = json.loads(data)
-                except json.JSONDecodeError:
-                    log.warning("ws: invalid JSON: %s", data[:200])
-                    continue
-                await self._handle_ws_message(msg)
-        except WebSocketDisconnect:
-            pass
-        finally:
-            if self.ws is ws:
-                self.ws = None
+        await super().ws_connect(ws)
 
 
 

@@ -67,7 +67,7 @@ class WebTransport(BaseTransport):
         self._prefix = prefix
         self.verbose = verbose
         self._clients: set[WebSocket] = set()
-        self._buffer: deque = deque(maxlen=500)
+        self._replay_buffer: deque = deque(maxlen=500)
         self._routes: list = []
 
     @staticmethod
@@ -230,11 +230,20 @@ class WebTransport(BaseTransport):
                     headers=self._STATIC_HEADERS,
                 )
         return PlainTextResponse("Not found", status_code=404)
+    
+    async def _ws(self, ws: WebSocket):
+        # HTTP middleware doesn't run on WebSocket handshakes — enforce auth here.
+        if WebTransport._password_hash:
+            host = ws.headers.get("host", "").split(":")[0]
+            if host not in ("localhost", "127.0.0.1") and \
+                    ws.cookies.get("auth") != WebTransport._password_hash:
+                await ws.close(code=4401)
+                return
+        await ws.accept()
+        await self.ws_connect(ws)    
 
-    # --- chat WebSocket: input routing + buffered broadcast ---
-
-    async def _on_ws_connect(self, ws: WebSocket):
-        for event in list(self._buffer):
+    async def ws_connect(self, ws: WebSocket):
+        for event in list(self._replay_buffer):
             await ws.send_text(json.dumps(event, ensure_ascii=False))
         self._clients.add(ws)
         try:
@@ -245,44 +254,27 @@ class WebTransport(BaseTransport):
                 except json.JSONDecodeError:
                     log.warning("ws: invalid JSON: %s", data[:200])
                     continue
-                await self._handle_ws_message(msg)
+                await self.ws_handle_message(msg)
         except WebSocketDisconnect:
             pass
         finally:
             self._clients.discard(ws)
-            
-    async def _ws(self, ws: WebSocket):
-        # HTTP middleware doesn't run on WebSocket handshakes — enforce auth here.
-        if WebTransport._password_hash:
-            host = ws.headers.get("host", "").split(":")[0]
-            if host not in ("localhost", "127.0.0.1") and \
-                    ws.cookies.get("auth") != WebTransport._password_hash:
-                await ws.close(code=4401)
-                return
-        await ws.accept()
-        await self._on_ws_connect(ws)
 
-
-    async def _handle_ws_message(self, msg: dict):
-        """Dispatch one inbound WS message. Subclasses may override to add
-        custom message types; unknown types should call super()."""
+    async def ws_handle_message(self, msg: dict):
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
             # Echo back through send() so it lands in the buffer and gets
             # replayed on reconnect. Chat.js no longer adds user messages
             # to local state — it renders them when this event comes in.
-            await self.send(msg)
+            await self.send(msg, replay=True)
             await self.process_message(
                 content_parts=msg.get("content_parts", []),
                 user_message_id=msg.get("user_message_id"),
                 trigger_answer=msg.get("trigger_answer", True),
             )
-        else:
-            log.warning("ws: unknown message: %s", msg)
 
-    async def send(self, event: dict):
-        self._buffer.append(event)
-        if not self._clients:
-            return
+    async def send(self, event: dict, replay=False):
+        if replay: self._replay_buffer.append(event)
+        if not self._clients: return
         data = json.dumps(event, ensure_ascii=False)
         dead = set()
         for ws in list(self._clients):
@@ -294,14 +286,14 @@ class WebTransport(BaseTransport):
 
     # --- BaseTransport interface ---
 
-    async def _transport_event(self, method: str, **kwargs):
-        await self.send({"type": "transport", "method": method, **kwargs})
+    async def _transport_event(self, method: str, replay=True, **kwargs):
+        await self.send({"type": "transport", "method": method, **kwargs}, replay=replay)
 
     async def send_message(self, text: str, stream_id=None, final: bool = True):
         await self._transport_event("send_message", text=text, stream_id=stream_id, final=final)
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
-        await self._transport_event("send_thinking", text=text, stream_id=stream_id, final=final)
+        await self._transport_event("send_thinking", replay=final, text=text, stream_id=stream_id, final=final)
 
     async def send_system_prompt(self, text: str):
         if not self.verbose: return
@@ -314,7 +306,7 @@ class WebTransport(BaseTransport):
         await self._transport_event("on_tool_result", name=name, result=result)
 
     async def send_processing(self, active: bool):
-        await self._transport_event("send_processing", active=active)
+        await self._transport_event("send_processing", replay=False, active=active)
 
     async def inject_message(self, text: str):
         await self._transport_event("inject_message", text=text)

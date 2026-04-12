@@ -30,7 +30,7 @@ class _LogHandler(logging.Handler):
             text = self.format(record)
             event = {"type": "log", "category": category, "level": record.levelname, "text": text}
             loop = asyncio.get_event_loop()
-            loop.call_soon_threadsafe(asyncio.ensure_future, transport.send(event))
+            loop.call_soon_threadsafe(asyncio.ensure_future, transport.send(event, replay=True))
         except Exception:
             self.handleError(record)
 
