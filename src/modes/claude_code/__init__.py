@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import uuid
 from typing import Annotated
 
 from agent import Skill, tool, bypass
@@ -22,13 +24,32 @@ class ClaudeCodeSkill(Skill):
         self._cli_path = cli_path or None
         self._model = model or None
         self._expose_tool = expose_tool
-        self._client: ClaudeSDKClient | None = None
 
     def get_tools(self):
         return super().get_tools() if self._expose_tool else []
 
-    async def _send_query(self, client, transport, text):
-        await client.query(text)
+    @property
+    def _state_file(self):
+        return os.path.join(self.agent.memory.memory_dir, "claude_code.json")
+
+    def _load_session_id(self) -> str:
+        try:
+            with open(self._state_file) as f:
+                return json.load(f).get("session_id", "")
+        except (FileNotFoundError, json.JSONDecodeError):
+            return ""
+
+    def _save_session_id(self, session_id: str):
+        with open(self._state_file, "w") as f:
+            json.dump({"session_id": session_id}, f)
+
+    def _new_session_id(self) -> str:
+        sid = str(uuid.uuid4())
+        self._save_session_id(sid)
+        return sid
+
+    async def _send_query(self, client, transport, text, session_id="default"):
+        await client.query(text, session_id=session_id)
         await transport.send_processing(True)
 
         text_buf = ""
@@ -119,6 +140,11 @@ class ClaudeCodeSkill(Skill):
     async def launch_command(self, args: str):
         await self.launch(task=args)
 
+    @bypass("session", "Сбросить сессию Claude Code", standalone=True)
+    async def session_command(self, args: str):
+        sid = self._new_session_id()
+        await self.agent.transport.send_message(f"Новая сессия: {sid[:8]}...")
+
     @tool("Запустить Claude Code для работы с кодом в указанной папке")
     async def launch(
         self,
@@ -159,11 +185,11 @@ class ClaudeCodeSkill(Skill):
             setting_sources=["user"],
         )
 
-        async with ClaudeSDKClient(options=options) as client:
-            self._client = client
+        session_id = self._load_session_id() or self._new_session_id()
 
+        async with ClaudeSDKClient(options=options) as client:
             if task:
-                await self._send_query(client, multi, task)
+                await self._send_query(client, multi, task, session_id)
 
             while True:
                 content_parts, _, _ = await self.agent.next_message()
@@ -175,12 +201,10 @@ class ClaudeCodeSkill(Skill):
                 if text.lower() in ("/stop", "/exit", "стоп", "выход"):
                     break
                 try:
-                    await self._send_query(client, multi, text)
+                    await self._send_query(client, multi, text, session_id)
                 except Exception as e:
                     log.warning("[claude_code] query failed: %s", e, exc_info=True)
                     await multi.send_message(f"Ошибка: {e}")
-
-            self._client = None
 
         coding_transport.cleanup()
         return {"status": "finished"}
