@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Annotated
 
-from agent import Skill, tool
+from agent import Skill, tool, bypass
 from claude_agent_sdk import (
     ClaudeSDKClient,
     ClaudeAgentOptions,
@@ -17,11 +17,15 @@ log = logging.getLogger(__name__)
 
 
 class ClaudeCodeSkill(Skill):
-    def __init__(self, cli_path: str = "", model: str = ""):
+    def __init__(self, cli_path: str = "", model: str = "", expose_tool: bool = True):
         super().__init__()
         self._cli_path = cli_path or None
         self._model = model or None
+        self._expose_tool = expose_tool
         self._client: ClaudeSDKClient | None = None
+
+    def get_tools(self):
+        return super().get_tools() if self._expose_tool else []
 
     async def _send_query(self, client, transport, text):
         await client.query(text)
@@ -112,20 +116,40 @@ class ClaudeCodeSkill(Skill):
 
         await transport.send_processing(False)
 
+    @bypass("claude", "Запустить Claude Code", standalone=True)
+    async def launch_command(self, args: str):
+        await self.launch(task=args)
+
     @tool("Запустить Claude Code для работы с кодом в указанной папке")
-    async def start_claude_code(
+    async def launch(
         self,
         task: Annotated[str, "Задача для Claude Code"] = "",
         project_path: Annotated[str, "Путь к проекту"] = "",
     ) -> dict:
-        transport = self.agent.transport
-
+        from src.modes.coding import CodingTransport
         from src.skills.sandbox import SandboxSkill
+        from src.transport.multi import MultiTransport
+
         sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         if not sandbox:
             return {"error": "Требуется SandboxSkill с Docker-контейнером"}
         cwd = sandbox.resolve_path(project_path or "/workspace")
         log.info("[claude_code] cwd=%s", cwd)
+
+        coding_transport = CodingTransport(project_path or "/workspace")
+        coding_transport.resolve_path = sandbox.resolve_path
+        coding_transport.workspace_host_dir = sandbox.workspace_dir
+
+        original_transport = self.agent.transport
+        multi = MultiTransport([original_transport, coding_transport])
+        multi.set_agent(self.agent)
+        self.agent.transport = multi
+        coding_transport.start_watcher()
+
+        url = await coding_transport.get_url('/')
+        await original_transport.send_message(
+            f"\U0001f4bb Claude Code: {url}\nДля выхода: /stop"
+        )
 
         options = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
@@ -140,21 +164,20 @@ class ClaudeCodeSkill(Skill):
             self._client = client
 
             if task:
-                await self._send_query(client, transport, task)
+                await self._send_query(client, multi, task)
 
             while True:
-                content_parts, _ = await self.agent.next_message()
+                content_parts, _, _ = await self.agent.next_message()
                 text = " ".join(
                     p.get("text", "") for p in content_parts if isinstance(p, dict)
                 ).strip()
                 if not text:
                     continue
-
                 if text.lower() in ("/stop", "/exit", "стоп", "выход"):
                     break
-
-                await self._send_query(client, transport, text)
+                await self._send_query(client, multi, text)
 
             self._client = None
 
+        coding_transport.cleanup()
         return {"status": "finished"}

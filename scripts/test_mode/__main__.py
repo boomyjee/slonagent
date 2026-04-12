@@ -24,7 +24,7 @@ async def main():
             await agent.dispatch_tool_calls({"tool_calls": [{
                 "id": "cli", "function": {"name": tool_name, "arguments": "{}"},
             }]})
-            asyncio.get_running_loop().stop()
+            raise SystemExit(0)
         asyncio.create_task(run_tool())
         return agent
     await TelegramTransport.listen(config["telegram"], make_agent)
