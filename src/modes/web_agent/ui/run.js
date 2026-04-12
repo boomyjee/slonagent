@@ -7,16 +7,9 @@
  * second import a no-op.
  */
 
-const selfUrl = new URL(import.meta.url);
-const match = selfUrl.pathname.match(/^\/([^/]+)\/web_agent\/run\.js$/);
-if (!match) throw new Error('[slonagent] run.js mounted from unexpected URL: ' + selfUrl.pathname);
-const AGENT_ID = match[1];
-const DASH = `${selfUrl.protocol}//${selfUrl.host}/${AGENT_ID}/dashboard`;
-const BASE = `${selfUrl.protocol}//${selfUrl.host}/${AGENT_ID}/web_agent`;
-
 // Imported before chat-widget.js so we can set `stylesHost.target = shadow`
 // before Chat.js module-eval runs its top-level `css` calls.
-const lib = await import(`${DASH}/lib.js`);
+const lib = await import('./lib.js');
 const { render, html, stylesHost } = lib;
 
 // `mode: 'closed'` is critical — without it, dom_tree.js (used by the
@@ -65,10 +58,12 @@ root.style.cssText = `
 shadow.appendChild(root);
 
 const [{ Chat }, { createWidgetApp }] = await Promise.all([
-    import(`${DASH}/components/Chat.js`),
-    import(`${BASE}/chat-widget.js`),
+    import('./components/common/Chat.js'),
+    import('./chat-widget.js'),
 ]);
-const wsUrl = `${selfUrl.protocol === 'https:' ? 'wss' : 'ws'}://${selfUrl.host}/${AGENT_ID}/web_agent/ws`;
+const wsBase = new URL('./', import.meta.url);
+wsBase.protocol = wsBase.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsUrl = new URL('ws', wsBase).href;
 const WidgetApp = createWidgetApp({
     lib, Chat, wsUrl, page,
     onSuperseded: () => host.remove(),

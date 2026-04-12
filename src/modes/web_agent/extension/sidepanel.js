@@ -60,7 +60,7 @@ async function startWidget(baseUrl) {
 
     const [lib, { Chat }, { createWidgetApp }] = await Promise.all([
         import('./web/lib.js'),
-        import('./web/components/Chat.js'),
+        import('./web/components/common/Chat.js'),
         import('./web/chat-widget.js'),
     ]);
     const { render, html } = lib;

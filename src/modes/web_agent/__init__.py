@@ -12,9 +12,8 @@ the user message is rebuilt every step from <agent_state>+<agent_history>+
 sees `[system, user]` every time). `self.history` lives here, not in
 `sub.memory` — memory is just a carrier for the synthesized user prompt.
 
-`WebAgentTransport` mounts at `/{sub_id}/web_agent/`. The dashboard routes
-the widget's lib.js needs are served at `/{sub_id}/dashboard/` thanks to the
-MultiTransport cascading `set_agent(sub)` into the parent's DashboardTransport.
+`WebAgentTransport` mounts at `/{sub_id}/web_agent/`. Shared UI files
+(lib.js, Chat.js) are served via WebTransport's cascading ui/ lookup.
 """
 import asyncio, json, logging, uuid
 from datetime import datetime
