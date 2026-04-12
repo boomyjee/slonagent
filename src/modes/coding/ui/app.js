@@ -15,6 +15,39 @@ const monaco = await new Promise(resolve => {
     require(['vs/editor/editor.main'], () => resolve(window.monaco));
 });
 
+monaco.editor.defineTheme('catppuccin', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+        { token: 'comment', foreground: '6c7086', fontStyle: 'italic' },
+        { token: 'keyword', foreground: 'cba6f7' },
+        { token: 'string', foreground: 'a6e3a1' },
+        { token: 'number', foreground: 'fab387' },
+        { token: 'type', foreground: 'f9e2af' },
+        { token: 'function', foreground: '89b4fa' },
+        { token: 'variable', foreground: 'cdd6f4' },
+        { token: 'operator', foreground: '89dceb' },
+        { token: 'delimiter', foreground: '9399b2' },
+    ],
+    colors: {
+        'editor.background': '#1e1e2e',
+        'editor.foreground': '#cdd6f4',
+        'editor.lineHighlightBackground': '#2a2a3d',
+        'editor.selectionBackground': '#45475a',
+        'editor.inactiveSelectionBackground': '#313147',
+        'editorCursor.foreground': '#89b4fa',
+        'editorLineNumber.foreground': '#6c7086',
+        'editorLineNumber.activeForeground': '#cdd6f4',
+        'editorIndentGuide.background': '#313147',
+        'editorIndentGuide.activeBackground': '#45475a',
+        'editorWidget.background': '#252536',
+        'editorWidget.border': '#333350',
+        'minimap.background': '#1e1e2e',
+        'scrollbarSlider.background': '#31314780',
+        'scrollbarSlider.hoverBackground': '#45475a80',
+    },
+});
+
 const LANG = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'typescript',json:'json',md:'markdown',html:'html',css:'css',yaml:'yaml',yml:'yaml',sh:'shell',bash:'shell',rs:'rust',go:'go',java:'java',rb:'ruby',c:'c',cpp:'cpp',h:'c',hpp:'cpp',toml:'ini',cfg:'ini',txt:'plaintext'};
 const BASE = new URL('./', location.href).href;
 const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
@@ -22,6 +55,28 @@ const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
 const cl = {};
 
 // --- File Tree ---
+
+const FILE_ICONS = {
+    py: ['Py', '#4584b6'], js: ['JS', '#f7df1e'], ts: ['TS', '#3178c6'],
+    jsx: ['JX', '#61dafb'], tsx: ['TX', '#3178c6'], json: ['{}', '#f9e2af'],
+    html: ['<>', '#e34c26'], css: ['#', '#264de4'], md: ['M', '#6c7086'],
+    yaml: ['Y', '#cb171e'], yml: ['Y', '#cb171e'], toml: ['T', '#9c4121'],
+    sh: ['$', '#a6e3a1'], bash: ['$', '#a6e3a1'], bat: ['$', '#a6e3a1'],
+    rs: ['Rs', '#dea584'], go: ['Go', '#00add8'], java: ['Jv', '#b07219'],
+    rb: ['Rb', '#cc342d'], c: ['C', '#555555'], cpp: ['C+', '#f34b7d'],
+    h: ['H', '#555555'], hpp: ['H+', '#f34b7d'], txt: ['T', '#6c7086'],
+    xml: ['<>', '#e34c26'], svg: ['Sv', '#ffb13b'], png: ['Im', '#a580e2'],
+    jpg: ['Im', '#a580e2'], gif: ['Im', '#a580e2'], sql: ['SQ', '#e38c00'],
+    env: ['Ev', '#f38ba8'], cfg: ['Cf', '#6c7086'], ini: ['In', '#6c7086'],
+    lock: ['Lk', '#6c7086'], gitignore: ['Gi', '#f05033'],
+};
+function fileIcon(name) {
+    const ext = name.includes('.') ? name.split('.').pop() : '';
+    const dotName = name.startsWith('.') ? name.slice(1) : '';
+    const entry = FILE_ICONS[ext] || FILE_ICONS[dotName];
+    if (entry) return html`<span class=${cl.fileIcon} style=${{color: entry[1]}}>${entry[0]}</span>`;
+    return html`<span class=${cl.fileIcon} style=${{color: 'var(--text-dim)'}}>F</span>`;
+}
 
 class DirNode extends Component {
     constructor(props) {
@@ -41,14 +96,16 @@ class DirNode extends Component {
         this.setState(s => ({ open: !s.open }));
     }
     render({ name, depth, onOpen }, { open, children }) {
+        const pad = (8 + depth * 8) + 'px';
         return html`<div>
-            <div class=${cl.node} style=${{paddingLeft: (12 + depth * 16) + 'px'}} onClick=${() => this.toggle()}>
-                <span class=${cl.icon}>${open ? '\u25BC' : '\u25B6'}</span><span>${name}</span>
+            <div class=${cl.node} style=${{paddingLeft: pad}} onClick=${() => this.toggle()}>
+                <span class=${cl.chevron}>${open ? '\u25BE' : '\u25B8'}</span><span>${name}</span>
             </div>
             ${open && children && children.map(e => e.is_dir
                 ? html`<${DirNode} key=${e.path} path=${e.path} name=${e.name} depth=${depth + 1} onOpen=${onOpen} />`
-                : html`<div class=${cl.node} style=${{paddingLeft: (12 + (depth+1) * 16) + 'px'}}
-                            onClick=${() => onOpen(e.path, e.name)}><span class=${cl.icon}></span><span>${e.name}</span></div>`
+                : html`<div class=${cl.node} style=${{paddingLeft: (8 + (depth+1) * 8) + 'px'}}
+                            onClick=${() => onOpen(e.path, e.name)}>
+                            <span class=${cl.chevron}></span>${fileIcon(e.name)}<span>${e.name}</span></div>`
             )}
         </div>`;
     }
@@ -70,7 +127,7 @@ class Editor extends Component {
     }
     componentDidMount() {
         this._editor = monaco.editor.create(this._el, {
-            value: '', language: 'plaintext', theme: 'vs-dark',
+            value: '', language: 'plaintext', theme: 'catppuccin',
             minimap: { enabled: true }, fontSize: 13,
             automaticLayout: true, scrollBeyondLastLine: false,
         });
@@ -234,7 +291,11 @@ cl.node = css`
   white-space: nowrap; user-select: none; font-size: 13px;
   &:hover { background: var(--surface2); }
 `;
-cl.icon = css`width: 16px; text-align: center; margin-right: 4px; font-size: 12px; flex-shrink: 0;`;
+cl.chevron = css`width: 12px; text-align: center; font-size: 10px; flex-shrink: 0; color: var(--text-dim);`;
+cl.fileIcon = css`
+  width: 18px; text-align: center; margin-right: 3px; flex-shrink: 0;
+  font-size: 9px; font-weight: 700; font-family: monospace; letter-spacing: -0.5px;
+`;
 
 cl.editor = css`flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0;`;
 cl.tabs = css`

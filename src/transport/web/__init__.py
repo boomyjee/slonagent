@@ -16,6 +16,7 @@ async def start_tunnel(port: int, subdomain: str, sish_domain: str, sish_port: i
     key = asyncssh.import_private_key(sish_key)
     conn = await asyncssh.connect(
         sish_domain, sish_port, known_hosts=None, client_keys=[key], username="tunnel",
+        keepalive_interval=15, keepalive_count_max=4,
     )
     await conn.forward_remote_port(subdomain, 80, "localhost", port)
     url = f"https://{subdomain}.{sish_domain}:8443"
@@ -177,6 +178,13 @@ class WebTransport(BaseTransport):
                         WebTransport._sish_port, WebTransport._sish_key,
                     )
                     WebTransport._tunnel_url = url
+                    # Warm up the reverse-port-forward channel so the first
+                    # real request doesn't pay a 2s cold-start penalty.
+                    import urllib.request, ssl
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    await asyncio.to_thread(urllib.request.urlopen, url, context=ctx, timeout=5)
                 except Exception as e:
                     log.warning("Tunnel failed: %s", e)
                 finally:
