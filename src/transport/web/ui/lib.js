@@ -37,7 +37,7 @@ function bauCss(n){let{document:a}=n?.window??window,t=o=>(e,...l)=>{let c=m(e,l
 // to a Shadow DOM root before importing components to isolate from
 // host-page CSS.
 export const stylesHost = {};
-export const { css, createGlobalStyles } = bauCss(stylesHost);
+export const { css, keyframes, createGlobalStyles } = bauCss(stylesHost);
 
 // localStorage persistence scoped by page path
 const _pfx = () => 'slon:' + location.pathname.replace(/\/+$/, '');

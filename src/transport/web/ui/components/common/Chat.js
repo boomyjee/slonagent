@@ -1,4 +1,4 @@
-import { html, Component, css } from '../../lib.js';
+import { html, Component, css, keyframes } from '../../lib.js';
 
 const cl = {};
 
@@ -210,10 +210,10 @@ cl.tool = css`
               border-top: 1px solid var(--border); max-height: 400px; overflow-y: auto; word-break: break-word;
               background: var(--bg); }
 `;
+const pulse = keyframes`0%,100% { opacity: 0.4; } 50% { opacity: 1; }`;
 cl.processing = css`
   padding: 8px 12px; font-size: 12px; color: var(--text-dim);
-  animation: pulse 1.5s infinite;
-  @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+  animation: ${pulse} 1.5s infinite;
 `;
 cl.input = css`
   display: flex; border-top: 1px solid var(--border);
