@@ -38,9 +38,13 @@ class SandboxSkill(Skill):
         self._skill_script_map = {}
         result = []
         for fname in sorted(os.listdir(self.tools_dir)):
-            if not fname.endswith(".py"):
+            path = os.path.join(self.tools_dir, fname)
+            if fname.endswith(".py"):
+                script_path = path
+            elif os.path.isdir(path) and os.path.isfile(os.path.join(path, "__init__.py")):
+                script_path = os.path.join(path, "__init__.py")
+            else:
                 continue
-            script_path = os.path.join(self.tools_dir, fname)
             for t in self._introspect_ast(script_path):
                 t["function"]["name"] = "sandbox_" + t["function"]["name"]
                 self._skill_script_map[t["function"]["name"]] = script_path
@@ -145,53 +149,71 @@ class SandboxSkill(Skill):
         return await super().dispatch_tool_call(tool_call)
 
     async def _dispatch_skill_script(self, script_path, tool_name, args):
+        from src.skills.sandbox.container_lib.rpc import Channel
+        from src.skills.sandbox.host_bridge import WebTransportFactory, SandboxWebTransport
+        from src.transport.base import BaseTransport
+        from src.transport.web import WebTransport as HostWebTransport
+        from src.memory.memory import Memory
+        from agent import Agent
+
         try:
             await self._ensure_container()
         except Exception as e:
             return {"error": f"Не удалось запустить контейнер: {e}"}
 
-        fname = os.path.basename(script_path)
+        rel = os.path.relpath(script_path, self.workspace_dir).replace("\\", "/")
         cmd = [self.runtime, "exec", "-i", "-e", "PYTHONPATH=/slonagent", "-w", "/workspace",
-               self.container_name, "python", "/slonagent/runner.py", f"/workspace/tools/{fname}"]
+               self.container_name, "python", "/slonagent/runner.py", f"/workspace/{rel}"]
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
 
-        _ALLOWED = {
-            "agent.transport.send_message", 
-            "agent.transport.send_thinking", 
-            "agent.transport.send_processing", 
-            "agent.spawn_subagent",
-            "agent.next_message", 
+        def readline():
+            line = proc.stdout.readline()
+            return line.decode("utf-8") if line else ""
+
+        def writeline(msg):
+            proc.stdin.write(json.dumps(msg, ensure_ascii=False).encode() + b"\n")
+            proc.stdin.flush()
+
+        allowed = {
+            Agent: {"transport", "memory", "spawn_subagent", "next_message",
+                    "id", "loop", "skills"},
+            BaseTransport: {
+                "send_message", "send_thinking", "send_processing",
+                "send_system_prompt", "on_tool_call", "on_tool_result",
+                "inject_message", "send_app_url",
+            },
+            HostWebTransport: {"send", "get_url", "get_auth_url"},
+            WebTransportFactory: {"create"},
+            Memory: {"clear", "add_turn"},
         }
 
-        proc.stdin.write(json.dumps({"method": "call", "args": [tool_name], "kwargs": args}).encode() + b"\n")
-        await proc.stdin.drain()
+        # Pin async handlers to the host's main loop — aiogram, uvicorn and
+        # friends create sessions bound to whichever loop started them, so
+        # callbacks like transport.send_message MUST run on that loop.
+        ch = Channel(readline, writeline, ref_prefix="h", allowed=allowed,
+                     async_loop=asyncio.get_running_loop())
+        ch.register("agent", self.agent)
+        ch.register("web_transport_factory", WebTransportFactory(self))
+        ch.start()
 
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                stderr = (await proc.stderr.read()).decode()
-                return {"error": f"Script exited without result. stderr: {stderr}"}
+        try:
+            r = await ch.call("runner", "run_tool", name=tool_name, args=args, agent=self.agent)
+            result = r if isinstance(r, dict) else {"result": r}
+        except Exception as e:
+            result = {"error": str(e)}
+        finally:
+            ch.close()
+            try: proc.stdin.close()
+            except Exception: pass
+            await asyncio.to_thread(proc.wait)
+            stderr = (await asyncio.to_thread(proc.stderr.read) or b"").decode("utf-8", errors="replace")
+            if stderr:
+                logging.info("[sandbox] stderr:\n%s", stderr.rstrip())
 
-            msg = json.loads(line.decode())
-
-            if msg["method"] == "result":
-                proc.stdin.close()
-                await proc.wait()
-                return msg["args"][0] if msg["args"] else {}
-
-            if msg["method"] not in _ALLOWED:
-                resp = json.dumps({"error": f"method not allowed: {msg['method']}"})
-            else:
-                obj = self
-                for attr in msg["method"].split("."):
-                    obj = getattr(obj, attr)
-                result = await obj(*msg.get("args", []), **msg.get("kwargs", {}))
-                resp = json.dumps(result if isinstance(result, (dict, list)) else {"result": result})
-            proc.stdin.write(resp.encode() + b"\n")
-            await proc.stdin.drain()
+        return result
 
     def _mounts(self) -> dict[str, str]:
         from src.skills.config import ConfigSkill

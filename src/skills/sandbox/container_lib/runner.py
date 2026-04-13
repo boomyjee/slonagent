@@ -1,55 +1,69 @@
 """Runner for slonagent sandbox scripts.
 
-Discovers all Skill subclasses in a given module, like pytest discovers Test classes.
+Connects to host via bidirectional JSON-lines RPC (rpc.Channel).
+Exposes a single run_tool(name, args) method for host to call.
 
 Usage:
-    python -m runner script.py   # run RPC loop
+    python runner.py script.py   # started by host via podman exec
 """
 
 import sys, json, asyncio, inspect, importlib.util
+from agent import Skill
+from src.transport.base import BaseTransport
+from src.transport.web import WebTransport
+from rpc import Channel
 
 
-async def main():
-    from agent import Skill
+class Runner:
+    def __init__(self, mod):
+        self._mod = mod
+        self._skills = {}  # cls → instance
 
-    spec = importlib.util.spec_from_file_location("_script", sys.argv[1])
+    async def run_tool(self, name, args, agent):
+        for _, cls in inspect.getmembers(self._mod, inspect.isclass):
+            if not issubclass(cls, Skill) or cls is Skill:
+                continue
+            prefix = cls.__name__.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider").lower()
+            for mname, fn in inspect.getmembers(cls, predicate=inspect.isfunction):
+                if not getattr(fn, "_is_tool", False) or f"{prefix}_{mname}" != name:
+                    continue
+                if cls not in self._skills:
+                    skill = cls()
+                    skill.agent = agent
+                    self._skills[cls] = skill
+                return await fn(self._skills[cls], **args) if asyncio.iscoroutinefunction(fn) else fn(self._skills[cls], **args)
+        raise AttributeError(f"tool not found: {name}")
+
+
+def main():
+    # Write as UTF-8 bytes directly; avoids container locale (cp1252/etc.)
+    # failing on non-ASCII characters like emojis in RPC payloads.
+    def writeline(msg):
+        data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+
+    def readline():
+        line = sys.stdin.buffer.readline()
+        return line.decode("utf-8") if line else ""
+
+    script_path = sys.argv[1]
+    spec = importlib.util.spec_from_file_location("_script", script_path)
     mod = importlib.util.module_from_spec(spec)
+    mod.__file__ = script_path
+    sys.modules["_script"] = mod
     spec.loader.exec_module(mod)
 
-    tool_map = {}
-    for cls in inspect.getmembers(mod, inspect.isclass):
-        cls = cls[1]
-        if not issubclass(cls, Skill) or cls is Skill:
-            continue
-        skill = cls()
-        prefix = type(skill).__name__.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider").lower()
-        for mname, fn in inspect.getmembers(type(skill), predicate=inspect.isfunction):
-            if getattr(fn, "_is_tool", False):
-                tool_map[f"{prefix}_{mname}"] = (skill, fn)
-
-    loop = asyncio.get_event_loop()
-    while True:
-        line = await loop.run_in_executor(None, sys.stdin.readline)
-        if not line:
-            break
-        msg = json.loads(line)
-
-        if msg["method"] == "call":
-            tool_name = msg["args"][0]
-            kwargs = msg.get("kwargs", {})
-            entry = tool_map.get(tool_name)
-            if entry:
-                skill, method = entry
-                if asyncio.iscoroutinefunction(method):
-                    result = await method(skill, **kwargs)
-                else:
-                    result = method(skill, **kwargs)
-            else:
-                result = {"error": f"not found: {tool_name}"}
-
-            sys.stdout.write(json.dumps({"method": "result", "args": [result], "kwargs": {}}) + "\n")
-            sys.stdout.flush()
+    ch = Channel(readline, writeline, ref_prefix="s", allowed={
+        Skill: {"register", "start", "get_context_prompt", "get_tool_prompt", "get_tools", "is_bypass_command", "dispatch_bypass", "dispatch_tool_call"},
+        Runner: {"run_tool"},
+        BaseTransport: None,
+        WebTransport: {"ws_handle_message", "handle_route"},
+    })
+    ch.register("runner", Runner(mod))
+    ch.start()
+    ch.join()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
