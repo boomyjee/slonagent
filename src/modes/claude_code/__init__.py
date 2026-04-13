@@ -138,7 +138,7 @@ class ClaudeCodeSkill(Skill):
 
     @bypass("claude", "Запустить Claude Code", standalone=True)
     async def launch_command(self, args: str):
-        await self.launch(task=args)
+        self.agent.call_before_next_message(self.launch(task=args))
 
     @bypass("session", "Сбросить сессию Claude Code", standalone=True)
     async def session_command(self, args: str):

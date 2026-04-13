@@ -152,7 +152,7 @@ class WebAgentModeSkill(Skill):
 
     @bypass("webagent", "Запустить web-agent", standalone=True)
     async def launch_command(self,args:str):
-        await self.launch()
+        self.agent.call_before_next_message(self.launch())
 
     @tool("Запустить web-agent: возвращает ссылку на страницу с букмарклетом для вставки чат-виджета на произвольный сайт. Создаётся один саб-агент-воркер, захватывающий управление основным чатом. Блокируется до /stop от пользователя.")
     async def launch(self):

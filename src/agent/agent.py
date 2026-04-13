@@ -307,17 +307,22 @@ class Agent:
                 logging.warning("[agent] LLM %s error, retry %d/%d in %ds: %s", self.model_name, attempt + 1, max_retries, wait, e)
                 await asyncio.sleep(wait)
 
+    def call_before_next_message(self, coro):
+        self._message_queue.put_nowait(coro)
+
     async def next_message(self) -> tuple[list, any, bool]:
-        content_parts, user_message_id, trigger_answer = await self._message_queue.get()
         batch = []
-        while not self._message_queue.empty():
-            batch.append(self._message_queue.get_nowait())
-        if batch:
+        while not batch or not self._message_queue.empty():
+            item = await self._message_queue.get()
+            if asyncio.iscoroutine(item):
+                await item
+            else:
+                batch.append(item)
+        if len(batch) > 1:
             logging.info("[agent] merging %d queued messages", len(batch))
-            all_items = [(content_parts, user_message_id, trigger_answer)] + batch
-            content_parts = [p for i, (parts, _, _) in enumerate(all_items) for p in ([{"type": "text", "text": "\n"}] if i > 0 else []) + list(parts)]
-            user_message_id = next((mid for _, mid, _ in all_items if mid is not None), None)
-            trigger_answer = any(t for _, _, t in all_items)
+        content_parts = [p for i, (parts, _, _) in enumerate(batch) for p in ([{"type": "text", "text": "\n"}] if i > 0 else []) + list(parts)]
+        user_message_id = next((mid for _, mid, _ in batch if mid is not None), None)
+        trigger_answer = any(t for _, _, t in batch)
         self._current_content_parts = content_parts
         self._system_instruction = None
         user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
@@ -381,7 +386,7 @@ class Agent:
                 self._tool_stop_event.clear()
                 result = await stoppable(skill.dispatch_bypass(user_query), self._tool_stop_event)
                 if self.transport.agent is not self: self.transport.set_agent(self)
-                if result is None:
+                if self._tool_stop_event.is_set():
                     await self.transport.send_message("⚠️ Прервано пользователем.")
                 if result:
                     await self.transport.send_message(result)

@@ -99,7 +99,7 @@ class Skill:
         except Exception as e:
             logging.exception("[skill] bypass /%s failed", cmd)
             return f"⚠️ /{cmd}: {e}"
-        return str(result)
+        return str(result) if result is not None else ""
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         return ""

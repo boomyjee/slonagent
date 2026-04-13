@@ -46,6 +46,9 @@ class AgentSkill(Skill):
             param_names = list(decl["function"].get("parameters", {}).get("properties", {}).keys())
             parsed = {param_names[0]: arg_str} if arg_str and param_names else {}
         fc = {"id": f"bypass_{name}", "function": {"name": name, "arguments": json.dumps(parsed)}}
-        await self.agent.transport.on_tool_call(name, parsed)
-        await self.agent.transport.on_tool_result(name, await skill.dispatch_tool_call(fc))
+
+        async def run():
+            await self.agent.transport.on_tool_call(name, parsed)
+            await self.agent.transport.on_tool_result(name, await skill.dispatch_tool_call(fc))
+        self.agent.call_before_next_message(run())
         return ""
