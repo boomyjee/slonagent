@@ -1,14 +1,35 @@
 """Bidirectional JSON-lines RPC over pipes.
 
-Works from both sync and async code on either side.
+`Proxy.__call__` is uniform regardless of caller context or remote
+shape: it fires the wire call and returns a _ProxyCall wrapper. The
+caller resolves it via `await` (which yields to the event loop — so
+replies aren't blocked by the caller even when caller and remote share
+a loop) or `.wait()` from purely sync code.
+
+Under the hood:
+  * remote sync function  → reply "ok"     → value, resolved on await.
+  * remote async function → reply "ok_fut" → RemoteFuture; final value
+    arrives later via "fut_done" and is auto-chained on await/.wait().
+
+Local syntax is uniform:
+  * `x = await proxy.method(...)`            — any remote, in async code
+  * `x = proxy.method(...).wait()`           — any remote, from sync code
+  * `task = asyncio.create_task(proxy....)`  — schedule concurrently
+
+The wire call is sent eagerly before _ProxyCall is returned, so
+fire-and-forget still works (ignoring the wrapper is harmless).
+_ProxyCall implements the Coroutine ABC so asyncio.create_task accepts it.
 
 Threading model:
   * reader  — blocking readline loop. Each incoming "call" is handed off
               to a fresh daemon worker thread; reader never runs handlers.
-  * worker  — one per incoming call, daemon thread. Either runs the sync
-              handler directly, or drives the async handler on `async_loop`
-              via run_coroutine_threadsafe (if provided) else on a fresh
-              per-call event loop.
+  * worker  — one per incoming call, daemon thread. Sync handler runs
+              directly. Async handler is scheduled on `async_loop` via
+              run_coroutine_threadsafe (if provided) — the worker returns
+              the Future immediately, _send_ok turns it into "ok_fut",
+              and a done-callback delivers the final value via "fut_done".
+              Without async_loop, the worker drives the coroutine on a
+              fresh per-call event loop to completion (legacy path).
 
 Why this shape:
   * Daemon threads → Ctrl+C / interpreter exit actually works even if
@@ -16,26 +37,16 @@ Why this shape:
   * `async_loop` lets the host pin all async handlers to its main loop
     so things like aiogram/uvicorn (whose sessions are loop-bound) keep
     working when sandbox calls back into `transport.send_message`.
-  * A per-call fresh loop is fine for the sandbox side (no libs bound
-    to a shared loop) and gives maximum parallelism.
   * `max_workers` caps in-flight calls. When saturated the next call is
     rejected with an error (not queued) — silent queuing is the classic
     RPC-deadlock setup (pinned threads waiting on a reply that's stuck
     behind them in the backlog).
 
-Outgoing calls:
-  * ch.call(ref, method, *a, **kw) → RpcFuture: both awaitable and .wait()-able.
-  * proxy.method(...)              → if caller has a running loop, returns
-                                     a coroutine-compatible _ProxyCall
-                                     (await, or use sync dunders like
-                                     `for x in proxy.method()`). Otherwise
-                                     blocks and returns the unpacked value.
-
 Objects of allowed classes are passed by reference (ref ID). The other
 side gets a Proxy that forwards calls back.
 """
 
-import asyncio, json, logging, threading, traceback
+import asyncio, collections.abc, concurrent.futures, json, logging, threading, traceback
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +58,11 @@ class RpcFuture:
         result = fut.wait()      # sync code
 
     Resolved from the reader thread via _set_result / _set_error.
+
+    `wait()` and `__await__` auto-chain through RemoteFuture so direct
+    users (tests, non-Proxy callsites) see the final value transparently.
+    Proxy.__call__ doesn't go through this — it peeks the raw first reply
+    via `_wait_raw()` to decide sync vs async by remote's response.
     """
 
     def __init__(self):
@@ -97,9 +113,19 @@ class RpcFuture:
                 self._waiters.append((afut, loop))
         if resolved:
             self._push(afut, loop)
-        return afut.__await__()
+        v = yield from afut.__await__()
+        while isinstance(v, RemoteFuture):
+            v = yield from v.__await__()
+        return v
 
     def wait(self, timeout=None):
+        v = self._wait_raw(timeout)
+        while isinstance(v, RemoteFuture):
+            v = v._wait_raw(timeout)
+        return v
+
+    def _wait_raw(self, timeout=None):
+        """Block on the first wire reply without auto-chain. For Proxy."""
         if not self._done.wait(timeout):
             raise TimeoutError("rpc call timed out")
         if self._error is not None:
@@ -107,70 +133,93 @@ class RpcFuture:
         return self._value
 
 
-class _ProxyCall:
-    """Coroutine-compatible wrapper over an already-fired RPC call.
 
-    The RPC fires the moment Proxy(...) is invoked — not when this is
-    awaited. So `proxy.method(x)` without await still fires the call
-    (fire-and-forget), with no "never awaited" warning because this
-    object implements the coroutine protocol.
+class RemoteFuture(RpcFuture):
+    """Handle to an in-flight remote async call.
 
-    Also supports sync access (iter/bool/len/getitem) by blocking on
-    the future. Safe because each incoming call runs on its own daemon
-    thread — blocking here never stops another handler from running.
+    Returned by Proxy when the remote function returned a coroutine that
+    hasn't completed yet. Same interface as RpcFuture (await, .wait()),
+    resolved by a "fut_done" message from the remote side.
+    """
+    pass
+
+
+class _ProxyCall(collections.abc.Coroutine):
+    """Wrapper Proxy.__call__ returns when the remote went async.
+
+    The RPC has already been fired AND the first wire reply already
+    arrived (it was "ok_fut"). This wraps the in-flight RemoteFuture
+    so the caller can observe the final value however they want:
+
+      * `await wrapper`                — async wait
+      * `wrapper.wait()`               — sync wait
+      * `asyncio.create_task(wrapper)` — schedule concurrently (via
+                                         Coroutine protocol)
+      * sync dunders (__iter__, __bool__, etc.) — block on wait() and
+                                         forward to the unpacked value.
+                                         Safe because each incoming RPC
+                                         call runs on its own daemon
+                                         thread, so blocking here never
+                                         stops another handler.
+
+    These dunders live here (not on RpcFuture) because asyncio probes
+    futures with truthiness checks; a __bool__ that blocks on .wait()
+    deadlocks the event loop.
     """
 
-    __slots__ = ("_rfut", "_it")
+    __slots__ = ("_rfut", "_coro_iter")
 
     def __init__(self, rfut):
         self._rfut = rfut
-        self._it = None
+        self._coro_iter = None
 
     def __await__(self):
         return self._rfut.__await__()
 
+    def wait(self, timeout=None):
+        return self._rfut.wait(timeout)
+
+    # Coroutine protocol
     def _iter(self):
-        if self._it is None:
-            self._it = self._rfut.__await__()
-        return self._it
+        if self._coro_iter is None:
+            self._coro_iter = self.__await__()
+        return self._coro_iter
 
     def send(self, value):
         return self._iter().send(value)
 
-    def throw(self, typ, val=None, tb=None):
-        return self._iter().throw(typ, val, tb)
+    def throw(self, *args, **kwargs):
+        return self._iter().throw(*args, **kwargs)
 
     def close(self):
-        if self._it is not None and hasattr(self._it, "close"):
-            self._it.close()
+        if self._coro_iter is not None:
+            self._coro_iter.close()
 
-    def wait(self, timeout=None):
-        return self._rfut.wait(timeout)
-
-    # Sync-access dunders: let callers that don't `await` still get the
-    # value by iterating/testing/indexing.
-    def __iter__(self):
-        return iter(self._rfut.wait())
-
-    def __bool__(self):
-        return bool(self._rfut.wait())
-
-    def __len__(self):
-        return len(self._rfut.wait())
-
-    def __getitem__(self, key):
-        return self._rfut.wait()[key]
+    # Sync dunders: block and forward to the resolved value.
+    def __iter__(self): return iter(self._rfut.wait())
+    def __bool__(self): return bool(self._rfut.wait())
+    def __len__(self): return len(self._rfut.wait())
+    def __getitem__(self, k): return self._rfut.wait()[k]
+    def __contains__(self, item): return item in self._rfut.wait()
 
 
 class Proxy:
     """Remote-object reference. Dotted attribute access builds a method path.
 
-    Calling a Proxy fires the RPC immediately, then:
-      * If there's a running event loop (async context) → return a
-        _ProxyCall. The caller can `await proxy.method(...)` or use
-        sync dunders (`for x in proxy.method()`).
-      * Otherwise (no running loop) → block on .wait() and return
-        the unpacked value directly.
+    Calling a Proxy always blocks on the first wire reply (fast — reader
+    thread acknowledges whether the remote handler was sync or async,
+    independent of the caller's event loop). Decision is based on the
+    remote's response, not caller context:
+
+        * remote was sync (ok)      → returns the unpacked value
+        * remote was async (ok_fut) → returns _ProxyCall wrapping the
+                                       in-flight RemoteFuture
+
+    Callers use the result uniformly:
+
+        x = proxy.sync_method(...)          # value immediately
+        x = await proxy.async_method(...)   # async wait
+        x = proxy.async_method(...).wait()  # sync wait from any thread
     """
 
     def __init__(self, ch, ref, path=""):
@@ -184,11 +233,10 @@ class Proxy:
 
     def __call__(self, *args, **kwargs):
         rfut = self._ch.call(self._ref, self._path, *args, **kwargs)
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return rfut.wait()
-        return _ProxyCall(rfut)
+        v = rfut._wait_raw()
+        if isinstance(v, RemoteFuture):
+            return _ProxyCall(v)
+        return v
 
     def __repr__(self):
         p = f".{self._path}" if self._path else ""
@@ -222,8 +270,10 @@ class Channel:
         self._allowed = allowed or {}
         self._refs = {}
         self._pending = {}                  # cid → RpcFuture
+        self._futures = {}                  # fref → RemoteFuture (in-flight remote async)
         self._next_id = 0
         self._next_ref = 0
+        self._next_fref = 0
         self._ref_prefix = ref_prefix
 
         self._write_lock = threading.Lock()
@@ -264,7 +314,12 @@ class Channel:
     # --- outgoing calls ---
 
     def call(self, ref, method, *args, **kwargs):
-        """Issue an RPC call. Returns RpcFuture — `await` or `.wait()`."""
+        """Issue an RPC call. Returns RpcFuture resolving to the first
+        wire reply: for a sync remote that's the value, for an async
+        remote that's a RemoteFuture (in-flight; await/.wait() it for
+        the final value). Normal callers go through Proxy, which hides
+        this distinction; direct ch.call(...) users must handle it.
+        """
         cid = self._next_cid()
         rfut = RpcFuture()
         self._pending[cid] = rfut
@@ -291,8 +346,10 @@ class Channel:
                 t = msg.get("t")
                 if t == "call":
                     self._dispatch_call(msg)
-                elif t in ("ok", "err"):
+                elif t in ("ok", "err", "ok_fut"):
                     self._resolve(msg)
+                elif t == "fut_done":
+                    self._resolve_future(msg)
         finally:
             self._fail_pending("channel closed")
 
@@ -300,6 +357,9 @@ class Channel:
         for rfut in list(self._pending.values()):
             rfut._set_error(err)
         self._pending.clear()
+        for rfut in list(self._futures.values()):
+            rfut._set_error(err)
+        self._futures.clear()
 
     def _resolve(self, msg):
         rfut = self._pending.pop(msg["i"], None)
@@ -307,9 +367,23 @@ class Channel:
             return
         if msg["t"] == "err":
             rfut._set_error(msg["e"])
+        elif msg["t"] == "ok_fut":
+            # Remote returned a coroutine — register a RemoteFuture, the
+            # remote side will deliver the final value via "fut_done".
+            remote = RemoteFuture()
+            self._futures[msg["f"]] = remote
+            rfut._set_result(remote)
         else:
-            value = Proxy(self, msg["r"]) if "r" in msg else self._unpack(msg.get("v"))
-            rfut._set_result(value)
+            rfut._set_result(self._unpack(msg.get("v")))
+
+    def _resolve_future(self, msg):
+        remote = self._futures.pop(msg["f"], None)
+        if not remote:
+            return
+        if "e" in msg:
+            remote._set_error(msg["e"])
+        else:
+            remote._set_result(self._unpack(msg.get("v")))
 
     def _dispatch_call(self, msg):
         """Resolve target and run the handler on its own daemon worker thread.
@@ -353,29 +427,52 @@ class Channel:
         threading.Thread(target=run, daemon=True, name=f"rpc-call-{cid}").start()
 
     def _run_call(self, fn, args, kwargs):
-        """Run a handler. Sync call returns directly. Async call is driven
-        on `async_loop` (if provided) via run_coroutine_threadsafe, else on
-        a fresh per-call event loop owned by this worker thread."""
+        """Run a handler. Sync call returns the value directly. Async call
+        returns a concurrent.futures.Future (still in flight) — _send_ok
+        recognizes this and turns it into "ok_fut", so the caller's worker
+        thread doesn't block waiting for the coroutine to complete.
+
+        Without `async_loop`, falls back to driving the coroutine on a
+        fresh per-call event loop in a background thread (so the worker
+        can return the Future immediately)."""
         result = fn(*args, **kwargs)
         if not asyncio.iscoroutine(result):
             return result
         if self._async_loop is not None:
-            cfut = asyncio.run_coroutine_threadsafe(result, self._async_loop)
-            return cfut.result()
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(result)
-        finally:
-            asyncio.set_event_loop(None)
-            loop.close()
+            return asyncio.run_coroutine_threadsafe(result, self._async_loop)
+        cfut = concurrent.futures.Future()
+        def _drive():
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                cfut.set_result(loop.run_until_complete(result))
+            except BaseException as e:
+                cfut.set_exception(e)
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+        threading.Thread(target=_drive, daemon=True, name="rpc-coro").start()
+        return cfut
+
+    def _new_fref(self):
+        self._next_fref += 1
+        return f"f{self._ref_prefix}{self._next_fref}"
 
     def _send_ok(self, cid, result):
-        packed = self._pack(result)
-        if isinstance(packed, dict) and "_r" in packed:
-            self._send({"t": "ok", "i": cid, "r": packed["_r"]})
-        else:
-            self._send({"t": "ok", "i": cid, "v": packed})
+        if isinstance(result, concurrent.futures.Future):
+            fref = self._new_fref()
+            self._send({"t": "ok_fut", "i": cid, "f": fref})
+            result.add_done_callback(lambda f: self._send_fut_done(fref, f))
+            return
+        self._send({"t": "ok", "i": cid, "v": self._pack(result)})
+
+    def _send_fut_done(self, fref, fut):
+        try:
+            v = fut.result()
+        except BaseException:
+            self._send({"t": "fut_done", "f": fref, "e": traceback.format_exc()})
+            return
+        self._send({"t": "fut_done", "f": fref, "v": self._pack(v)})
 
     def _check(self, obj, name):
         return any(m is None or name in m for cls, m in self._allowed.items() if isinstance(obj, cls))

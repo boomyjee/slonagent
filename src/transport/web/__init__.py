@@ -51,6 +51,11 @@ class WebTransport(BaseTransport):
     _sish_port: int = 2222
     _sish_key: str = ""
     _password_hash: str = ""
+    # Loop on which the uvicorn server lives. Captured at set_server_config()
+    # so _ensure_server can schedule its server/tunnel tasks here regardless
+    # of which thread first triggers it (e.g. an RPC worker calling into a
+    # sandbox-bridge factory).
+    _loop: asyncio.AbstractEventLoop | None = None
 
     @staticmethod
     def make_auth_token(day: date = None) -> str:
@@ -97,6 +102,7 @@ class WebTransport(BaseTransport):
         WebTransport._sish_port = sish_port
         WebTransport._sish_key = sish_key
         WebTransport._password_hash = password_hash
+        WebTransport._loop = asyncio.get_running_loop()
 
     async def get_auth_url(self, sub_path: str = "") -> str:
         """URL with a daily auth token appended (for sharing in Telegram etc)."""
@@ -120,8 +126,14 @@ class WebTransport(BaseTransport):
 
     @staticmethod
     def _ensure_server():
+        # May be called from any thread (e.g. an RPC worker building a
+        # sandbox-bridge transport). All loop-bound operations are scheduled
+        # onto WebTransport._loop, captured at set_server_config(), so this
+        # function has no thread affinity of its own.
         if WebTransport._app is not None:
             return
+        if WebTransport._loop is None:
+            raise RuntimeError("WebTransport._loop not set; call set_server_config() from the main loop first")
         WebTransport._app = FastAPI()
 
         if WebTransport._password_hash:
@@ -190,7 +202,10 @@ class WebTransport(BaseTransport):
 
         logging.getLogger("asyncssh").setLevel(logging.WARNING)
         logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-        WebTransport._server_task = asyncio.create_task(_run())
+
+        def _spawn_server():
+            WebTransport._server_task = asyncio.create_task(_run())
+        WebTransport._loop.call_soon_threadsafe(_spawn_server)
 
         if WebTransport._sish_domain:
             import uuid, sys, os
@@ -221,7 +236,7 @@ class WebTransport(BaseTransport):
                     log.warning("Tunnel failed: %s", e)
                 finally:
                     WebTransport._tunnel_ready.set()
-            asyncio.create_task(_tunnel())
+            WebTransport._loop.call_soon_threadsafe(asyncio.create_task, _tunnel())
 
     def register_route(self, method, path, handler):
         url = f"/{self.agent.id}{self._prefix}{path}"
@@ -340,7 +355,7 @@ class WebTransport(BaseTransport):
         await self.send({"type": "transport", "method": method, **kwargs}, replay=replay)
 
     async def send_message(self, text: str, stream_id=None, final: bool = True):
-        await self._transport_event("send_message", text=text, stream_id=stream_id, final=final)
+        await self._transport_event("send_message", replay=final, text=text, stream_id=stream_id, final=final)
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
         await self._transport_event("send_thinking", replay=final, text=text, stream_id=stream_id, final=final)

@@ -1,4 +1,4 @@
-import ast, asyncio, base64, json, os, re, logging, subprocess
+import ast, asyncio, base64, json, os, re, logging, subprocess, threading
 from typing import Annotated
 from agent import Skill, tool
 
@@ -149,7 +149,7 @@ class SandboxSkill(Skill):
         return await super().dispatch_tool_call(tool_call)
 
     async def _dispatch_skill_script(self, script_path, tool_name, args):
-        from src.skills.sandbox.container_lib.rpc import Channel
+        from src.skills.sandbox.container_lib.rpc import Channel, Proxy
         from src.skills.sandbox.web_transport_bridge import WebTransportFactory
         from src.transport.base import BaseTransport
         from src.transport.web import WebTransport as HostWebTransport
@@ -169,6 +169,14 @@ class SandboxSkill(Skill):
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
 
+        # Drain stderr in a background thread — if the pipe buffer fills (~64KB
+        # on Windows) the container blocks on its next stderr write, and since
+        # our RPC reply also goes to stdout we'd deadlock.
+        def _drain_stderr():
+            for line in iter(proc.stderr.readline, b""):
+                logging.info("[sandbox-err] %s", line.decode("utf-8", errors="replace").rstrip())
+        threading.Thread(target=_drain_stderr, daemon=True, name="sandbox-stderr").start()
+
         def readline():
             line = proc.stdout.readline()
             return line.decode("utf-8") if line else ""
@@ -179,7 +187,7 @@ class SandboxSkill(Skill):
 
         allowed = {
             Agent: {"transport", "memory", "spawn_subagent", "next_message",
-                    "loop", "get_agent_dir"},
+                    "loop", "get_agent_dir", "process_message"},
             BaseTransport: {
                 "send_message", "send_thinking", "send_processing",
                 "send_system_prompt", "on_tool_call", "on_tool_result",
@@ -200,7 +208,7 @@ class SandboxSkill(Skill):
         ch.start()
 
         try:
-            r = await ch.call("runner", "run_tool", name=tool_name, args=args, agent=self.agent)
+            r = await Proxy(ch, "runner").run_tool(name=tool_name, args=args, agent=self.agent)
             result = r if isinstance(r, dict) else {"result": r}
         except Exception as e:
             result = {"error": str(e)}
@@ -209,9 +217,6 @@ class SandboxSkill(Skill):
             try: proc.stdin.close()
             except Exception: pass
             await asyncio.to_thread(proc.wait)
-            stderr = (await asyncio.to_thread(proc.stderr.read) or b"").decode("utf-8", errors="replace")
-            if stderr:
-                logging.info("[sandbox] stderr:\n%s", stderr.rstrip())
 
         return result
 

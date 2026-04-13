@@ -60,9 +60,18 @@ class WebTransportFactory:
     def __init__(self, sandbox_skill):
         self._sandbox_skill = sandbox_skill
 
-    async def create(self, agent, prefix="", verbose=True, routes=None,
-                     has_ws_handler=False, callback=None, ui_dir=None):
+    def create(self, agent, prefix="", verbose=True, routes=None,
+               has_ws_handler=False, callback=None, ui_dir=None):
+        # Called from an RPC worker thread. Pure-sync: WebTransport._ensure_server
+        # schedules its server/tunnel tasks onto WebTransport._loop internally,
+        # so this function has no thread affinity.
         host_ui_dir = self._sandbox_skill.resolve_path(ui_dir) if ui_dir else None
         t = WebTransportBridge(prefix, verbose, callback, routes or [], has_ws_handler, host_ui_dir)
         t.set_agent(agent)
+        # Route incoming WS messages through the sandbox WebTransport stub
+        # so the sub-agent's MultiTransport sees them and can fan out to
+        # sibling transports (e.g. mirror the user's message to telegram
+        # via inject_message). Without this, set_agent wires on_message
+        # directly to agent.process_message and bypasses MultiTransport.
+        t.on_message = callback.process_message
         return t

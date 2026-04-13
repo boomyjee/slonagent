@@ -18,6 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 from agent import Agent
 from src.transport.base import BaseTransport
+from src.transport.dashboard import DashboardTransport
 
 
 url_event = asyncio.Event()
@@ -29,7 +30,7 @@ class DummyTransport(BaseTransport):
         tag = f"stream={stream_id} final={final}" if stream_id is not None else "oneshot"
         print(f"[msg {tag}] {text}", flush=True)
         global coding_url
-        m = re.search(r"(http://[^\s]+/coding/)", text)
+        m = re.search(r"(https?://[^\s]+/coding/)", text)
         if m and not coding_url:
             coding_url = m.group(1)
             url_event.set()
@@ -42,8 +43,9 @@ class DummyTransport(BaseTransport):
     async def on_tool_call(self, name, args):
         print(f"[tool_call] {name} {args}", flush=True)
     async def on_tool_result(self, name, result):
-        print(f"[tool_result] {name} {str(result)[:200]}", flush=True)
-    async def inject_message(self, *a, **k): pass
+        print(f"[tool_result] {name} {result}", flush=True)
+    async def inject_message(self, text, *a, **k):
+        print(f"[inject_message] {text}", flush=True)
     async def send_app_url(self, url, text, button=""):
         print(f"[app_url] {url} {text}", flush=True)
 
@@ -52,7 +54,12 @@ async def ws_driver(user_text: str):
     """Wait for coding-mode URL, connect WS, send process_message, idle."""
     import websockets
     await url_event.wait()
-    ws_url = coding_url.replace("http://", "ws://") + "ws"
+    # Bypass tunnel + auth: rewrite host to localhost so auth_middleware lets us in.
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(coding_url)
+    port = config["web"].get("port", 8765)
+    local = urlunsplit(("ws", f"localhost:{port}", parts.path, "", ""))
+    ws_url = local + "ws"
     print(f"[ws] connecting to {ws_url}", flush=True)
     async with websockets.connect(ws_url) as ws:
         print(f"[ws] connected, sending: {user_text}", flush=True)
@@ -83,6 +90,7 @@ async def main():
     tool_name = sys.argv[1] if len(sys.argv) > 1 else "sandbox_codingmode_launch"
     args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
     user_text = sys.argv[3] if len(sys.argv) > 3 else "Привет! Напиши в чате «pong» три раза подряд."
+    DashboardTransport.set_server_config(**config.get("web", {}))
     transport = DummyTransport()
     agent = Agent.from_config(
         config["agent"], id="main", transport=transport,

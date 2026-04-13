@@ -11,6 +11,7 @@ Route handlers and ws_handle_message are called back from host via RPC.
 import asyncio, inspect
 from pathlib import PurePosixPath
 
+from rpc import Proxy
 from src.transport.base import BaseTransport
 
 
@@ -23,12 +24,12 @@ class WebTransport(BaseTransport):
         self._route_defs = []
         self._handlers = {}
 
-    async def set_agent(self, agent):
+    def set_agent(self, agent):
         self.agent = agent
         self.register_routes()
         ui_dir = str(PurePosixPath(inspect.getfile(type(self))).parent / "ui")
-        ch = agent._ch
-        self._proxy = await ch.call("web_transport_factory", "create",
+        factory = Proxy(agent._ch, "web_transport_factory")
+        self._proxy = factory.create(
             agent=agent,
             prefix=self._prefix,
             verbose=self._verbose,
@@ -91,6 +92,3 @@ class WebTransport(BaseTransport):
 
     async def get_auth_url(self, sub_path=""):
         return await self._proxy.get_auth_url(sub_path)
-
-    async def process_message(self, **kw):
-        return await self._proxy.process_message(**kw)

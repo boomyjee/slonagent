@@ -320,7 +320,7 @@ class Agent:
                 try:
                     await item
                 finally:
-                    if self.transport.agent is not self: self.transport.set_agent(self)
+                    if self.transport.get_agent() is not self: self.transport.set_agent(self)
             else:
                 batch.append(item)
         if len(batch) > 1:
@@ -414,7 +414,7 @@ class Agent:
             try: 
                 result = await skill.dispatch_tool_call(fc)
             finally: 
-                if self.transport.agent is not self: self.transport.set_agent(self)
+                if self.transport.get_agent() is not self: self.transport.set_agent(self)
             await self.transport.on_tool_result(name, result)
             extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
             tool_turns.append({

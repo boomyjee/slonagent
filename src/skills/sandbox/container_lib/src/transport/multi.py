@@ -1,9 +1,14 @@
-"""MultiTransport stub for sandbox scripts.
+"""MultiTransport for sandbox scripts — mirrors host MultiTransport.
 
-Wraps multiple transports. set_agent calls set_agent only on local
-transports (skips Proxies — their host-side originals are already managed).
-send_message/etc delegate to all children.
+Broadcasts all outgoing events to every child transport, and fans
+incoming messages from one child to the others via inject_message so a
+message typed in one UI (e.g. web) surfaces in the others (e.g. telegram).
+Child transports may be local sandbox transports or Proxies to host
+transports — both are treated uniformly; setting on_message on a Proxy
+is a local no-op, which is fine because those transports receive their
+messages on the host side and are managed by the host's MultiTransport.
 """
+from rpc import Proxy
 from src.transport.base import BaseTransport
 
 
@@ -12,11 +17,24 @@ class MultiTransport(BaseTransport):
         super().__init__()
         self.transports = transports
 
-    async def set_agent(self, agent):
-        self.agent = agent
+    def set_agent(self, agent):
+        super().set_agent(agent)
         for t in self.transports:
-            if isinstance(t, BaseTransport):
-                await t.set_agent(agent)
+            # Proxy transports live on the host — their agent and on_message
+            # are managed by the host's MultiTransport. Skip set_agent here;
+            # a wire call would hit the host whitelist. on_message assignment
+            # on a Proxy is a local no-op, so it's harmless to leave.
+            if not isinstance(t, Proxy):
+                t.set_agent(agent)
+            t.on_message = lambda parts, uid=None, trigger_answer=True, src=t: self._child_message(src, parts, uid, trigger_answer)
+
+    async def _child_message(self, source, content_parts, user_message_id=None, trigger_answer=True):
+        text = "\n".join(p.get("text", "") for p in content_parts if p.get("type") == "text")
+        if text:
+            for t in self.transports:
+                if t is not source:
+                    await t.inject_message(text)
+        await self.agent.process_message(content_parts, user_message_id, trigger_answer=trigger_answer)
 
     async def send_message(self, text, stream_id=None, final=True):
         for t in self.transports:
@@ -41,6 +59,11 @@ class MultiTransport(BaseTransport):
     async def send_processing(self, active):
         for t in self.transports:
             await t.send_processing(active)
+
+    def get_skills(self):
+        # Proxy transports live on the host with a different skill set; we
+        # only gather skills from local sandbox transports.
+        return [s for t in self.transports if not isinstance(t, Proxy) for s in t.get_skills()]
 
     async def inject_message(self, text):
         for t in self.transports:

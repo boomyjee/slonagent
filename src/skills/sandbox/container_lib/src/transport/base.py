@@ -8,10 +8,14 @@ class BaseTransport:
         self.agent = None
         self.on_message = None
 
-    async def set_agent(self, agent):
+    def set_agent(self, agent):
         self.agent = agent
+        self.on_message = agent.process_message
 
-    async def get_skills(self):
+    def get_agent(self):
+        return self.agent
+
+    def get_skills(self):
         return []
 
     async def send_message(self, text: str, stream_id=None, final: bool = True):

@@ -12,6 +12,9 @@ class BaseTransport:
         self.agent = agent
         self.on_message = agent.process_message
 
+    def get_agent(self):
+        return self.agent
+
     def get_skills(self):
         return []
 

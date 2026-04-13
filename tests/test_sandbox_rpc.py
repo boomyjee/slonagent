@@ -122,10 +122,10 @@ async def test_async_handler_on_host_loop(pair_async):
 
 
 async def test_proxy_syntax(pair_async):
+    """Sync remote → Proxy returns the value directly (no await)."""
     pair_async.host.register("calc", Calc())
     proxy = Proxy(pair_async.peer, "calc")
-    result = await proxy.add(7, 8)
-    assert result == 15
+    assert proxy.add(7, 8) == 15
 
 
 async def test_proxy_attribute_path(pair_async):
@@ -134,8 +134,15 @@ async def test_proxy_attribute_path(pair_async):
         def __init__(self): self.sub = Calc()
     pair_async.host.register("nested", Nested())
     proxy = Proxy(pair_async.peer, "nested")
-    result = await proxy.sub.add(1, 1)
-    assert result == 2
+    assert proxy.sub.add(1, 1) == 2
+
+
+async def test_proxy_async_remote_on_loop(pair_async):
+    """Async remote → Proxy returns awaitable that resolves to value."""
+    pair_async.host.register("calc", Calc())
+    proxy = Proxy(pair_async.peer, "calc")
+    result = await proxy.aadd(40, 2)
+    assert result == 42
 
 
 # ── проброс ошибок с трейсом ──────────────────────────────────────────────────
@@ -235,7 +242,7 @@ async def test_allowed_class_returned_as_proxy():
         bag_proxy = await p.peer.call("factory", "make", 7)
         assert isinstance(bag_proxy, Proxy)
         # Вызов на Proxy реально дёргает удалённый объект.
-        assert await bag_proxy.value() == 7
+        assert bag_proxy.value() == 7
     finally:
         p.close()
 
@@ -294,7 +301,7 @@ async def test_streaming_callbacks_order(pair_async):
     pair_async.host.register("sink", Sink())
     proxy = Proxy(pair_async.peer, "sink")
     for i in range(20):
-        await proxy.push(i, f"chunk-{i}")
+        proxy.push(i, f"chunk-{i}")
     assert received == [(i, f"chunk-{i}") for i in range(20)]
 
 
