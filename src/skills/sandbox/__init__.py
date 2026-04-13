@@ -150,7 +150,7 @@ class SandboxSkill(Skill):
 
     async def _dispatch_skill_script(self, script_path, tool_name, args):
         from src.skills.sandbox.container_lib.rpc import Channel
-        from src.skills.sandbox.host_bridge import WebTransportFactory, SandboxWebTransport
+        from src.skills.sandbox.web_transport_bridge import WebTransportFactory
         from src.transport.base import BaseTransport
         from src.transport.web import WebTransport as HostWebTransport
         from src.memory.memory import Memory
@@ -257,12 +257,8 @@ class SandboxSkill(Skill):
         )
         lines.append(
             "Python-скрипты в /workspace/tools/ автоматически становятся инструментами.\n"
-            "Определи Skill-подклассы — они будут найдены автоматически:\n"
-            "  from agent import Skill, tool\n"
-            "  class MySkill(Skill):\n"
-            "      @tool('Описание')\n"
-            "      async def my_tool(self, arg: Annotated[str, 'Desc']) -> dict:\n"
-            "          return {'result': 'ok'}"
+            "Перед тем как писать скилл — прочитай /slonagent/SKILLS.md "
+            "(это оглавление со ссылками на детали)."
         )
         return "\n".join(lines)
 

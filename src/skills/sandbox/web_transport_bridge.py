@@ -15,7 +15,7 @@ from src.transport.web import WebTransport
 log = logging.getLogger(__name__)
 
 
-class SandboxWebTransport(WebTransport):
+class WebTransportBridge(WebTransport):
     """Host-side WebTransport that proxies HTTP/WS requests to sandbox."""
 
     def __init__(self, prefix, verbose, callback, routes, has_ws_handler, ui_dir=None):
@@ -63,6 +63,6 @@ class WebTransportFactory:
     async def create(self, agent, prefix="", verbose=True, routes=None,
                      has_ws_handler=False, callback=None, ui_dir=None):
         host_ui_dir = self._sandbox_skill.resolve_path(ui_dir) if ui_dir else None
-        t = SandboxWebTransport(prefix, verbose, callback, routes or [], has_ws_handler, host_ui_dir)
+        t = WebTransportBridge(prefix, verbose, callback, routes or [], has_ws_handler, host_ui_dir)
         t.set_agent(agent)
         return t
