@@ -55,6 +55,10 @@ class WebTransport(BaseTransport):
             result = await result
         return result
 
+    async def cleanup(self):
+        if self._proxy:
+            await self._proxy.cleanup()
+
     async def send_message(self, text, stream_id=None, final=True):
         return await self._proxy.send_message(text, stream_id=stream_id, final=final)
 

@@ -54,9 +54,12 @@ class Agent:
             if "__class__" not in v: return {k: inst(val) for k, val in v.items()}
             mod, name = v["__class__"].rsplit(".", 1)
             return getattr(importlib.import_module(mod), name)(**{k: inst(val) for k, val in v.items() if k != "__class__"})
-        agent = cls(**{**inst(cfg), **overrides})
+        agent = cls(**{**inst(cfg), **inst(overrides)})
         agent._config = cfg
         return agent
+
+    def get_agent_dir(self) -> str:
+        return self.agent_dir
 
     def add_transport_skills(self):
         if not self.transport:

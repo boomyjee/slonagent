@@ -179,13 +179,13 @@ class SandboxSkill(Skill):
 
         allowed = {
             Agent: {"transport", "memory", "spawn_subagent", "next_message",
-                    "id", "loop", "skills"},
+                    "loop", "get_agent_dir"},
             BaseTransport: {
                 "send_message", "send_thinking", "send_processing",
                 "send_system_prompt", "on_tool_call", "on_tool_result",
                 "inject_message", "send_app_url",
             },
-            HostWebTransport: {"send", "get_url", "get_auth_url"},
+            HostWebTransport: {"send", "get_url", "get_auth_url", "cleanup"},
             WebTransportFactory: {"create"},
             Memory: {"clear", "add_turn"},
         }
