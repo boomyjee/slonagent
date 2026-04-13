@@ -314,7 +314,10 @@ class Agent:
         while not batch or not self._message_queue.empty():
             item = await self._message_queue.get()
             if asyncio.iscoroutine(item):
-                await item
+                try:
+                    await item
+                finally:
+                    if self.transport.agent is not self: self.transport.set_agent(self)
             else:
                 batch.append(item)
         if len(batch) > 1:
@@ -383,7 +386,6 @@ class Agent:
         for skill in self.skills:
             if skill.is_bypass_command(user_query):
                 result = await skill.dispatch_bypass(user_query)
-                if self.transport.agent is not self: self.transport.set_agent(self)
                 if result:
                     await self.transport.send_message(result)
                 return
@@ -406,8 +408,10 @@ class Agent:
                 continue
 
             await self.transport.on_tool_call(name, args)
-            result = await skill.dispatch_tool_call(fc)
-            if self.transport.agent is not self: self.transport.set_agent(self)
+            try: 
+                result = await skill.dispatch_tool_call(fc)
+            finally: 
+                if self.transport.agent is not self: self.transport.set_agent(self)
             await self.transport.on_tool_result(name, result)
             extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
             tool_turns.append({

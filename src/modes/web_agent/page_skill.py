@@ -317,7 +317,7 @@ class PageSkill(Skill):
         deadline = asyncio.get_event_loop().time() + reconnect_timeout
         last_err = None
         while asyncio.get_event_loop().time() < deadline:
-            if self.transport.ws is None:
+            if not self.transport._clients:
                 await asyncio.sleep(0.2)
                 continue
             try:
