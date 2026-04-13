@@ -73,15 +73,15 @@ class Agent:
         agent = Agent.from_config(self._config, id=f"{self.id}:{name}", agent_dir=subagent_dir, **cfg_overrides)
         await agent.start(run_loop=False)
 
-        # Propagate subagent's stop → parent's tool_stop.
+        # Propagate subagent's stop → parent's stop.
         # Closure captures only Events (not agent) so weakref.finalize
         # can cancel the task when agent is GC'd — no "Task was destroyed but pending" warnings.
-        stop_event = agent._stop_event
-        parent_tool_stop = self._tool_stop_event
+        sub_stop = agent._stop_event
+        parent_stop = self._stop_event
 
         async def _propagate_stop():
-            await stop_event.wait()
-            parent_tool_stop.set()
+            await sub_stop.wait()
+            parent_stop.set()
         task = asyncio.create_task(_propagate_stop())
         weakref.finalize(agent, task.cancel)
 
@@ -109,7 +109,6 @@ class Agent:
         self.transcription_client = Agent.OpenAI(transcription_api_key or api_key, transcription_base_url or base_url)
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
-        self._tool_stop_event = asyncio.Event()
         self._restrictions_file = os.path.join(memory_dir, ".restrictions.json")
         self._restrictions: dict = self._load_restrictions()
         self._current_content_parts: list = []
@@ -383,11 +382,8 @@ class Agent:
         user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
         for skill in self.skills:
             if skill.is_bypass_command(user_query):
-                self._tool_stop_event.clear()
-                result = await stoppable(skill.dispatch_bypass(user_query), self._tool_stop_event)
+                result = await skill.dispatch_bypass(user_query)
                 if self.transport.agent is not self: self.transport.set_agent(self)
-                if self._tool_stop_event.is_set():
-                    await self.transport.send_message("⚠️ Прервано пользователем.")
                 if result:
                     await self.transport.send_message(result)
                 return
@@ -410,10 +406,7 @@ class Agent:
                 continue
 
             await self.transport.on_tool_call(name, args)
-            self._tool_stop_event.clear()
-            result = await stoppable(skill.dispatch_tool_call(fc), self._tool_stop_event)
-            if result is None:
-                result = {"error": "прервано пользователем"}
+            result = await skill.dispatch_tool_call(fc)
             if self.transport.agent is not self: self.transport.set_agent(self)
             await self.transport.on_tool_result(name, result)
             extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
@@ -430,10 +423,10 @@ class Agent:
     async def loop(self):
         self.add_transport_skills()
         while True:
-            content_parts, user_message_id, trigger_answer = await self.next_message()
             self._stop_event.clear()
 
-            async def run_message():
+            async def handle_turn():
+                content_parts, user_message_id, trigger_answer = await self.next_message()
                 try:
                     await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
                     if not trigger_answer: return
@@ -457,4 +450,4 @@ class Agent:
                 finally:
                     await self.transport.send_processing(False)
 
-            await stoppable(run_message(), self._stop_event)
+            await stoppable(handle_turn(), self._stop_event)

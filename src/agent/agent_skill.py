@@ -8,13 +8,13 @@ class AgentSkill(Skill):
     @bypass("restart", "Перезапустить бота", standalone=True)
     def restart_command(self, args: str) -> str:
         asyncio.get_event_loop().call_later(1, os.execv, sys.executable, [sys.executable] + sys.argv)
-        return "Перезапускаюсь..."
+        return "🔄 Перезапускаюсь..."
     
     @bypass("stop", "Остановить текущий ответ", standalone=True)
     def stop_command(self, args: str) -> str:
         if self.agent:
             self.agent.stop()
-        return ""
+        return "⚠️ Прервано пользователем."
     
     @bypass("tool", "Вызвать тул")
     async def tool_command(self, args: str):
