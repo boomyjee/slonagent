@@ -23,6 +23,8 @@ from src.transport.dashboard import DashboardTransport
 
 url_event = asyncio.Event()
 coding_url = ""
+first_response_done = asyncio.Event()
+injection_seen = asyncio.Event()
 
 
 class DummyTransport(BaseTransport):
@@ -68,7 +70,6 @@ async def ws_driver(user_text: str):
             "method": "process_message",
             "content_parts": [{"type": "text", "text": user_text}],
         }))
-        # Consume events from the server (optional visibility).
         try:
             while True:
                 raw = await asyncio.wait_for(ws.recv(), timeout=60)
@@ -76,14 +77,37 @@ async def ws_driver(user_text: str):
                 m = ev.get("method", "?")
                 if m == "send_message":
                     print(f"[ws<- msg stream={ev.get('stream_id')} final={ev.get('final')}] {ev.get('text','')[:120]}", flush=True)
+                    if ev.get("final"):
+                        first_response_done.set()
                 elif m == "send_thinking":
                     print(f"[ws<- think stream={ev.get('stream_id')} final={ev.get('final')}] {ev.get('text','')[:80]}", flush=True)
                 elif m in ("on_tool_call", "on_tool_result"):
                     print(f"[ws<- {m}] {ev.get('name')}", flush=True)
+                elif m == "inject_message":
+                    print(f"[ws<- INJECT] {ev.get('text','')[:120]}", flush=True)
+                    injection_seen.set()
+                else:
+                    print(f"[ws<- {m}] {ev}", flush=True)
         except asyncio.TimeoutError:
             print("[ws] idle timeout, closing", flush=True)
         except Exception as e:
             print(f"[ws] recv ended: {e}", flush=True)
+
+
+async def direction1_driver(transport):
+    """Simulate a message coming in via the host's main transport (telegram
+    equivalent) by invoking transport.on_message and watch whether it's
+    mirrored to the sandbox WebSocket via inject_message."""
+    await first_response_done.wait()
+    await asyncio.sleep(0.5)
+    text = "Сообщение из «телеграма» (direction 1)"
+    print(f"[dir1] firing on_message via host transport: {text}", flush=True)
+    await transport.on_message([{"type": "text", "text": text}])
+    try:
+        await asyncio.wait_for(injection_seen.wait(), timeout=5)
+        print("[dir1] ✅ injection reached WS client", flush=True)
+    except asyncio.TimeoutError:
+        print("[dir1] ❌ no inject_message seen within 5s", flush=True)
 
 
 async def main():
@@ -102,12 +126,13 @@ async def main():
         "id": "cli", "function": {"name": tool_name, "arguments": json.dumps(args)},
     }]}))
     ws_task = asyncio.create_task(ws_driver(user_text))
+    dir1_task = asyncio.create_task(direction1_driver(transport))
     try:
-        await asyncio.wait_for(asyncio.gather(tool_task, ws_task), timeout=120)
+        await asyncio.wait_for(asyncio.gather(tool_task, ws_task, dir1_task), timeout=120)
     except asyncio.TimeoutError:
         print("[test] total timeout 120s", flush=True)
     finally:
-        for t in (tool_task, ws_task):
+        for t in (tool_task, ws_task, dir1_task):
             if not t.done():
                 t.cancel()
 

@@ -33,6 +33,9 @@ class Skill:
     async def get_tools(self):
         return []
 
+    def get_bypass_commands(self, standalone_only=False):
+        return {}
+
     async def is_bypass_command(self, text):
         return False
 

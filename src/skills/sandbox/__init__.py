@@ -152,6 +152,7 @@ class SandboxSkill(Skill):
         from src.skills.sandbox.container_lib.rpc import Channel, Proxy
         from src.skills.sandbox.web_transport_bridge import WebTransportFactory
         from src.transport.base import BaseTransport
+        from src.transport.multi import MultiTransport
         from src.transport.web import WebTransport as HostWebTransport
         from src.memory.memory import Memory
         from agent import Agent
@@ -205,6 +206,7 @@ class SandboxSkill(Skill):
                      async_loop=asyncio.get_running_loop())
         ch.register("agent", self.agent)
         ch.register("web_transport_factory", WebTransportFactory(self))
+        ch.register("MultiTransport", MultiTransport)
         ch.start()
 
         try:

@@ -190,12 +190,11 @@ cl.messages = css`flex: 1; min-height: 0; overflow-y: auto; padding: 12px;`;
 cl.msg = css`
   margin-bottom: 10px; font-size: 13px; line-height: 1.5; padding: 8px 12px;
   border-radius: 8px; max-width: 90%; white-space: pre-wrap; word-break: break-word;
-  &.user { background: var(--accent); color: #1e1e2e; margin-left: auto; }
+  &.user, &.inject { background: var(--accent); color: #1e1e2e; margin-left: auto; }
   &.assistant { background: var(--surface2); }
   &.thinking { background: var(--surface2); font-size: 12px; color: var(--text-dim); font-style: italic; }
   &.thinking.collapsed { max-height: 34px; overflow: hidden; cursor: pointer; opacity: 0.5; }
   &.thinking.collapsed:hover { opacity: 0.7; }
-  &.inject { background: var(--surface); font-size: 12px; color: var(--text-dim); font-style: italic; }
 `;
 cl.tool = css`
   margin-bottom: 5px; border: 1px solid var(--border); border-radius: 3px; font-size: 12px;

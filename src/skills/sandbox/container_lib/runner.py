@@ -9,7 +9,6 @@ Usage:
 
 import sys, json, asyncio, inspect, importlib.util
 from agent import Skill
-from src.transport.base import BaseTransport
 from src.transport.web import WebTransport
 from rpc import Channel
 
@@ -55,10 +54,10 @@ def main():
     spec.loader.exec_module(mod)
 
     ch = Channel(readline, writeline, ref_prefix="s", allowed={
-        Skill: {"register", "start", "get_context_prompt", "get_tool_prompt", "get_tools", "is_bypass_command", "dispatch_bypass", "dispatch_tool_call"},
+        Skill: {"register", "start", "get_context_prompt", "get_tool_prompt", "get_tools",
+                "get_bypass_commands", "is_bypass_command", "dispatch_bypass", "dispatch_tool_call"},
         Runner: {"run_tool"},
-        BaseTransport: None,
-        WebTransport: {"ws_handle_message", "handle_route"},
+        WebTransport: None,
     })
     ch.register("runner", Runner(mod))
     ch.start()

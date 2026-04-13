@@ -12,6 +12,9 @@ class BaseTransport:
         self.agent = agent
         self.on_message = agent.process_message
 
+    def set_on_message(self, callback):
+        self.on_message = callback
+
     def get_agent(self):
         return self.agent
 

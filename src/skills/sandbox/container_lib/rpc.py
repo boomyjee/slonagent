@@ -50,6 +50,15 @@ import asyncio, collections.abc, concurrent.futures, json, logging, threading, t
 
 log = logging.getLogger(__name__)
 
+# Set by Channel.start(). Sandbox has exactly one channel per process, so
+# shims like src.transport.multi.MultiTransport can locate it without
+# threading a reference through every call site.
+_active_channel = None
+
+
+def active_channel():
+    return _active_channel
+
 
 class RpcFuture:
     """Result of an RPC call. Both awaitable and blocking.
@@ -288,6 +297,8 @@ class Channel:
     # --- lifecycle ---
 
     def start(self):
+        global _active_channel
+        _active_channel = self
         self._reader_thread = threading.Thread(target=self._reader, daemon=True, name="rpc-reader")
         self._reader_thread.start()
 
@@ -394,10 +405,13 @@ class Channel:
         """
         try:
             obj = self._refs[msg["r"]]
-            for attr in msg["m"].split("."):
-                if not self._check(obj, attr):
-                    raise PermissionError(f"{type(obj).__name__}.{attr}")
-                obj = getattr(obj, attr)
+            # Empty path → ref itself is the callable (auto-registered
+            # function/lambda/method/class passed as an argument).
+            if msg["m"]:
+                for attr in msg["m"].split("."):
+                    if not self._check(obj, attr):
+                        raise PermissionError(f"{type(obj).__name__}.{attr}")
+                    obj = getattr(obj, attr)
             args = [self._unpack(a) for a in msg.get("a", [])]
             kwargs = {k: self._unpack(v) for k, v in msg.get("k", {}).items()}
         except Exception:
@@ -494,6 +508,13 @@ class Channel:
         for cls in self._allowed:
             if isinstance(v, cls):
                 return {"_r": self._new_ref(v)}
+        # Any remaining callable (function, lambda, bound method, class)
+        # gets auto-registered as a ref. The peer receives a Proxy whose
+        # __call__ with empty path fires back to invoke the callable here,
+        # preserving closures. Whitelist is bypassed deliberately: caller
+        # explicitly handed over this callable, it's opt-in by reference.
+        if callable(v):
+            return {"_r": self._new_ref(v)}
         return str(v)
 
     def _unpack(self, v):

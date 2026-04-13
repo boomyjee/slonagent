@@ -8,16 +8,18 @@ After that, send_message/send/get_url delegate to the host proxy.
 Route handlers and ws_handle_message are called back from host via RPC.
 """
 
-import asyncio, inspect
+import asyncio, inspect, logging
 from pathlib import PurePosixPath
 
 from rpc import Proxy
-from src.transport.base import BaseTransport
+
+log = logging.getLogger(__name__)
 
 
-class WebTransport(BaseTransport):
+class WebTransport:
     def __init__(self, prefix="", verbose=True):
         self.agent = None
+        self.on_message = None
         self._prefix = prefix
         self._verbose = verbose
         self._proxy = None
@@ -39,6 +41,18 @@ class WebTransport(BaseTransport):
             ui_dir=ui_dir,
         )
 
+    def set_on_message(self, callback):
+        self.on_message = callback
+
+    async def process_message(self, content_parts, user_message_id=None, trigger_answer=True):
+        if self.on_message:
+            await self.on_message(content_parts, user_message_id, trigger_answer=trigger_answer)
+        else:
+            log.warning("process_message called but on_message not set")
+
+    def get_skills(self):
+        return []
+
     def register_route(self, method, path, handler):
         self._route_defs.append((method, path, handler.__name__))
         self._handlers[handler.__name__] = handler
@@ -56,9 +70,9 @@ class WebTransport(BaseTransport):
             result = await result
         return result
 
-    async def cleanup(self):
+    def cleanup(self):
         if self._proxy:
-            await self._proxy.cleanup()
+            self._proxy.cleanup()
 
     async def send_message(self, text, stream_id=None, final=True):
         return await self._proxy.send_message(text, stream_id=stream_id, final=final)

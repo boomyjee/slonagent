@@ -13,7 +13,7 @@ class MultiTransport(BaseTransport):
         super().set_agent(agent)
         for t in self.transports:
             t.set_agent(agent)
-            t.on_message = lambda parts, uid=None, trigger_answer=True, src=t: self._child_message(src, parts, uid, trigger_answer)
+            t.set_on_message(lambda parts, uid=None, trigger_answer=True, src=t: self._child_message(src, parts, uid, trigger_answer))
 
     async def _child_message(self, source, content_parts, user_message_id=None, trigger_answer=True):
         text = "\n".join(p.get("text", "") for p in content_parts if p.get("type") == "text")
@@ -21,7 +21,7 @@ class MultiTransport(BaseTransport):
             for t in self.transports:
                 if t is not source:
                     await t.inject_message(text)
-        await self.agent.process_message(content_parts, user_message_id, trigger_answer=trigger_answer)
+        await self.process_message(content_parts, user_message_id, trigger_answer=trigger_answer)
 
     async def send_message(self, text, stream_id=None, final=True):
         for t in self.transports:
