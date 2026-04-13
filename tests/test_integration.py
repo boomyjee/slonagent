@@ -56,6 +56,8 @@ class CapturingTransport(BaseTransport):
         if stream_id is None:
             stream_id = len(self.messages)
             self.messages.append("")
+        while len(self.messages) <= stream_id:
+            self.messages.append("")
         self.messages[stream_id] = text
         return stream_id
 
@@ -81,11 +83,20 @@ class EchoSkill(Skill):
         return {"secret": "BANANA42"}
 
 
+async def wait_for(predicate, timeout=60.0):
+    """Ждёт пока predicate станет truthy или истечёт таймаут."""
+    for _ in range(int(timeout / 0.1)):
+        if predicate():
+            return
+        await asyncio.sleep(0.1)
+
+
 def make_agent(tmp_path, extra_skills=None) -> tuple[Agent, CapturingTransport]:
     key, url, model = get_llm_config()
     transport = CapturingTransport()
     compressor = PassthroughCompressor()
     agent = Agent(
+        id="test",
         model_name=model,
         api_key=key,
         base_url=url,
@@ -107,6 +118,7 @@ async def test_text_response(tmp_path):
     await agent.start()
 
     await agent.process_message([{"type": "text", "text": "Скажи ровно одно слово: 'привет'. Без точек и запятых."}])
+    await wait_for(lambda: any(t["role"] == "assistant" for t in agent.memory._turns))
 
     assert transport.last_message, "Агент не вернул ответ"
     assert len(transport.last_message) < 200, f"Ответ неожиданно длинный: {transport.last_message!r}"
@@ -131,6 +143,7 @@ async def test_tool_call(tmp_path):
         "type": "text",
         "text": "Вызови инструмент get_secret и скажи мне что он вернул. Это обязательно."
     }])
+    await wait_for(lambda: bool(transport.tool_calls) and "BANANA42" in transport.last_message and agent.memory._turns and agent.memory._turns[-1]["role"] == "assistant")
 
     assert transport.tool_calls, "Агент не вызвал инструмент get_secret"
     # Skill добавляет имя класса как префикс: EchoSkill → echo_get_secret
@@ -148,9 +161,10 @@ async def test_tool_call(tmp_path):
 
 async def test_memory_persistence(tmp_path):
     # Первая сессия
-    agent1, _ = make_agent(tmp_path)
+    agent1, t1 = make_agent(tmp_path)
     await agent1.start()
     await agent1.process_message([{"type": "text", "text": "Запомни: моё любимое число — 7331."}])
+    await wait_for(lambda: any(t["role"] == "assistant" for t in agent1.memory._turns))
 
     turns_after = agent1.memory._turns
     assert len(turns_after) >= 2, "Разговор не сохранился в памяти"
@@ -172,6 +186,7 @@ async def test_memory_persistence(tmp_path):
 
     # Агент помнит что сказал пользователь
     await agent2.process_message([{"type": "text", "text": "Какое моё любимое число? Назови только цифры."}])
+    await wait_for(lambda: "7331" in transport2.last_message and any(t["role"] == "assistant" for t in agent2.memory._turns[-2:]))
     assert "7331" in transport2.last_message, (
         f"Агент не вспомнил число из предыдущей сессии. Ответ: {transport2.last_message!r}"
     )
@@ -187,6 +202,7 @@ async def test_memory_turn_structure_after_tool_call(tmp_path):
     await agent.start()
 
     await agent.process_message([{"type": "text", "text": "Вызови get_secret и ответь мне."}])
+    await wait_for(lambda: bool(transport.tool_calls) and agent.memory._turns and agent.memory._turns[-1]["role"] == "assistant")
 
     if not transport.tool_calls:
         pytest.skip("Агент не вызвал инструмент — пропускаем проверку структуры")
@@ -241,6 +257,7 @@ async def test_transcribe_audio(tmp_path):
 
     transport = CapturingTransport()
     agent = Agent(
+        id="test",
         model_name="gemini-3-flash-preview",
         api_key=key,
         base_url=url,

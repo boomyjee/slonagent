@@ -25,6 +25,7 @@ class PassthroughCompressor(Skill):
 def make_agent(tmp_path):
     from agent import Agent
     return Agent(
+        id="test",
         model_name="test",
         api_key="test",
         base_url="http://test",

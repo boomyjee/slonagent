@@ -34,6 +34,7 @@ class PassthroughCompressor(Skill):
 def make_agent(tmp_path):
     from agent import Agent
     return Agent(
+        id="test",
         model_name="test",
         api_key="test",
         base_url="http://test",
@@ -392,12 +393,13 @@ class TestLogCompressorEdgeCases:
     @pytest.mark.asyncio
     async def test_reflector_triggered_when_obs_exceed_threshold(self, tmp_path):
         """Рефлектор вызывается когда observations превышают reflect_after_tokens."""
-        # reflect_after_tokens=1 — любые observations превысят порог
-        c = self._make_compressor(tmp_path, reflect_after=1)
+        # reflect_after=50: big_obs (~100 токенов) триггерит рефлектор,
+        # small_reflected (~10 токенов) — под порогом, эскалация не нужна
+        c = self._make_compressor(tmp_path, reflect_after=50)
 
         # observer возвращает большой блок (~100 токенов)
         big_obs = "<observations>\n* 🔴 (10:00) " + "x" * 400 + "\n</observations>"
-        # reflector возвращает маленький — гарантированно меньше по токенам
+        # reflector возвращает маленький — под порогом reflect_after=50
         small_reflected = "<observations>\n* 🔴 (10:00) condensed\n</observations>"
 
         call_count = 0

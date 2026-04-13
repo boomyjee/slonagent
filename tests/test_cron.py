@@ -26,6 +26,7 @@ class PassthroughCompressor(Skill):
 def make_agent(tmp_path):
     from agent import Agent
     return Agent(
+        id="test",
         model_name="test",
         api_key="test",
         base_url="http://test",
@@ -138,6 +139,7 @@ class TestCronTick:
         cron.agent.transport.inject_message = AsyncMock(
             side_effect=lambda msg: injected.append(msg)
         )
+        cron.agent.transport.process_message = AsyncMock()
 
         past = (datetime.now() - timedelta(minutes=5)).isoformat()
         await cron.schedule_task("fire me", past, "once")
@@ -163,6 +165,7 @@ class TestCronTick:
         cron = make_cron(tmp_path)
         cron.agent.transport = MagicMock()
         cron.agent.transport.inject_message = AsyncMock()
+        cron.agent.transport.process_message = AsyncMock()
 
         past = (datetime.now() - timedelta(minutes=5)).isoformat()
         await cron.schedule_task("once task", past, "once")
@@ -176,6 +179,7 @@ class TestCronTick:
         cron = make_cron(tmp_path)
         cron.agent.transport = MagicMock()
         cron.agent.transport.inject_message = AsyncMock()
+        cron.agent.transport.process_message = AsyncMock()
 
         past = (datetime.now() - timedelta(minutes=5)).isoformat()
         await cron.schedule_task("daily task", past, "daily")

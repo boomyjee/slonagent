@@ -44,33 +44,23 @@ def make_openai_response(content: str = None, tool_calls: list = None):
     return resp
 
 
-def make_stream_chunk(text: str = None, tool_name: str = None, tool_id: str = None, tool_args: str = None):
-    """Создаёт один chunk для стриминга."""
-    delta = MagicMock()
-    delta.content = text
-    delta.tool_calls = []
-    delta.model_extra = None  # без этого MagicMock вернёт truthy объект и текст попадёт в thinking
-    delta.model_fields_set = set()  # предотвращает предупреждения о неизвестных полях
-
-    if tool_name is not None:
-        tc = MagicMock()
-        tc.index = 0
-        tc.id = tool_id
-        tc.function = MagicMock()
-        tc.function.name = tool_name
-        tc.function.arguments = tool_args or ""
-        delta.tool_calls = [tc]
-        delta.model_fields_set = {"tool_calls"}
-
+def make_stream_chunk(text: str = None, tool_name: str = None, tool_id: str = None, tool_args: str = None, role: str = "assistant"):
+    """Создаёт один реальный ChatCompletionChunk для стриминга."""
+    from openai.types.chat import ChatCompletionChunk
+    delta: dict = {"role": role}
     if text is not None:
-        delta.model_fields_set = (delta.model_fields_set or set()) | {"content"}
-
-    choice = MagicMock()
-    choice.delta = delta
-
-    chunk = MagicMock()
-    chunk.choices = [choice]
-    return chunk
+        delta["content"] = text
+    if tool_name is not None:
+        delta["tool_calls"] = [{
+            "index": 0,
+            "id": tool_id,
+            "type": "function",
+            "function": {"name": tool_name, "arguments": tool_args or ""},
+        }]
+    return ChatCompletionChunk.model_validate({
+        "id": "chunk", "created": 0, "model": "test", "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -87,6 +77,7 @@ class TestStripContentsPrivate:
     def _make_agent(self):
         import tempfile
         agent = Agent(
+            id="test",
             model_name="test-model",
             api_key="test-key",
             base_url="http://test",
@@ -242,6 +233,7 @@ class TestAgentLoop:
     def _make_agent(self, tmp_path):
         from agent import Agent
         agent = Agent(
+            id="test",
             model_name="test-model",
             api_key="test-key",
             base_url="http://test",
@@ -256,9 +248,21 @@ class TestAgentLoop:
         t.send_message = AsyncMock(return_value=None)
         t.send_thinking = AsyncMock(return_value=None)
         t.send_system_prompt = AsyncMock(return_value=None)
+        t.send_processing = AsyncMock(return_value=None)
         t.on_tool_call = AsyncMock(return_value=None)
         t.on_tool_result = AsyncMock(return_value=None)
+        t.inject_message = AsyncMock(return_value=None)
+        t.send_app_url = AsyncMock(return_value=None)
+        t.get_skills = MagicMock(return_value=[])
+        t.set_agent = MagicMock(return_value=None)
         return t
+
+    async def _wait_for(self, predicate, timeout=2.0):
+        """Ждёт пока predicate станет truthy или истечёт таймаут."""
+        for _ in range(int(timeout / 0.01)):
+            if predicate():
+                return
+            await asyncio.sleep(0.01)
 
     def _mock_stream(self, chunks: list):
         """Создаёт async итератор из списка chunks."""
@@ -283,11 +287,12 @@ class TestAgentLoop:
 
         responses = []
         transport = self._mock_transport()
-        transport.send_message = AsyncMock(side_effect=lambda text, stream_id=None: responses.append(text))
+        transport.send_message = AsyncMock(side_effect=lambda text, stream_id=None, final=True: responses.append(text))
         agent.transport = transport
 
         await agent.start()
         await agent.process_message(content_parts=[{"type": "text", "text": "hi"}])
+        await self._wait_for(lambda: bool(responses))
 
         # Агент должен был ответить
         assert responses, "Агент не отправил ответ"
@@ -343,7 +348,6 @@ class TestAgentLoop:
 
         # Первый вызов LLM — возвращает tool call
         tc_chunk = make_stream_chunk(tool_name="testskill_ping", tool_id="call_1", tool_args="{}")
-        tc_chunk.choices[0].delta.content = None
         # Последний chunk без данных — конец стрима
         end_chunk = make_stream_chunk()
 
@@ -363,11 +367,12 @@ class TestAgentLoop:
 
         responses = []
         transport = self._mock_transport()
-        transport.send_message = AsyncMock(side_effect=lambda text, stream_id=None: responses.append(text))
+        transport.send_message = AsyncMock(side_effect=lambda text, stream_id=None, final=True: responses.append(text))
         agent.transport = transport
 
         await agent.start()
         await agent.process_message(content_parts=[{"type": "text", "text": "ping"}])
+        await self._wait_for(lambda: bool(tool_was_called) and bool(responses))
 
         assert "testskill_ping" in tool_was_called, "Инструмент не был вызван"
 

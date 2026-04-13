@@ -8,6 +8,7 @@
 не установлен Podman.
 """
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -54,6 +55,8 @@ class CapturingTransport(BaseTransport):
         if stream_id is None:
             stream_id = len(self.messages)
             self.messages.append("")
+        while len(self.messages) <= stream_id:
+            self.messages.append("")
         self.messages[stream_id] = text
         return stream_id
 
@@ -66,6 +69,7 @@ def make_agent(tmp_path, providers=None) -> tuple[Agent, CapturingTransport]:
     key, url, model = get_llm_config()
     transport = CapturingTransport()
     agent = Agent(
+        id="test",
         model_name=model,
         api_key=key,
         base_url=url,
@@ -93,6 +97,7 @@ async def test_log_compressor_observer(tmp_path):
         min_recent_turns=1,
     )
     agent = Agent(
+        id="test",
         model_name=model, api_key=key, base_url=url,
         agent_dir=str(tmp_path),
         memory_compressor=compressor,
@@ -132,6 +137,7 @@ async def test_log_compressor_reflect(tmp_path):
         reflect_after_tokens=1,  # рефлектить сразу
     )
     agent = Agent(
+        id="test",
         model_name=model, api_key=key, base_url=url,
         agent_dir=str(tmp_path),
         memory_compressor=compressor,
@@ -282,7 +288,7 @@ async def test_sandbox_read_file(tmp_path):
     await skill.start()
 
     try:
-        result = skill.read_file("/workspace/notes.txt")
+        result = skill.read("/workspace/notes.txt")
         assert "error" not in result, f"Ошибка чтения: {result}"
         assert "test content" in result["content"]
     finally:
@@ -329,10 +335,9 @@ async def test_fact_provider_retain_and_recall(tmp_path):
     await _retain_impl(items, provider._llm, provider._model_name, provider.storage, with_observations=False)
 
     # Recall по запросу о дочери
-    recalled = await provider._recall_text("дочь Маша день рождения", query_label="test")
-    assert recalled, "Recall вернул пустой результат"
-    recalled_lower = recalled.lower()
-    assert any(w in recalled_lower for w in ["маша", "masha", "дочь", "daughter", "2020", "март", "march"]), \
+    recalled = await provider.recall("дочь Маша день рождения")
+    recalled_text = json.dumps(recalled, ensure_ascii=False).lower()
+    assert any(w in recalled_text for w in ["маша", "masha", "дочь", "daughter", "2020", "март", "march"]), \
         f"Recall не нашёл факт о дочери Маше. Результат:\n{recalled}"
 
 
