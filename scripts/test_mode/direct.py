@@ -25,6 +25,8 @@ url_event = asyncio.Event()
 coding_url = ""
 first_response_done = asyncio.Event()
 injection_seen = asyncio.Event()
+files_changed_seen = asyncio.Event()
+last_files_changed_payload = None
 
 
 class DummyTransport(BaseTransport):
@@ -86,6 +88,11 @@ async def ws_driver(user_text: str):
                 elif m == "inject_message":
                     print(f"[ws<- INJECT] {ev.get('text','')[:120]}", flush=True)
                     injection_seen.set()
+                elif ev.get("type") == "files_changed":
+                    global last_files_changed_payload
+                    last_files_changed_payload = ev
+                    print(f"[ws<- FILES_CHANGED] paths={ev.get('paths')} tree={ev.get('tree')}", flush=True)
+                    files_changed_seen.set()
                 else:
                     print(f"[ws<- {m}] {ev}", flush=True)
         except asyncio.TimeoutError:
@@ -108,6 +115,23 @@ async def direction1_driver(transport):
         print("[dir1] ✅ injection reached WS client", flush=True)
     except asyncio.TimeoutError:
         print("[dir1] ❌ no inject_message seen within 5s", flush=True)
+
+
+async def file_change_driver():
+    """Modify a file in the workspace and watch for files_changed event."""
+    await first_response_done.wait()
+    await asyncio.sleep(1.5)  # give watcher time to start + initial poll
+    workspace = os.path.join(os.path.dirname(os.path.abspath("scripts/test_mode/__main__.py")),
+                             "memory", "workspace")
+    test_file = os.path.join(workspace, "hello.py")
+    print(f"[fs] writing {test_file}", flush=True)
+    with open(test_file, "w", encoding="utf-8") as f:
+        f.write(f"# touched at {asyncio.get_event_loop().time()}\n")
+    try:
+        await asyncio.wait_for(files_changed_seen.wait(), timeout=10)
+        print("[fs] ✅ files_changed reached WS client", flush=True)
+    except asyncio.TimeoutError:
+        print("[fs] ❌ no files_changed event within 10s", flush=True)
 
 
 async def http_api_driver():
@@ -151,12 +175,13 @@ async def main():
     ws_task = asyncio.create_task(ws_driver(user_text))
     dir1_task = asyncio.create_task(direction1_driver(transport))
     http_task = asyncio.create_task(http_api_driver())
+    fs_task = asyncio.create_task(file_change_driver())
     try:
-        await asyncio.wait_for(asyncio.gather(tool_task, ws_task, dir1_task, http_task), timeout=120)
+        await asyncio.wait_for(asyncio.gather(tool_task, ws_task, dir1_task, http_task, fs_task), timeout=120)
     except asyncio.TimeoutError:
         print("[test] total timeout 120s", flush=True)
     finally:
-        for t in (tool_task, ws_task, dir1_task, http_task):
+        for t in (tool_task, ws_task, dir1_task, http_task, fs_task):
             if not t.done():
                 t.cancel()
 
