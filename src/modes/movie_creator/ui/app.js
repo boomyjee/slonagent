@@ -9,7 +9,7 @@ import { Resizer } from './components/common/Resizer.js';
 import { Chat } from './components/common/Chat.js';
 import { SceneList } from './components/SceneList.js';
 import { CharacterList } from './components/CharacterList.js';
-import { EntityView } from './common/EntityView.js';
+import { EntityView, EntityStoreCtx } from './common/EntityView.js';
 import { SceneForm } from './components/SceneForm.js';
 import { CharacterForm } from './components/CharacterForm.js';
 import { StoryboardView } from './components/StoryboardView.js';
@@ -26,6 +26,27 @@ export const base = location.pathname.replace(/\/+$/, '');
 export let app = null;
 
 const cl = {};
+
+// Path-based store implementation fed to EntityList/EntityView via EntityStoreCtx.
+// Methods access `app.state.project` at call time (not construction), so they
+// always see the latest WS-synced snapshot.
+function walk(obj, path) {
+    for (const seg of path) {
+        if (obj == null) return null;
+        obj = obj[seg];
+    }
+    return obj ?? null;
+}
+
+const movieStore = {
+    resolve:  path            => walk(app.state.project, path),
+    list:     collection      => Object.values(app.state.project[collection] || {}),
+    create:   (colPath, data) => app.send({ type: 'create', path: colPath, data }),
+    update:   (path, data)    => app.send({ type: 'update', path, data }),
+    delete:   path            => app.send({ type: 'delete', path }),
+    get selectedPath() { return app.state.selectedPath; },
+    select:   path            => app.select(path),
+};
 
 class App extends Component {
     constructor(props) {
@@ -106,7 +127,7 @@ class App extends Component {
 
         if (!connected) return html`<div class=${cl.disconnected}>App disconnected</div>`;
 
-        return html`
+        return html`<${EntityStoreCtx.Provider} value=${movieStore}>
             <div class=${cl.root}>
                 <div class=${cl.tabs}>
                     ${['screenplay', 'characters', 'storyboard', 'library'].map(t => html`
@@ -124,7 +145,7 @@ class App extends Component {
                     <${Chat} app=${this} connected=${connected} ref=${c => this._chat = c} />
                 </div>
             </div>
-        `;
+        <//>`;
     }
 }
 

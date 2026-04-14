@@ -1,19 +1,20 @@
 // Generic sidebar list. Caller provides title, collection key, canCreate flag,
 // and renderItem(item, index, isActive) for custom row content.
 import { html, css } from '../lib.js';
-import { app } from '../app.js';
 import { Button } from './FormView.js';
+import { useEntityStore } from './EntityView.js';
 
 const cl = {};
 
 export function EntityList({ title, collection, canCreate, renderItem }) {
-    const items = Object.values(app.state.project[collection] || {});
-    const sp = app.state.selectedPath;
+    const store = useEntityStore();
+    const items = store.list(collection);
+    const sp = store.selectedPath;
     const selectedId = sp?.[0] === collection ? sp[1] : null;
     return html`
         <div class=${cl.sidebarHeader}>
             <span>${title}</span>
-            ${canCreate ? html`<${Button} sm variant="primary" onClick=${() => app.select([collection, '__new__'])}>+ Add<//>` : null}
+            ${canCreate ? html`<${Button} sm variant="primary" onClick=${() => store.select([collection, '__new__'])}>+ Add<//>` : null}
         </div>
         <div class=${cl.list}>
             ${items.length === 0
@@ -21,7 +22,7 @@ export function EntityList({ title, collection, canCreate, renderItem }) {
                 : items.map((item, i) => html`
                     <div
                         class=${cl.item + (item.id === selectedId ? ' active' : '')}
-                        onClick=${() => app.select([collection, item.id])}
+                        onClick=${() => store.select([collection, item.id])}
                     >${renderItem(item, i)}</div>
                 `)}
         </div>
