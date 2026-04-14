@@ -394,6 +394,10 @@ class DiaryEnrichmentSkill(Skill):
             api_key=api_key,
             base_url=base_url,
         )
+        # Каждая неделя — свой контекст. Прошлые недели подмешиваются в
+        # system_prompt через EnrichmentStore.get_prev_weeks_context (уже
+        # одобренные обогащённые версии), а не через сырые turns на диске.
+        sub.memory.clear()
 
         await sub.memory.add_turn({"role": "user", "content": (
             f"[DIARY WEEK {date_from} — {date_to}]\n"
