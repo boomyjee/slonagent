@@ -42,32 +42,27 @@ function CropImage({ src }) {
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             dragRef.current = null;
+            setSel(s => {
+                if (!s || s.w <= 5 || s.h <= 5) return null;
+                const r = img.getBoundingClientRect();
+                const sx = Math.round(s.x * img.naturalWidth / r.width);
+                const sy = Math.round(s.y * img.naturalHeight / r.height);
+                const sw = Math.round(s.w * img.naturalWidth / r.width);
+                const sh = Math.round(s.h * img.naturalHeight / r.height);
+                const canvas = document.createElement('canvas');
+                canvas.width = sw; canvas.height = sh;
+                canvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+                canvas.toBlob(blob => {
+                    navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).catch(
+                        err => console.warn('clipboard write failed:', err)
+                    );
+                }, 'image/png');
+                return null;
+            });
         };
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
     }
-
-    useEffect(() => {
-        if (!sel || sel.w <= 5 || sel.h <= 5 || dragRef.current) return;
-        const img = imgRef.current;
-        if (!img) return;
-        const rect = img.getBoundingClientRect();
-        const sx = Math.round(sel.x * img.naturalWidth / rect.width);
-        const sy = Math.round(sel.y * img.naturalHeight / rect.height);
-        const sw = Math.round(sel.w * img.naturalWidth / rect.width);
-        const sh = Math.round(sel.h * img.naturalHeight / rect.height);
-
-        const canvas = document.createElement('canvas');
-        canvas.width = sw;
-        canvas.height = sh;
-        canvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
-        canvas.toBlob(blob => {
-            navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).catch(
-                err => console.warn('clipboard write failed:', err)
-            );
-        }, 'image/png');
-        setSel(null);
-    }, [sel]);
 
     return html`
         <div class=${cl.imgWrap} onClick=${e => e.stopPropagation()}>
@@ -129,8 +124,8 @@ class LightboxView extends Component {
 
         return html`
             <div class=${cl.lightbox}
-                onMouseDown=${e => { this._downTarget = e.target; }}
-                onMouseUp=${e => { if (e.target === this._downTarget) this.close(); }}>
+                onMouseDown=${e => { if (e.button === 0) this._downTarget = e.target; }}
+                onMouseUp=${e => { if (e.button === 0 && e.target === this._downTarget) this.close(); }}>
                 ${hasPrev && html`<div class=${cl.arrow + ' prev'} onMouseDown=${e => e.stopPropagation()}
                     onClick=${() => this.setState({ index: index - 1 })}>\u2039</div>`}
                 ${item.isVideo

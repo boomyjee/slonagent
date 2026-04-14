@@ -123,27 +123,29 @@ function Tile({ gen, isPrimary, canSetPrimary, onSetPrimary, onRemix, onUseAsRef
     const full = done ? `${base}/api/asset/${gen.file}` : null;
     return html`
         <div class=${cl.tile + (isPrimary ? ' primary' : '')}>
-            <div class=${cl.image}>
+            <div class="image">
                 ${done
                     ? html`<img src=${thumb} data-full=${full} data-video=${isVideo ? '1' : undefined}
                         data-lightbox="gallery" onClick=${e => Lightbox.open(e.target)} />`
                     : failed
-                        ? html`<div class=${cl.status + ' failed'}><div class="fail-label">failed</div><div class=${cl.error}>${gen.error || ''}</div></div>`
-                        : html`<div class=${cl.status + ' ' + gen.status}>${gen.status}</div>`}
-                ${isPrimary ? html`<div class=${cl.primaryBadge}>primary</div>` : null}
-                ${gen.model ? html`<div class="model-badge">${gen.model}</div>` : null}
-                ${isVideo && done ? html`<div class=${cl.videoBadge}>\u25B6</div>` : null}
+                        ? html`<div class="status failed"><div class="fail-label">failed</div><div class="error">${gen.error || ''}</div></div>`
+                        : html`<div class="status ${gen.status}">${gen.status}</div>`}
+                ${isPrimary ? html`<div class="primary-badge">primary</div>` : null}
+                ${isVideo && done ? html`<div class="video-badge">\u25B6</div>` : null}
             </div>
-            <div class=${cl.prompt} title=${gen.prompt}>${gen.prompt}</div>
-            <div class=${cl.actions}>
+            <div class="info" title=${gen.prompt}>${gen.prompt || ''}</div>
+            <div class="prompt-hover">
+                ${gen.model ? html`<div class="model">${gen.model}</div>` : null}
+                <div class="prompt">${gen.prompt || ''}</div>
+            </div>
+            <div class="actions">
                 ${canSetPrimary && done && !isPrimary
-                    ? html`<button class=${cl.act} title="Set primary" onClick=${onSetPrimary}>\u2713</button>`
+                    ? html`<button class="act" title="Set primary" onClick=${onSetPrimary}>\u2713</button>`
                     : null}
-                ${done && html`<button class=${cl.act} title="Use as reference" onClick=${onUseAsRef}>\u29C9</button>`}
-                <button class=${cl.act} title="Remix" onClick=${onRemix}>\u21BB</button>
-                <div class="spacer"></div>
-                <button class=${cl.act + ' danger'} title="Delete" onClick=${onDelete}>\u2715</button>
+                ${done && html`<button class="act" title="Use as reference" onClick=${onUseAsRef}>\u29C9</button>`}
+                <button class="act" title="Remix" onClick=${onRemix}>\u21BB</button>
             </div>
+            <button class="delete" title="Delete" onClick=${onDelete}>\u2715</button>
         </div>
     `;
 }
@@ -246,79 +248,93 @@ cl.grid = css`
 `;
 
 cl.tile = css`
-  position: relative;
+  position: relative; overflow: hidden;
   background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 8px;
-  display: flex; flex-direction: column; gap: 6px;
+  border-radius: 8px; cursor: pointer;
   &.primary { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-  & .model-badge {
-    display: none; position: absolute; top: 4px; left: 4px;
-    background: rgba(0,0,0,0.6); color: #fff; font-size: 10px;
-    padding: 2px 6px; border-radius: 4px; pointer-events: none;
+
+  & .image {
+    position: relative; width: 100%; aspect-ratio: 16 / 9;
+    background: var(--surface3);
+    display: flex; align-items: center; justify-content: center;
   }
-  &:hover .model-badge { display: block; }
-`;
+  & .image img, & .image video {
+    width: 100%; height: 100%; object-fit: cover; cursor: zoom-in;
+  }
 
-cl.image = css`
-  position: relative; width: 100%; aspect-ratio: 1;
-  background: var(--surface3); border-radius: 6px; overflow: hidden;
-  display: flex; align-items: center; justify-content: center;
-  & img, & video { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
-`;
+  & .info {
+    font-size: 10px; color: var(--text-dim);
+    padding: 4px 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 
-cl.videoBadge = css`
-  position: absolute; bottom: 4px; left: 4px;
-  background: rgba(0,0,0,.7); color: #fff; font-size: 14px;
-  width: 24px; height: 24px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  pointer-events: none;
-`;
+  & .primary-badge {
+    position: absolute; top: 4px; right: 4px; z-index: 2;
+    background: var(--accent); color: #1e1e2e;
+    font-size: 10px; padding: 2px 6px; border-radius: 4px;
+    font-weight: 600; text-transform: uppercase;
+  }
+  & .video-badge {
+    position: absolute; bottom: 4px; left: 4px; z-index: 2;
+    background: rgba(0,0,0,.7); color: #fff; font-size: 14px;
+    width: 24px; height: 24px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
 
-cl.status = css`
-  font-size: 11px; color: var(--text-dim);
-  text-transform: uppercase; padding: 4px 8px;
-  &.queued { color: var(--text-dim); }
-  &.generating { color: var(--warn); animation: ${pulse} 1.5s infinite; }
-  &.failed {
+  & .prompt-hover {
+    display: none; position: absolute; inset: 0;
+    background: rgba(30,30,46,0.9); color: var(--text-dim);
+    font-size: 11px; padding: 8px; line-height: 1.4;
+    overflow: hidden; pointer-events: none;
+  }
+  & .prompt-hover .model {
+    color: var(--accent); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.5px; margin-bottom: 4px;
+  }
+  &:hover .prompt-hover { display: block; }
+
+  & .actions {
+    position: absolute; bottom: 4px; left: 4px;
+    display: none; z-index: 3; gap: 2px;
+  }
+  &:hover .actions { display: flex; }
+  & .actions .act {
+    width: 20px; height: 20px; border: none; border-radius: 3px;
+    background: var(--accent); color: #1e1e2e; font-size: 11px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    padding: 0; opacity: 0.85;
+  }
+  & .actions .act:hover { opacity: 1; }
+
+  & .delete {
+    position: absolute; bottom: 4px; right: 4px;
+    display: none; z-index: 3;
+    width: 20px; height: 20px; border: none; border-radius: 3px;
+    background: var(--red); color: #1e1e2e; font-size: 11px;
+    cursor: pointer; align-items: center; justify-content: center;
+    padding: 0; opacity: 0.85;
+  }
+  & .delete:hover { opacity: 1; }
+  &:hover .delete { display: flex; }
+
+  & .status {
+    font-size: 11px; color: var(--text-dim);
+    text-transform: uppercase; padding: 4px 8px;
+  }
+  & .status.generating { color: var(--warn); animation: ${pulse} 1.5s infinite; }
+  & .status.failed {
     color: var(--red);
     display: flex; flex-direction: column; width: 100%; height: 100%;
   }
-  &.failed .fail-label {
+  & .status.failed .fail-label {
     flex: 1; display: flex; align-items: center; justify-content: center;
     font-size: 11px; text-transform: uppercase;
   }
-`;
-
-cl.error = css`
-  flex: 1; font-size: 9px; color: var(--text-dim); line-height: 1.3;
-  padding: 0 0 8px; word-break: break-word; overflow: hidden; text-transform: none;
-`;
-
-cl.primaryBadge = css`
-  position: absolute; top: 4px; right: 4px;
-  background: var(--accent); color: #1e1e2e;
-  font-size: 10px; padding: 2px 6px; border-radius: 4px;
-  font-weight: 600; text-transform: uppercase;
-`;
-
-cl.prompt = css`
-  font-size: 11px; color: var(--text-dim); line-height: 1.4;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  overflow: hidden;
-`;
-
-cl.actions = css`
-  display: flex; gap: 4px; align-items: center; margin-top: auto;
-  & .spacer { flex: 1; }
-`;
-
-cl.act = css`
-  width: 20px; height: 20px; border: none; border-radius: 3px;
-  background: var(--accent); color: #1e1e2e; font-size: 11px;
-  cursor: pointer; display: flex; align-items: center; justify-content: center;
-  padding: 0; opacity: 0.75;
-  &:hover { opacity: 1; }
-  &.danger { background: var(--red); }
+  & .error {
+    flex: 1; font-size: 9px; color: var(--text-dim); line-height: 1.3;
+    padding: 0 0 8px; word-break: break-word; overflow: hidden; text-transform: none;
+  }
 `;
 
 cl.typeTabs = css`display: flex; gap: 4px; margin-bottom: 4px;`;
