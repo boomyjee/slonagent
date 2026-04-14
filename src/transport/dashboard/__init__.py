@@ -7,6 +7,7 @@ from fastapi.responses import Response
 
 from agent import Skill, bypass
 from src.transport.web import WebTransport
+from src.transport.dashboard.sandbox_proxy import SandboxProxy
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +59,11 @@ class DashboardSkill(Skill):
         return (
             f"У тебя есть веб-хостинг: файлы в /workspace/web/ доступны по URL {url}/web/. "
             f"Там же есть вебхук {url}/web-hook — POST-запрос на него придёт тебе как сообщение. "
-            "Используй это для создания интерактивных веб-приложений."
+            "Используй это для создания интерактивных веб-приложений. "
+            f"Если запустишь внутри сандбокса свой сервер на 127.0.0.1:PORT "
+            f"(http/https или ws/wss), он доступен снаружи по {url}/sandbox/PORT/ — "
+            "порты контейнера наружу не проброшены, но dashboard проксирует HTTP и WebSocket "
+            "через обратный туннель автоматически."
         )
 
 
@@ -70,6 +75,7 @@ class DashboardTransport(WebTransport):
     def __init__(self):
         super().__init__(prefix="/dashboard")
         self._skill = DashboardSkill(self)
+        self._proxy = SandboxProxy(self)
 
     @property
     def _sandbox(self):
@@ -82,6 +88,13 @@ class DashboardTransport(WebTransport):
     def register_routes(self):
         self.register_route("get", "/web/{filepath:path}", self._serve_web)
         self.register_route("post", "/web-hook", self._web_hook)
+        # Reverse-tunnel proxy for ports bound inside the sandbox container.
+        # Tunnel endpoint must be registered before the generic /sandbox/{port}
+        # proxy so its static path wins over path-capture routing.
+        self.register_route("websocket", "/sandbox-tunnel", self._proxy.handle_tunnel)
+        self.register_route("websocket", "/sandbox/{port:int}/{filepath:path}", self._proxy.handle_ws)
+        for m in ("get", "post", "put", "patch", "delete", "options", "head"):
+            self.register_route(m, "/sandbox/{port:int}/{filepath:path}", self._proxy.handle_http)
         super().register_routes()
 
     async def _serve_web(self, filepath: str):
@@ -99,7 +112,7 @@ class DashboardTransport(WebTransport):
     async def _web_hook(self, request: Request):
         body = (await request.body()).decode()
         text = f"[web-hook] {body}"
-        await self.agent.transport.inject_message(text)
+        await self.inject_message(text)
         await self.process_message(
             content_parts=[{"type": "text", "text": text}],
             trigger_answer=True,
