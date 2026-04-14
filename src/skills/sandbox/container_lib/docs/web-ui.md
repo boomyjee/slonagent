@@ -153,15 +153,15 @@ class EditorTransport(WebTransport):
 
     def register_routes(self):
         # Свои REST-ручки — до super().
-        self.register_route("get",  "/api/files", self._list_files)
-        self.register_route("post", "/api/save",  self._save_file)
+        self.register_json_route("get",  "/api/files", self._list_files)
+        self.register_json_route("post", "/api/save",  self._save_file)
         super().register_routes()   # /ws и статика
 
-    async def _list_files(self, query, body):
+    async def _list_files(self, query, body, path_params):
         import os
         return {"files": os.listdir(self.root)}
 
-    async def _save_file(self, query, body):
+    async def _save_file(self, query, body, path_params):
         # body — уже распарсенный JSON от клиента (для GET будет None).
         path = body["path"]
         with open(path, "w", encoding="utf-8") as f:
@@ -191,14 +191,24 @@ class MyEditorSkill(Skill):
         return {"url": url}
 ```
 
-### `register_route(method, path, handler)`
+### `register_json_route(method, path, handler)`
 
 - `method`: `"get"`, `"post"`, `"put"`, `"patch"`, `"delete"` (lower-case).
 - `path`: внутри твоего namespace'а. Полный URL будет
-  `/{agent_id}{prefix}{path}`.
-- `handler(query, body)` — sync или async. `query` — dict query-string,
-  `body` — распарсенный JSON (None для GET). Возврат — любой
-  JSON-сериализуемый объект, клиент получит как `application/json`.
+  `/{agent_id}{prefix}{path}`. Для path-параметров используй синтаксис
+  Starlette: `"/api/file/{name:path}"`, `"/items/{id}"`.
+- `handler(query, body, path_params)` — sync или async.
+  - `query: dict[str, str]` — query-string (все значения строки).
+  - `body` — распарсенный JSON из тела запроса (POST/PUT/PATCH), либо
+    `None` для GET/DELETE или если парсинг упал.
+  - `path_params: dict[str, str]` — path-переменные из шаблона пути.
+  - Возврат: `dict`/`list` → JSON-ответ, `str` → text/plain. HTTP-статус
+    всегда 200 — если нужен другой, клади маркер в body (`{"error": ...}`)
+    и обрабатывай на клиенте.
+
+`register_route` (полный FastAPI-контракт с Pydantic/Query/Request) из
+sandbox **не работает** — FastAPI не может интроспектировать Proxy-handler
+через RPC-границу. Используй `register_json_route`.
 
 Зови `super().register_routes()` **в конце** своего `register_routes`,
 чтобы WebSocket-эндпоинт и раздача статики легли поверх.

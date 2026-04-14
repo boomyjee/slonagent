@@ -150,7 +150,7 @@ class SandboxSkill(Skill):
 
     async def _dispatch_skill_script(self, script_path, tool_name, args):
         from src.skills.sandbox.container_lib.rpc import Channel, Proxy
-        from src.skills.sandbox.web_transport_bridge import WebTransportFactory
+        from src.skills.sandbox.web_transport_bridge import WebTransportBridge
         from src.transport.base import BaseTransport
         from src.transport.multi import MultiTransport
         from src.transport.web import WebTransport as HostWebTransport
@@ -194,8 +194,7 @@ class SandboxSkill(Skill):
                 "send_system_prompt", "on_tool_call", "on_tool_result",
                 "inject_message", "send_app_url",
             },
-            HostWebTransport: {"send", "get_url", "get_auth_url", "cleanup"},
-            WebTransportFactory: {"create"},
+            HostWebTransport: None,
             Memory: {"clear", "add_turn"},
         }
 
@@ -204,8 +203,7 @@ class SandboxSkill(Skill):
         # callbacks like transport.send_message MUST run on that loop.
         ch = Channel(readline, writeline, ref_prefix="h", allowed=allowed,
                      async_loop=asyncio.get_running_loop())
-        ch.register("agent", self.agent)
-        ch.register("web_transport_factory", WebTransportFactory(self))
+        ch.register("WebTransportBridge", WebTransportBridge(self))
         ch.register("MultiTransport", MultiTransport)
         ch.start()
 

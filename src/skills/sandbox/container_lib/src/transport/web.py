@@ -1,17 +1,16 @@
-"""WebTransport stub for sandbox scripts.
+"""WebTransport stub for sandbox scripts — thin facade over host bridge.
 
-Mirrors the host import path: from src.transport.web import WebTransport
-
-Subclass this, override register_routes() / ws_handle_message().
-Transport is activated via set_agent() (called by spawn_subagent internally).
-After that, send_message/send/get_url delegate to the host proxy.
-Route handlers and ws_handle_message are called back from host via RPC.
+Construction eagerly creates a `WebTransportBridge` on the host via RPC
+and stores a Proxy; all transport methods forward to it. Locally kept:
+`on_message` + `process_message` (so outgoing messages flow through the
+sub-agent's MultiTransport lambda chain) and the user-overridable hooks
+`register_routes` / `ws_handle_message`.
 """
 
-import asyncio, inspect, logging
+import inspect, logging
 from pathlib import PurePosixPath
 
-from rpc import Proxy
+from rpc import Proxy, active_channel
 
 log = logging.getLogger(__name__)
 
@@ -20,29 +19,18 @@ class WebTransport:
     def __init__(self, prefix="", verbose=True):
         self.agent = None
         self.on_message = None
-        self._prefix = prefix
-        self._verbose = verbose
-        self._proxy = None
-        self._route_defs = []
-        self._handlers = {}
+        ui_dir = str(PurePosixPath(inspect.getfile(type(self))).parent / "ui")
+        self._proxy = Proxy(active_channel(), "WebTransportBridge")(
+            prefix=prefix, verbose=verbose, ui_dir=ui_dir, proxy=self,
+        )
 
     def set_agent(self, agent):
         self.agent = agent
-        self.register_routes()
-        ui_dir = str(PurePosixPath(inspect.getfile(type(self))).parent / "ui")
-        factory = Proxy(agent._ch, "web_transport_factory")
-        self._proxy = factory.create(
-            agent=agent,
-            prefix=self._prefix,
-            verbose=self._verbose,
-            routes=self._route_defs,
-            has_ws_handler=type(self).ws_handle_message is not WebTransport.ws_handle_message,
-            callback=self,
-            ui_dir=ui_dir,
-        )
+        self._proxy.set_agent(agent)
 
     def set_on_message(self, callback):
         self.on_message = callback
+        self._proxy.set_on_message(callback)
 
     async def process_message(self, content_parts, user_message_id=None, trigger_answer=True):
         if self.on_message:
@@ -54,21 +42,20 @@ class WebTransport:
         return []
 
     def register_route(self, method, path, handler):
-        self._route_defs.append((method, path, handler.__name__))
-        self._handlers[handler.__name__] = handler
+        raise NotImplementedError(
+            "register_route isn't callable from sandbox — sandbox handlers "
+            "can't satisfy FastAPI signature introspection. "
+            "Use register_json_route instead."
+        )
+
+    def register_json_route(self, method, path, handler):
+        self._proxy.register_json_route(method, path, handler)
 
     def register_routes(self):
-        pass
+        self._proxy.super_register_routes()
 
     async def ws_handle_message(self, msg):
         pass
-
-    async def handle_route(self, name, query=None, body=None):
-        handler = self._handlers[name]
-        result = handler(query or {}, body)
-        if asyncio.iscoroutine(result):
-            result = await result
-        return result
 
     def cleanup(self):
         if self._proxy:

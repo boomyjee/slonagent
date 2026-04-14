@@ -110,6 +110,29 @@ async def direction1_driver(transport):
         print("[dir1] ❌ no inject_message seen within 5s", flush=True)
 
 
+async def http_api_driver():
+    """Hit /api/config via HTTP to exercise register_json_route end-to-end."""
+    import aiohttp
+    await url_event.wait()
+    await asyncio.sleep(1)
+    port = config["web"].get("port", 8765)
+    from urllib.parse import urlsplit
+    parts = urlsplit(coding_url)
+    api_url = f"http://localhost:{port}{parts.path}api/config"
+    print(f"[http] GET {api_url}", flush=True)
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                body = await r.text()
+                print(f"[http] status={r.status} body={body[:200]}", flush=True)
+                if r.status == 200 and "root_path" in body:
+                    print("[http] ✅ /api/config reached sandbox handler", flush=True)
+                else:
+                    print("[http] ❌ unexpected response", flush=True)
+    except Exception as e:
+        print(f"[http] ❌ error: {e}", flush=True)
+
+
 async def main():
     tool_name = sys.argv[1] if len(sys.argv) > 1 else "sandbox_codingmode_launch"
     args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
@@ -127,12 +150,13 @@ async def main():
     }]}))
     ws_task = asyncio.create_task(ws_driver(user_text))
     dir1_task = asyncio.create_task(direction1_driver(transport))
+    http_task = asyncio.create_task(http_api_driver())
     try:
-        await asyncio.wait_for(asyncio.gather(tool_task, ws_task, dir1_task), timeout=120)
+        await asyncio.wait_for(asyncio.gather(tool_task, ws_task, dir1_task, http_task), timeout=120)
     except asyncio.TimeoutError:
         print("[test] total timeout 120s", flush=True)
     finally:
-        for t in (tool_task, ws_task, dir1_task):
+        for t in (tool_task, ws_task, dir1_task, http_task):
             if not t.done():
                 t.cancel()
 

@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from src.transport.base import BaseTransport
 
@@ -242,6 +242,20 @@ class WebTransport(BaseTransport):
         url = f"/{self.agent.id}{self._prefix}{path}"
         getattr(self._app, method)(url)(handler)
         self._routes.append(self._app.router.routes[-1])
+
+    def register_json_route(self, method, path, handler):
+        """Register a handler with contract (query, body, path_params) -> dict|list."""
+        async def wrapped(request: Request):
+            body = None
+            if request.method in ("POST", "PUT", "PATCH"):
+                try: body = await request.json()
+                except Exception: pass
+            result = await handler(dict(request.query_params),body,dict(request.path_params))
+            if isinstance(result, str):
+                return PlainTextResponse(result)
+            return JSONResponse(result)
+        wrapped.__name__ = f"json_{handler.__name__ if hasattr(handler, '__name__') else id(handler)}"
+        self.register_route(method, path, wrapped)
 
     def set_agent(self, agent):
         super().set_agent(agent)
