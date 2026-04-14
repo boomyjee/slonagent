@@ -1,6 +1,7 @@
-import { html, render, Component, useState, useRef, useEffect } from '../lib.js';
+import { html, render, Component, useState, useRef, useEffect, css } from '../lib.js';
 
 let _instance = null;
+const cl = {};
 
 function CropImage({ src }) {
     const imgRef = useRef(null);
@@ -69,9 +70,9 @@ function CropImage({ src }) {
     }, [sel]);
 
     return html`
-        <div class="lb-img-wrap" onClick=${e => e.stopPropagation()}>
+        <div class=${cl.imgWrap} onClick=${e => e.stopPropagation()}>
             <img ref=${imgRef} src=${src} onMouseDown=${onMouseDown} draggable=${false} />
-            ${sel && sel.w > 0 && html`<div class="lb-selection" style=${{
+            ${sel && sel.w > 0 && html`<div class=${cl.selection} style=${{
                 left: sel.x + 'px', top: sel.y + 'px',
                 width: sel.w + 'px', height: sel.h + 'px',
             }} />`}
@@ -127,17 +128,17 @@ class LightboxView extends Component {
         const hasNext = index < items.length - 1;
 
         return html`
-            <div class="lightbox"
+            <div class=${cl.lightbox}
                 onMouseDown=${e => { this._downTarget = e.target; }}
                 onMouseUp=${e => { if (e.target === this._downTarget) this.close(); }}>
-                ${hasPrev && html`<div class="lb-arrow lb-prev" onMouseDown=${e => e.stopPropagation()}
+                ${hasPrev && html`<div class=${cl.arrow + ' prev'} onMouseDown=${e => e.stopPropagation()}
                     onClick=${() => this.setState({ index: index - 1 })}>\u2039</div>`}
                 ${item.isVideo
                     ? html`<video src=${item.src} controls autoplay onMouseDown=${e => e.stopPropagation()} />`
                     : html`<${CropImage} src=${item.src} />`}
-                ${hasNext && html`<div class="lb-arrow lb-next" onMouseDown=${e => e.stopPropagation()}
+                ${hasNext && html`<div class=${cl.arrow + ' next'} onMouseDown=${e => e.stopPropagation()}
                     onClick=${() => this.setState({ index: index + 1 })}>\u203A</div>`}
-                <div class="lb-counter">${index + 1} / ${items.length}</div>
+                <div class=${cl.counter}>${index + 1} / ${items.length}</div>
             </div>
         `;
     }
@@ -152,3 +153,41 @@ export const Lightbox = {
     open(el) { _instance?.open(el); },
     close() { _instance?.close(); },
 };
+
+// --- styles ---
+
+cl.lightbox = css`
+  position: fixed; inset: 0; background: rgba(0,0,0,0.88);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200; cursor: zoom-out; padding: 40px;
+  & img, & video {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+    border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+    cursor: default;
+  }
+`;
+
+cl.imgWrap = css`
+  position: relative; max-width: 100%; max-height: 100%;
+  display: flex; cursor: crosshair; user-select: none;
+  & img { cursor: crosshair; }
+`;
+
+cl.selection = css`
+  position: absolute; border: 2px solid var(--accent);
+  background: rgba(137,180,250,0.15); pointer-events: none;
+`;
+
+cl.arrow = css`
+  position: absolute; top: 50%; transform: translateY(-50%);
+  font-size: 48px; color: rgba(255,255,255,0.6);
+  cursor: pointer; padding: 20px; user-select: none;
+  &:hover { color: #fff; }
+  &.prev { left: 8px; }
+  &.next { right: 8px; }
+`;
+
+cl.counter = css`
+  position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,0.5); font-size: 13px;
+`;

@@ -7,15 +7,17 @@
 // Knows its own WS path and issues generate/set_primary/delete messages
 // directly. No "million callbacks" from the parent.
 
-import { html, useState } from '../lib.js';
+import { html, useState, css, keyframes } from '../lib.js';
 import { app, base } from '../app.js';
 import { Lightbox } from '../common/Lightbox.js';
 import { useEntity } from '../common/EntityView.js';
-import { Form, Select, Text, Textarea, Toggle } from '../common/Form.js';
+import { Select, Text, Textarea, Toggle, useField } from '../common/Form.js';
 import { Dialog } from '../common/Dialog.js';
+import { FormView, Button } from '../common/FormView.js';
 import { ReferencePicker } from './ReferencePicker.js';
 
 let lastModel = 'gemini-image';
+const cl = {};
 
 async function uploadFile(file, path, kind) {
     const form = new FormData();
@@ -76,25 +78,25 @@ export function Gallery({ kind, defaultPrompt }) {
     }
 
     return html`
-        <div class=${'gen-gallery' + (dragover ? ' dragover' : '')}
+        <div class=${cl.gallery + (dragover ? ' dragover' : '')}
             tabindex="0"
             onDragOver=${e => { e.preventDefault(); setDragover(true); }}
             onDragLeave=${() => setDragover(false)}
             onDrop=${onDrop}
             onPaste=${onPaste}
         >
-            <div class="gen-gallery-header">
-                <div class="gen-filter">
-                    <button class=${'btn btn-sm' + (filter === 'all' ? ' btn-primary' : '')} onClick=${() => setFilter('all')}>All (${allGens.length})</button>
-                    <button class=${'btn btn-sm' + (filter === 'image' ? ' btn-primary' : '')} onClick=${() => setFilter('image')}>Images (${imageCount})</button>
-                    <button class=${'btn btn-sm' + (filter === 'video' ? ' btn-primary' : '')} onClick=${() => setFilter('video')}>Videos (${videoCount})</button>
+            <div class=${cl.header}>
+                <div class=${cl.filter}>
+                    <${Button} sm variant=${filter === 'all'   ? 'primary' : ''} onClick=${() => setFilter('all')}>All (${allGens.length})<//>
+                    <${Button} sm variant=${filter === 'image' ? 'primary' : ''} onClick=${() => setFilter('image')}>Images (${imageCount})<//>
+                    <${Button} sm variant=${filter === 'video' ? 'primary' : ''} onClick=${() => setFilter('video')}>Videos (${videoCount})<//>
                 </div>
-                <button class="btn btn-sm btn-primary" onClick=${newGen}>+ Generate</button>
+                <${Button} sm variant="primary" onClick=${newGen}>+ Generate<//>
             </div>
             ${gens.length === 0
-                ? html`<div class="gen-empty">No generations yet</div>`
+                ? html`<div class=${cl.empty}>No generations yet</div>`
                 : html`
-                    <div class="gen-grid">
+                    <div class=${cl.grid}>
                         ${gens.map(g => html`
                             <${Tile}
                                 key=${g.id}
@@ -120,27 +122,27 @@ function Tile({ gen, isPrimary, canSetPrimary, onSetPrimary, onRemix, onUseAsRef
     const thumb = done ? `${base}/api/asset/800x800/${gen.poster || gen.file}` : null;
     const full = done ? `${base}/api/asset/${gen.file}` : null;
     return html`
-        <div class=${'gen-tile' + (isPrimary ? ' primary' : '')}>
-            <div class="gen-image">
+        <div class=${cl.tile + (isPrimary ? ' primary' : '')}>
+            <div class=${cl.image}>
                 ${done
                     ? html`<img src=${thumb} data-full=${full} data-video=${isVideo ? '1' : undefined}
                         data-lightbox="gallery" onClick=${e => Lightbox.open(e.target)} />`
                     : failed
-                        ? html`<div class="gen-status failed"><div class="gen-fail-label">failed</div><div class="gen-error">${gen.error || ''}</div></div>`
-                        : html`<div class=${'gen-status ' + gen.status}>${gen.status}</div>`}
-                ${isPrimary ? html`<div class="gen-primary-badge">primary</div>` : null}
-                ${gen.model ? html`<div class="gen-model">${gen.model}</div>` : null}
-                ${isVideo && done ? html`<div class="gen-video-badge">\u25B6</div>` : null}
+                        ? html`<div class=${cl.status + ' failed'}><div class="fail-label">failed</div><div class=${cl.error}>${gen.error || ''}</div></div>`
+                        : html`<div class=${cl.status + ' ' + gen.status}>${gen.status}</div>`}
+                ${isPrimary ? html`<div class=${cl.primaryBadge}>primary</div>` : null}
+                ${gen.model ? html`<div class="model-badge">${gen.model}</div>` : null}
+                ${isVideo && done ? html`<div class=${cl.videoBadge}>\u25B6</div>` : null}
             </div>
-            <div class="gen-prompt" title=${gen.prompt}>${gen.prompt}</div>
-            <div class="gen-actions">
+            <div class=${cl.prompt} title=${gen.prompt}>${gen.prompt}</div>
+            <div class=${cl.actions}>
                 ${canSetPrimary && done && !isPrimary
-                    ? html`<button class="gen-act" title="Set primary" onClick=${onSetPrimary}>\u2713</button>`
+                    ? html`<button class=${cl.act} title="Set primary" onClick=${onSetPrimary}>\u2713</button>`
                     : null}
-                ${done && html`<button class="gen-act" title="Use as reference" onClick=${onUseAsRef}>\u29C9</button>`}
-                <button class="gen-act" title="Remix" onClick=${onRemix}>\u21BB</button>
+                ${done && html`<button class=${cl.act} title="Use as reference" onClick=${onUseAsRef}>\u29C9</button>`}
+                <button class=${cl.act} title="Remix" onClick=${onRemix}>\u21BB</button>
                 <div class="spacer"></div>
-                <button class="gen-act gen-act-danger" title="Delete" onClick=${onDelete}>\u2715</button>
+                <button class=${cl.act + ' danger'} title="Delete" onClick=${onDelete}>\u2715</button>
             </div>
         </div>
     `;
@@ -172,43 +174,156 @@ const VIDEO_MODELS = [
     { id: 'evolink-seedance2.0-first-last', label: 'Seedance First-Last', form: SeedanceForm },
 ];
 
-function GenerateDialog({ title, initial, path, kind }) {
-    const [draft, setDraft] = useState(initial);
-    const isVideo = VIDEO_MODELS.some(m => m.id === draft.model);
+// GenerateBody reads model via useField so it re-renders when the user flips
+// the image/video toggle. FormView owns the draft state.
+function GenerateBody() {
+    const model = useField('model');
+    const isVideo = VIDEO_MODELS.some(m => m.id === model.value);
     const models = isVideo ? VIDEO_MODELS : IMAGE_MODELS;
-    const currentModel = models.find(m => m.id === draft.model);
+    const currentModel = models.find(m => m.id === model.value);
+    return html`
+        <div class=${cl.typeTabs}>
+            <${Button} sm variant=${!isVideo ? 'primary' : ''}
+                onClick=${() => isVideo && model.set(IMAGE_MODELS[0].id)}>Image<//>
+            <${Button} sm variant=${isVideo ? 'primary' : ''}
+                onClick=${() => !isVideo && model.set(VIDEO_MODELS[0].id)}>Video<//>
+        </div>
+        <${Select} name="model" label="Model" options=${models} />
+        <${Textarea} name="prompt" label="Prompt" placeholder="Describe the image or video..." grow />
+        ${currentModel?.form && html`
+            <div class=${cl.extraParams}><${currentModel.form} /></div>
+        `}
+        <${ReferencePicker} name="references" />
+    `;
+}
 
-    function generate() {
+function GenerateDialog({ title, initial, path, kind }) {
+    function generate(draft) {
         lastModel = draft.model;
         const msg = { type: 'generate', path, kind, ...draft, references: draft.references || [] };
         app.send(msg);
         Dialog.close();
     }
-
-    return html`
-        <div class="editor generate-dialog">
-            <div class="editor-header"><h2>${title}</h2></div>
-            <div class="editor-body">
-                <${Form} draft=${draft} onChange=${setDraft}>
-                    <div class="gen-type-tabs">
-                        <button class=${'btn btn-sm' + (!isVideo ? ' btn-primary' : '')}
-                            onClick=${() => isVideo && setDraft({ ...draft, model: IMAGE_MODELS[0].id })}>Image</button>
-                        <button class=${'btn btn-sm' + (isVideo ? ' btn-primary' : '')}
-                            onClick=${() => !isVideo && setDraft({ ...draft, model: VIDEO_MODELS[0].id })}>Video</button>
-                    </div>
-                    <${Select} name="model" label="Model" options=${models} />
-                    <${Textarea} name="prompt" label="Prompt" placeholder="Describe the image or video..." grow />
-                    ${currentModel?.form && html`
-                        <div class="gen-extra-params"><${currentModel.form} /></div>
-                    `}
-                    <${ReferencePicker} name="references" />
-                <//>
-            </div>
-            <div class="editor-footer">
-                <button class="btn" onClick=${() => Dialog.close()}>Cancel</button>
-                <div class="spacer"></div>
-                <button class="btn btn-primary" onClick=${generate}>Generate</button>
-            </div>
-        </div>
-    `;
+    return html`<${FormView}
+        heading=${title}
+        entity=${initial}
+        variant="generate"
+        left=${() => [{ label: 'Cancel', onClick: () => Dialog.close() }]}
+        right=${draft => [{ label: 'Generate', cls: 'primary', onClick: () => generate(draft) }]}
+    >
+        <${GenerateBody} />
+    <//>`;
 }
+
+// --- styles ---
+
+const pulse = keyframes`0%,100% { opacity: 0.4; } 50% { opacity: 1; }`;
+
+cl.gallery = css`
+  display: flex; flex-direction: column; gap: 10px;
+  outline: none; border-radius: 8px; padding: 8px;
+  transition: outline-color 0.15s;
+  &:focus { outline: 1px solid var(--border); }
+  &.dragover { outline: 2px dashed var(--accent); background: rgba(137, 180, 250, 0.05); }
+`;
+
+cl.header = css`
+  display: flex; align-items: center; gap: 8px;
+  & > span { flex: 1; font-size: 11px; color: var(--text-dim);
+             text-transform: uppercase; letter-spacing: 0.5px; }
+`;
+
+cl.filter = css`display: flex; gap: 4px; flex: 1;`;
+
+cl.empty = css`
+  padding: 16px; background: var(--surface2); border-radius: 6px;
+  color: var(--text-dim); font-size: 12px; text-align: center;
+`;
+
+cl.grid = css`
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+`;
+
+cl.tile = css`
+  position: relative;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px;
+  display: flex; flex-direction: column; gap: 6px;
+  &.primary { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  & .model-badge {
+    display: none; position: absolute; top: 4px; left: 4px;
+    background: rgba(0,0,0,0.6); color: #fff; font-size: 10px;
+    padding: 2px 6px; border-radius: 4px; pointer-events: none;
+  }
+  &:hover .model-badge { display: block; }
+`;
+
+cl.image = css`
+  position: relative; width: 100%; aspect-ratio: 1;
+  background: var(--surface3); border-radius: 6px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  & img, & video { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
+`;
+
+cl.videoBadge = css`
+  position: absolute; bottom: 4px; left: 4px;
+  background: rgba(0,0,0,.7); color: #fff; font-size: 14px;
+  width: 24px; height: 24px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+`;
+
+cl.status = css`
+  font-size: 11px; color: var(--text-dim);
+  text-transform: uppercase; padding: 4px 8px;
+  &.queued { color: var(--text-dim); }
+  &.generating { color: var(--warn); animation: ${pulse} 1.5s infinite; }
+  &.failed {
+    color: var(--red);
+    display: flex; flex-direction: column; width: 100%; height: 100%;
+  }
+  &.failed .fail-label {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    font-size: 11px; text-transform: uppercase;
+  }
+`;
+
+cl.error = css`
+  flex: 1; font-size: 9px; color: var(--text-dim); line-height: 1.3;
+  padding: 0 0 8px; word-break: break-word; overflow: hidden; text-transform: none;
+`;
+
+cl.primaryBadge = css`
+  position: absolute; top: 4px; right: 4px;
+  background: var(--accent); color: #1e1e2e;
+  font-size: 10px; padding: 2px 6px; border-radius: 4px;
+  font-weight: 600; text-transform: uppercase;
+`;
+
+cl.prompt = css`
+  font-size: 11px; color: var(--text-dim); line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+`;
+
+cl.actions = css`
+  display: flex; gap: 4px; align-items: center; margin-top: auto;
+  & .spacer { flex: 1; }
+`;
+
+cl.act = css`
+  width: 20px; height: 20px; border: none; border-radius: 3px;
+  background: var(--accent); color: #1e1e2e; font-size: 11px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  padding: 0; opacity: 0.75;
+  &:hover { opacity: 1; }
+  &.danger { background: var(--red); }
+`;
+
+cl.typeTabs = css`display: flex; gap: 4px; margin-bottom: 4px;`;
+
+cl.extraParams = css`
+  display: flex; gap: 12px;
+  & > div { flex: 1; }
+`;

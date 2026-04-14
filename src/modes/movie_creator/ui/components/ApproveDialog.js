@@ -3,6 +3,7 @@ import { html } from '../lib.js';
 import { Dialog } from '../common/Dialog.js';
 import { ApproveView } from '../common/ApproveView.js';
 import { Textarea } from '../common/Form.js';
+import { editorCls } from '../common/FormView.js';
 import { SceneForm } from './SceneForm.js';
 import { CharacterForm } from './CharacterForm.js';
 import { ShotForm } from './ShotForm.js';
@@ -27,6 +28,6 @@ export const ApproveDialog = {
                 <${Textarea} name="prompt" label="Prompt" placeholder="Describe the image..." grow />
             <//>`;
 
-        Dialog.open(view || html`<div class="center-empty">Unknown approval kind: ${kind}</div>`);
+        Dialog.open(view || html`<div class=${editorCls.centerEmpty}>Unknown approval kind: ${kind}</div>`);
     },
 };

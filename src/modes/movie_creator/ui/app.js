@@ -4,7 +4,7 @@
 // read state (app.state.project, app.state.tab, ...) and call methods.
 // `base` is the URL prefix the movie transport is mounted at
 // (e.g. "/agent_42/movie") — exported so asset URLs can be prefixed.
-import { render, html, Component } from './lib.js';
+import { render, html, Component, css } from './lib.js';
 import { Resizer } from './components/common/Resizer.js';
 import { Chat } from './components/common/Chat.js';
 import { SceneList } from './components/SceneList.js';
@@ -17,12 +17,15 @@ import { ShotForm } from './components/ShotForm.js';
 import { FolderList } from './components/FolderList.js';
 import { FolderForm } from './components/FolderForm.js';
 import { ApproveDialog } from './components/ApproveDialog.js';
+import { editorCls } from './common/FormView.js';
 import './common/Dialog.js';
 import './common/Lightbox.js';
 import { GenerationIndicator } from './components/GenerationIndicator.js';
 
 export const base = location.pathname.replace(/\/+$/, '');
 export let app = null;
+
+const cl = {};
 
 class App extends Component {
     constructor(props) {
@@ -98,29 +101,71 @@ class App extends Component {
         } else if (collection === 'library') {
             centerView = html`<${EntityView} path=${selectedPath} label="Folder" key=${'folder-' + selKey}><${FolderForm} /><//>`;
         } else {
-            centerView = html`<div class="center-empty">Select an entity</div>`;
+            centerView = html`<div class=${editorCls.centerEmpty}>Select an entity</div>`;
         }
 
-        if (!connected) return html`<div class="disconnected">App disconnected</div>`;
+        if (!connected) return html`<div class=${cl.disconnected}>App disconnected</div>`;
 
         return html`
-            <div class="tabs">
-                ${['screenplay', 'characters', 'storyboard', 'library'].map(t => html`
-                    <div class=${'tab' + (tab === t ? ' active' : '')} onClick=${() => this.setState({ tab: t })}>
-                        ${t.charAt(0).toUpperCase() + t.slice(1)}
-                    </div>
-                `)}
-                <${GenerationIndicator} />
-            </div>
-            <div class="main">
-                <div class="sidebar">${sidebarView}</div>
-                <${Resizer} side="left" persistKey="movie-left" />
-                <div class="center">${centerView}</div>
-                <${Resizer} side="right" persistKey="movie-right" />
-                <${Chat} app=${this} connected=${connected} ref=${c => this._chat = c} />
+            <div class=${cl.root}>
+                <div class=${cl.tabs}>
+                    ${['screenplay', 'characters', 'storyboard', 'library'].map(t => html`
+                        <div class=${cl.tab + (tab === t ? ' active' : '')} onClick=${() => this.setState({ tab: t })}>
+                            ${t.charAt(0).toUpperCase() + t.slice(1)}
+                        </div>
+                    `)}
+                    <${GenerationIndicator} />
+                </div>
+                <div class=${cl.main}>
+                    <div class=${cl.sidebar}>${sidebarView}</div>
+                    <${Resizer} side="left" persistKey="movie-left" />
+                    <div class=${cl.center}>${centerView}</div>
+                    <${Resizer} side="right" persistKey="movie-right" />
+                    <${Chat} app=${this} connected=${connected} ref=${c => this._chat = c} />
+                </div>
             </div>
         `;
     }
 }
 
 render(html`<${App} />`, document.body);
+
+// --- styles ---
+
+cl.root = css`
+  display: flex; flex-direction: column; height: 100vh;
+`;
+
+cl.disconnected = css`
+  display: flex; align-items: center; justify-content: center;
+  height: 100vh; color: var(--text-dim); font-size: 16px;
+`;
+
+cl.tabs = css`
+  display: flex; align-items: center;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+`;
+
+cl.tab = css`
+  padding: 10px 24px; cursor: pointer;
+  font-size: 13px; color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  &:hover { color: var(--text); }
+  &.active { color: var(--accent); border-bottom-color: var(--accent); }
+`;
+
+cl.main = css`
+  display: flex; flex: 1; overflow: hidden;
+`;
+
+cl.sidebar = css`
+  width: 260px; background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; flex-shrink: 0;
+`;
+
+cl.center = css`
+  flex: 1 1 0; display: flex; flex-direction: column;
+  overflow: hidden; min-width: 200px; min-height: 0;
+`;

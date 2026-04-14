@@ -1,10 +1,13 @@
 // Pick reference images from across the project.
 // Shows all generations with "done" status, grouped by entity.
 // Selected images appear in a separate sortable strip above the grid.
-import { html, useState, useRef } from '../lib.js';
+import { html, useState, useRef, css } from '../lib.js';
 import { app, base } from '../app.js';
 import { useField } from '../common/Form.js';
 import { Lightbox } from '../common/Lightbox.js';
+import { Button } from '../common/FormView.js';
+
+const cl = {};
 
 function gather(images, collection, group, labelFn) {
     for (const [id, entity] of Object.entries(collection || {})) {
@@ -67,25 +70,24 @@ export function ReferencePicker({ name }) {
     for (const img of images) imageByFile[img.file] = img;
 
     return html`
-        <div class="ref-picker">
-            <div class="ref-picker-header">
+        <div class=${cl.picker}>
+            <div class=${cl.header}>
                 <label>References${selected.length ? ` (${selected.length})` : ''}</label>
-                <div class="ref-filter">
+                <div class=${cl.filter}>
                     ${GROUPS.map(g => html`
-                        <button
-                            class=${'btn btn-sm' + (filter === g.key ? ' btn-primary' : '')}
+                        <${Button} sm variant=${filter === g.key ? 'primary' : ''}
                             onClick=${() => setFilter(g.key)}
-                        >${g.label}</button>
+                        >${g.label}<//>
                     `)}
                 </div>
             </div>
             ${selected.length > 0 && html`
-                <div class="ref-selected">
+                <div class=${cl.selectedStrip}>
                     ${selected.map((file, i) => {
                         const img = imageByFile[file];
                         return html`
                             <div
-                                class="ref-selected-item"
+                                class=${cl.selectedItem}
                                 draggable="true"
                                 onDragStart=${() => onDragStart(i)}
                                 onDragOver=${e => onDragOver(e, i)}
@@ -93,29 +95,94 @@ export function ReferencePicker({ name }) {
                                 title=${img?.label || file}
                             >
                                 <img src=${`${base}/api/asset/200x200/` + (img?.thumb || file)} />
-                                ${img?.isVideo && html`<div class="ref-video-badge">\u25B6</div>`}
-                                <button class="ref-remove" onClick=${() => remove(file)}>\u2715</button>
-                                <div class="ref-order">${i + 1}</div>
+                                ${img?.isVideo && html`<div class="video-badge">\u25B6</div>`}
+                                <button class="remove" onClick=${() => remove(file)}>\u2715</button>
+                                <div class="order">${i + 1}</div>
                             </div>
                         `;
                     })}
                 </div>
             `}
-            <div class="ref-grid">
+            <div class=${cl.grid}>
                 ${filtered.length === 0
-                    ? html`<div class="ref-empty">No images</div>`
+                    ? html`<div class=${cl.empty}>No images</div>`
                     : filtered.map(img => html`
                         <div
-                            class=${'ref-thumb' + (selected.includes(img.file) ? ' selected' : '')}
+                            class=${cl.thumb + (selected.includes(img.file) ? ' selected' : '')}
                             onClick=${() => selected.includes(img.file) ? remove(img.file) : add(img.file)}
                             onContextMenu=${e => { e.preventDefault(); Lightbox.open(e.currentTarget); }}
                             title=${img.label}
                         >
                             <img src=${`${base}/api/asset/200x200/` + img.thumb} data-full=${`${base}/api/asset/` + (img.isVideo ? img.thumb : img.file)} data-lightbox="refs" />
-                            ${img.isVideo && html`<div class="ref-video-badge">\u25B6</div>`}
+                            ${img.isVideo && html`<div class="video-badge">\u25B6</div>`}
                         </div>
                     `)}
             </div>
         </div>
     `;
 }
+
+// --- styles ---
+
+cl.picker = css`display: flex; flex-direction: column; gap: 8px;`;
+
+cl.header = css`
+  display: flex; align-items: center; gap: 8px;
+  & label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
+`;
+
+cl.filter = css`display: flex; gap: 4px; margin-left: auto;`;
+
+cl.grid = css`
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  grid-auto-rows: 80px; gap: 6px;
+  height: 252px; overflow-y: auto;
+`;
+
+cl.empty = css`padding: 12px; color: var(--text-dim); font-size: 12px; text-align: center;`;
+
+cl.thumb = css`
+  position: relative;
+  border: 2px solid transparent; border-radius: 6px; overflow: hidden;
+  cursor: pointer; aspect-ratio: 1;
+  & img { width: 100%; height: 100%; object-fit: cover; }
+  &:hover { border-color: var(--border); }
+  &.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); opacity: .5; }
+  & .video-badge {
+    position: absolute; bottom: 2px; left: 2px;
+    background: rgba(0,0,0,.7); color: #fff; font-size: 9px;
+    padding: 1px 4px; border-radius: 3px; pointer-events: none;
+  }
+`;
+
+cl.selectedStrip = css`
+  display: flex; gap: 6px; padding: 8px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; overflow-x: auto;
+  min-height: 64px; align-items: center;
+`;
+
+cl.selectedItem = css`
+  position: relative; width: 56px; height: 56px; flex-shrink: 0;
+  border-radius: 4px; overflow: hidden; cursor: grab;
+  & img { width: 100%; height: 100%; object-fit: cover; }
+  &:active { cursor: grabbing; }
+  & .video-badge {
+    position: absolute; bottom: 2px; left: 2px;
+    background: rgba(0,0,0,.7); color: #fff; font-size: 9px;
+    padding: 1px 4px; border-radius: 3px; pointer-events: none;
+  }
+  & .remove {
+    position: absolute; top: 1px; right: 1px; width: 16px; height: 16px;
+    border: none; background: rgba(0,0,0,.7); color: var(--red);
+    font-size: 10px; cursor: pointer; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; transition: opacity .15s;
+  }
+  &:hover .remove { opacity: 1; }
+  & .order {
+    position: absolute; bottom: 1px; left: 1px;
+    font-size: 9px; background: rgba(0,0,0,.7); color: var(--text-dim);
+    padding: 0 4px; border-radius: 3px;
+  }
+`;

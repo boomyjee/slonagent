@@ -1,6 +1,6 @@
 import { html, createContext, useContext } from '../lib.js';
 import { app } from '../app.js';
-import { FormView } from './FormView.js';
+import { FormView, editorCls } from './FormView.js';
 
 const EntityCtx = createContext(null);
 export function useEntity() { return useContext(EntityCtx); }
@@ -17,7 +17,7 @@ export function EntityView({ path, label, back, children }) {
     const isNew = path[path.length - 1] === '__new__';
     const entity = isNew ? {} : resolve(app.state.project, path);
     if (!entity) {
-        return html`<div class="center-empty">Select or create a ${label.toLowerCase()}</div>`;
+        return html`<div class=${editorCls.centerEmpty}>Select or create a ${label.toLowerCase()}</div>`;
     }
     const close = () => app.select(back || null);
 
