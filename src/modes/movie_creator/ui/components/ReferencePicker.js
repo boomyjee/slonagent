@@ -144,7 +144,7 @@ cl.empty = css`padding: 12px; color: var(--text-dim); font-size: 12px; text-alig
 cl.thumb = css`
   position: relative;
   border: 2px solid transparent; border-radius: 6px; overflow: hidden;
-  cursor: pointer; aspect-ratio: 1;
+  cursor: pointer; height: 100%; aspect-ratio: 1; justify-self: center;
   & img { width: 100%; height: 100%; object-fit: cover; }
   &:hover { border-color: var(--border); }
   &.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); opacity: .5; }

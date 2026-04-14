@@ -4,7 +4,7 @@
 // read state (app.state.project, app.state.tab, ...) and call methods.
 // `base` is the URL prefix the movie transport is mounted at
 // (e.g. "/agent_42/movie") — exported so asset URLs can be prefixed.
-import { render, html, Component, css } from './lib.js';
+import { render, html, Component, css, persist } from './lib.js';
 import { Resizer } from './components/common/Resizer.js';
 import { Chat } from './components/common/Chat.js';
 import { SceneList } from './components/SceneList.js';
@@ -55,8 +55,8 @@ class App extends Component {
         this.state = {
             connected: false,
             project: { title: '', scenes: {}, characters: {}, library: {} },
-            tab: 'screenplay',
-            selectedPath: null,
+            tab: persist.get('tab', 'screenplay'),
+            selectedPath: persist.get('selectedPath', null),
         };
         this._chat = null;
     }
@@ -86,6 +86,7 @@ class App extends Component {
     }
 
     select(path) {
+        persist.set('selectedPath', path);
         this.setState({ selectedPath: path });
     }
 
@@ -131,7 +132,7 @@ class App extends Component {
             <div class=${cl.root}>
                 <div class=${cl.tabs}>
                     ${['screenplay', 'characters', 'storyboard', 'library'].map(t => html`
-                        <div class=${cl.tab + (tab === t ? ' active' : '')} onClick=${() => this.setState({ tab: t })}>
+                        <div class=${cl.tab + (tab === t ? ' active' : '')} onClick=${() => { persist.set('tab', t); this.setState({ tab: t }); }}>
                             ${t.charAt(0).toUpperCase() + t.slice(1)}
                         </div>
                     `)}
@@ -149,7 +150,8 @@ class App extends Component {
     }
 }
 
-render(html`<${App} />`, document.body);
+const _appRoot = document.body.appendChild(document.createElement('div'));
+render(html`<${App} />`, _appRoot);
 
 // --- styles ---
 
