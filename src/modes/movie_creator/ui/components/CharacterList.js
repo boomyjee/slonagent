@@ -1,4 +1,5 @@
 import { html } from '../lib.js';
+import { base } from '../app.js';
 import { EntityList } from '../common/EntityList.js';
 
 export function CharacterList() {
@@ -8,7 +9,7 @@ export function CharacterList() {
         canCreate=${true}
         renderItem=${char => {
             const primary = char.generations?.[char.primary_generation_id];
-            const thumb = primary?.file ? `/api/asset/100x100/${primary.poster || primary.file}` : null;
+            const thumb = primary?.file ? `${base}/api/asset/100x100/${primary.poster || primary.file}` : null;
             return html`
                 ${thumb
                     ? html`<img class="thumb" src=${thumb} />`

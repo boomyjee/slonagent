@@ -3,7 +3,7 @@ from typing import Annotated
 
 from agent import Skill, tool
 from src.modes.movie_creator.project import dump
-from src.modes.movie_creator.server import MovieServer
+from src.modes.movie_creator.transport import MovieTransport
 
 SHOT_SEPARATOR = "\n\n---\n\n"
 
@@ -11,13 +11,13 @@ SHOT_SEPARATOR = "\n\n---\n\n"
 class StoryboardSkill(Skill):
     """AI tools available in the Storyboard tab."""
 
-    def __init__(self, server: MovieServer):
+    def __init__(self, movie: MovieTransport):
         super().__init__()
-        self.server = server
+        self.movie = movie
 
     async def get_context_prompt(self, user_text: str = "") -> str:
-        project = self.server.project
-        sp = self.server.selected_path
+        project = self.movie.project
+        sp = self.movie.selected_path
         scene_id = sp[1] if sp and sp[0] == "scenes" else ""
         current_scene = project.scenes.get(scene_id) if scene_id else None
         current_block = ""
@@ -46,7 +46,7 @@ class StoryboardSkill(Skill):
         scene_id: Annotated[str, "ID сцены, к которой относится кадр"],
         description: Annotated[str, "Описание кадра — крупность, действие, камера, диалог в одном тексте"],
     ) -> dict:
-        return await self.server.edit(
+        return await self.movie.edit(
             ["scenes", scene_id, "shots"], locals(), approval_kind="create_shot",
         )
 
@@ -59,7 +59,7 @@ class StoryboardSkill(Skill):
         scene_id: Annotated[str, "ID сцены"],
         descriptions: Annotated[list[str], "Список описаний кадров по порядку"],
     ) -> dict:
-        result = await self.server.send_approval("create_shots_bulk", {
+        result = await self.movie.send_approval("create_shots_bulk", {
             "scene_id": scene_id,
             "text": SHOT_SEPARATOR.join(descriptions),
         })
@@ -67,16 +67,16 @@ class StoryboardSkill(Skill):
             return {"status": "rejected", "reason": result.get("reason", "")}
         text = result.get("data", {}).get("text", "")
         shots_path = ["scenes", scene_id, "shots"]
-        if not isinstance(self.server.project.resolve(shots_path), dict):
+        if not isinstance(self.movie.project.resolve(shots_path), dict):
             return {"status": "error", "error": f"scene {scene_id} not found"}
         ids = []
         for desc in text.split(SHOT_SEPARATOR):
             desc = desc.strip()
             if desc:
-                eid = self.server.project.create(shots_path, {"description": desc})
+                eid = self.movie.project.create(shots_path, {"description": desc})
                 if eid:
                     ids.append(eid)
-        await self.server.save()
+        await self.movie.save()
         return {"status": "created", "ids": ids, "count": len(ids)}
 
     @tool("Обновить описание существующего кадра. Пользователь сможет отредактировать и одобрить.")
@@ -86,6 +86,6 @@ class StoryboardSkill(Skill):
         id: Annotated[str, "ID кадра"],
         description: Annotated[str, "Новое описание кадра"],
     ) -> dict:
-        return await self.server.edit(
+        return await self.movie.edit(
             ["scenes", scene_id, "shots", id], locals(), approval_kind="update_shot",
         )

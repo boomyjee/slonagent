@@ -2,7 +2,7 @@
 // Shows all generations with "done" status, grouped by entity.
 // Selected images appear in a separate sortable strip above the grid.
 import { html, useState, useRef } from '../lib.js';
-import { app } from '../app.js';
+import { app, base } from '../app.js';
 import { useField } from '../common/Form.js';
 import { Lightbox } from '../common/Lightbox.js';
 
@@ -92,7 +92,7 @@ export function ReferencePicker({ name }) {
                                 onDragEnd=${onDragEnd}
                                 title=${img?.label || file}
                             >
-                                <img src=${'/api/asset/200x200/' + (img?.thumb || file)} />
+                                <img src=${`${base}/api/asset/200x200/` + (img?.thumb || file)} />
                                 ${img?.isVideo && html`<div class="ref-video-badge">\u25B6</div>`}
                                 <button class="ref-remove" onClick=${() => remove(file)}>\u2715</button>
                                 <div class="ref-order">${i + 1}</div>
@@ -111,7 +111,7 @@ export function ReferencePicker({ name }) {
                             onContextMenu=${e => { e.preventDefault(); Lightbox.open(e.currentTarget); }}
                             title=${img.label}
                         >
-                            <img src=${'/api/asset/200x200/' + img.thumb} data-full=${'/api/asset/' + (img.isVideo ? img.thumb : img.file)} data-lightbox="refs" />
+                            <img src=${`${base}/api/asset/200x200/` + img.thumb} data-full=${`${base}/api/asset/` + (img.isVideo ? img.thumb : img.file)} data-lightbox="refs" />
                             ${img.isVideo && html`<div class="ref-video-badge">\u25B6</div>`}
                         </div>
                     `)}

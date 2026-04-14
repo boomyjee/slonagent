@@ -1,6 +1,6 @@
 // Storyboard grid for a selected scene. Click a card to open ShotView.
 import { html, useRef, useEffect } from '../lib.js';
-import { app } from '../app.js';
+import { app, base } from '../app.js';
 import { Lightbox } from '../common/Lightbox.js';
 
 export function StoryboardView() {
@@ -50,8 +50,8 @@ export function StoryboardView() {
 
 function ShotCard({ scene, shot, index }) {
     const primary = shot.generations?.[shot.primary_generation_id];
-    const thumb = primary?.file ? `/api/asset/400x400/${primary.poster || primary.file}` : null;
-    const full = primary?.file ? `/api/asset/${primary.file}` : null;
+    const thumb = primary?.file ? `${base}/api/asset/400x400/${primary.poster || primary.file}` : null;
+    const full = primary?.file ? `${base}/api/asset/${primary.file}` : null;
     const description = shot.description || '(empty)';
 
     function edit(e) {

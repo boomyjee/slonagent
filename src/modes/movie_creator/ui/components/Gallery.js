@@ -8,7 +8,7 @@
 // directly. No "million callbacks" from the parent.
 
 import { html, useState } from '../lib.js';
-import { app } from '../app.js';
+import { app, base } from '../app.js';
 import { Lightbox } from '../common/Lightbox.js';
 import { useEntity } from '../common/EntityView.js';
 import { Form, Select, Text, Textarea, Toggle } from '../common/Form.js';
@@ -21,7 +21,7 @@ async function uploadFile(file, path, kind) {
     const form = new FormData();
     form.append('file', file);
     const params = new URLSearchParams({ path: path.join('/'), kind });
-    await fetch('/api/upload?' + params, { method: 'POST', body: form });
+    await fetch(`${base}/api/upload?` + params, { method: 'POST', body: form });
 }
 
 export function Gallery({ kind, defaultPrompt }) {
@@ -117,8 +117,8 @@ function Tile({ gen, isPrimary, canSetPrimary, onSetPrimary, onRemix, onUseAsRef
     const done = gen.status === 'done' && gen.file;
     const failed = gen.status === 'failed';
     const isVideo = gen.media_type === 'video';
-    const thumb = done ? `/api/asset/800x800/${gen.poster || gen.file}` : null;
-    const full = done ? `/api/asset/${gen.file}` : null;
+    const thumb = done ? `${base}/api/asset/800x800/${gen.poster || gen.file}` : null;
+    const full = done ? `${base}/api/asset/${gen.file}` : null;
     return html`
         <div class=${'gen-tile' + (isPrimary ? ' primary' : '')}>
             <div class="gen-image">

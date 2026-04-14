@@ -3,22 +3,22 @@ from typing import Annotated
 
 from agent import Skill, tool
 from src.modes.movie_creator.project import dump
-from src.modes.movie_creator.server import MovieServer
+from src.modes.movie_creator.transport import MovieTransport
 
 
 class ScreenplaySkill(Skill):
     """AI tools available in the Screenplay tab."""
 
-    def __init__(self, server: MovieServer):
+    def __init__(self, movie: MovieTransport):
         super().__init__()
-        self.server = server
+        self.movie = movie
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         return (
             "Ты — ассистент-сценарист. Помогаешь пользователю работать со сценарием.\n"
             "Когда пользователь просит создать сцену — используй create_scene.\n"
             "Когда пользователь просит изменить существующую — используй update_scene.\n\n"
-            f"СЦЕНАРИЙ:\n{dump(self.server.project.scenes)}"
+            f"СЦЕНАРИЙ:\n{dump(self.movie.project.scenes)}"
         )
 
     @tool("Создать новую сцену. Пользователь сможет отредактировать и одобрить.")
@@ -28,7 +28,7 @@ class ScreenplaySkill(Skill):
         location: Annotated[str, "Локация (напр. INT. КВАРТИРА - НОЧЬ)"] = "",
         text: Annotated[str, "Текст сцены (действие, диалоги)"] = "",
     ) -> dict:
-        return await self.server.edit(
+        return await self.movie.edit(
             ["scenes"], locals(), approval_kind="create_scene",
         )
 
@@ -40,6 +40,6 @@ class ScreenplaySkill(Skill):
         location: Annotated[str, "Новая локация (пусто = не менять)"] = "",
         text: Annotated[str, "Новый текст (пусто = не менять)"] = "",
     ) -> dict:
-        return await self.server.edit(
+        return await self.movie.edit(
             ["scenes", id], locals(), approval_kind="update_scene",
         )

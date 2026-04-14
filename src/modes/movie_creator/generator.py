@@ -22,8 +22,8 @@ MODELS = {
 
 
 class Generator:
-    def __init__(self, server, gemini_key: str, muapi_key: str = "", evolink_key: str = ""):
-        self.server = server
+    def __init__(self, movie, gemini_key: str, muapi_key: str = "", evolink_key: str = ""):
+        self.movie = movie
         self.gemini_key = gemini_key
         self.muapi_key = muapi_key or os.getenv("MUAPI_API_KEY", "")
         self.evolink_key = evolink_key or os.getenv("EVOLINK_API_KEY", "")
@@ -36,7 +36,7 @@ class Generator:
         model_info = MODELS.get(model, {})
         media_type = model_info.get("type", "image")
         gen = Generation(
-            id=self.server.project.allocate_id(),
+            id=self.movie.project.allocate_id(),
             kind=kind,
             media_type=media_type,
             model=model,
@@ -46,7 +46,7 @@ class Generator:
             fast=fast,
         )
         owner.generations[gen.id] = gen
-        await self.server.save()
+        await self.movie.save()
         asyncio.create_task(self._process(owner, gen, references or [],
                                           duration=duration, aspect_ratio=aspect_ratio))
         return gen.id
@@ -76,12 +76,12 @@ class Generator:
 
             ext = "mp4" if gen.media_type == "video" else "png"
             filename = f"gen_{gen.id}.{ext}"
-            self.server.assets_dir.mkdir(parents=True, exist_ok=True)
-            filepath = self.server.assets_dir / filename
+            self.movie.assets_dir.mkdir(parents=True, exist_ok=True)
+            filepath = self.movie.assets_dir / filename
             filepath.write_bytes(data)
             if ext == "mp4":
                 poster_name = f"gen_{gen.id}.poster.jpg"
-                self._extract_poster(filepath, self.server.assets_dir / poster_name)
+                self._extract_poster(filepath, self.movie.assets_dir / poster_name)
                 gen.poster = poster_name
             gen.file = filename
             gen.status = "done"
@@ -92,7 +92,7 @@ class Generator:
             gen.status = "failed"
             gen.error = str(e)
 
-        await self.server.save()
+        await self.movie.save()
 
     @staticmethod
     def _extract_poster(video_path, poster_path):

@@ -3,18 +3,18 @@ from typing import Annotated
 
 from agent import Skill, tool
 from src.modes.movie_creator.project import dump
-from src.modes.movie_creator.server import MovieServer
+from src.modes.movie_creator.transport import MovieTransport
 
 
 class CharactersSkill(Skill):
     """AI tools available in the Characters tab."""
 
-    def __init__(self, server: MovieServer):
+    def __init__(self, movie: MovieTransport):
         super().__init__()
-        self.server = server
+        self.movie = movie
 
     async def get_context_prompt(self, user_text: str = "") -> str:
-        project = self.server.project
+        project = self.movie.project
         return (
             "Ты — ассистент по персонажам фильма.\n"
             "Помогаешь создавать и редактировать персонажей.\n"
@@ -32,7 +32,7 @@ class CharactersSkill(Skill):
         description: Annotated[str, "Описание (роль, характер, мотивация)"] = "",
         appearance: Annotated[str, "Внешность (возраст, рост, волосы, одежда)"] = "",
     ) -> dict:
-        return await self.server.edit(
+        return await self.movie.edit(
             ["characters"], locals(), approval_kind="create_character",
         )
 
@@ -44,7 +44,7 @@ class CharactersSkill(Skill):
         description: Annotated[str, "Новое описание (пусто = не менять)"] = "",
         appearance: Annotated[str, "Новая внешность (пусто = не менять)"] = "",
     ) -> dict:
-        return await self.server.edit(
+        return await self.movie.edit(
             ["characters", id], locals(), approval_kind="update_character",
         )
 
@@ -55,10 +55,10 @@ class CharactersSkill(Skill):
         character_id: Annotated[str, "ID персонажа"],
         prompt: Annotated[str, "Полный промпт для генерации (англ., описание лица/одежды/освещения)"],
     ) -> dict:
-        char = self.server.project.characters.get(character_id)
+        char = self.movie.project.characters.get(character_id)
         if not char:
             return {"error": f"Character {character_id} not found"}
-        result = await self.server.send_approval("generate_portrait", {
+        result = await self.movie.send_approval("generate_portrait", {
             "character_id": character_id,
             "character_name": char.name,
             "prompt": prompt,
@@ -66,6 +66,6 @@ class CharactersSkill(Skill):
         if result.get("action") == "reject":
             return {"status": "rejected", "reason": result.get("reason", "")}
         data = result.get("data", {})
-        gen_id = await self.server.generator.enqueue(
+        gen_id = await self.movie.generator.enqueue(
             char, "portrait", data.get("prompt", prompt))
         return {"status": "queued", "generation_id": gen_id}
