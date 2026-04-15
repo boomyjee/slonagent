@@ -1,5 +1,5 @@
 """strip_thought_marker.py — убрать `extra_content.google.thought:true` из
-всех CONTEXT.json в проекте.
+всех CONTEXT.json и PENDING_*.json в проекте.
 
 Маркер раньше попадал в финальный assistant-турн из-за бага в стрим-обработке
 (см. agent.py): Gemini шлёт `thought=true` в каждом thinking-чанке, openai-
@@ -78,9 +78,9 @@ def main():
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
-    files = sorted(root.rglob("CONTEXT.json"))
+    files = sorted({*root.rglob("CONTEXT.json"), *root.rglob("PENDING_*.json")})
     if not files:
-        print(f"CONTEXT.json не найдено в {root}")
+        print(f"CONTEXT.json / PENDING_*.json не найдены в {root}")
         return
 
     print(f"Найдено файлов: {len(files)}{' (DRY RUN)' if args.dry_run else ''}\n")
