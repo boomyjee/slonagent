@@ -232,11 +232,11 @@ class Agent:
                 seen = {}
 
                 async for chunk in stream:
-                    # openai accumulate_delta склеивает строки и суммирует числа (bool
-                    # наследуется от int!). Gemini шлёт role="assistant" в каждом чанке
-                    # и thought=true в каждом thinking-чанке — в итоге role становится
-                    # "assistantassistant...", thought становится 2/3/... Оба поля
-                    # оставляем из первого чанка, из остальных — вычищаем.
+                    # Gemini шлёт role="assistant" в каждом чанке — openai-аккумулятор
+                    # склеит в "assistantassistant…", оставляем только из первого.
+                    # thought=true приходит в каждом thinking-чанке; на финальной
+                    # message он не нужен — Gemini иначе трактует ответ как
+                    # внутреннее рассуждение и теряет его в истории.
                     delta = chunk.choices[0].delta if chunk.choices else None
                     if delta is not None:
                         for tc in delta.tool_calls or ():
@@ -247,9 +247,7 @@ class Agent:
                             if "role" in seen: delta.role = None
                             seen["role"] = True
                         google = ((delta.model_extra or {}).get("extra_content") or {}).get("google") or {}
-                        if google.get("thought"):
-                            if "thought" in seen: google.pop("thought")
-                            seen["thought"] = True
+                        google.pop("thought", None)
 
                     state.handle_chunk(chunk)
                     if delta is None:
