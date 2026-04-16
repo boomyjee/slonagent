@@ -289,11 +289,18 @@ class Agent:
 
                 turn = final.choices[0].message.model_dump(exclude_none=True)
                 if turn.get("content"):
-                    turn["content"] = re.sub(r"<thought>.*?</thought>", "", turn["content"], flags=re.DOTALL).strip() or None
+                    turn["content"] = re.sub(r"<thought>.*?</thought>", "", turn["content"], flags=re.DOTALL)
+                    turn["content"] = re.sub(r"<thought>.*", "", turn["content"], flags=re.DOTALL)
+                    turn["content"] = turn["content"].strip()
+                    if not turn["content"]:  del turn["content"]
 
                 for tc in turn.get("tool_calls") or ():
                     tc.pop("index", None)
                     logging.info("[stream] function_call: %s", tc["function"]["name"])
+
+                if not turn.get("content") and not turn.get("tool_calls"):
+                    logging.warning("[agent] ← LLM %s returned no content (only thoughts?)", self.model_name)
+                    await self.transport.send_message("(модель не вернула ответ, только мысли)")
 
                 logging.info("[agent] ← LLM %s finish=%s", self.model_name, finish_reason)
                 return turn
