@@ -55,3 +55,6 @@ scripts/diary_enrichment/memory/
 scripts/diary_enrichment_old/
 scripts/test_mode/.config.json
 scripts/test_mode/memory/
+
+# Movie experiment (separate repo)
+scripts/movie_experiment/
