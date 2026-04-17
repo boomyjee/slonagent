@@ -120,6 +120,27 @@ async def test_parallel_tool_calls_stream(get_params):
         assert tc["function"].get("arguments") is not None
 
 
+async def test_gemini_thought_not_leaked_to_content():
+    """Gemini thinking must not leak into saved turn content.
+
+    Before the google.thought-flag based fix, the openai-compat <thought>...</thought>
+    tags could end up in turn['content'] (e.g. if the closing tag was missing), and
+    regex-based cleanup also stripped *literal* <thought> if the user asked for it.
+    """
+    agent = _make_agent(*_gemini_params())
+    await agent.start(run_loop=False)
+    await agent.memory.add_turn({
+        "role": "user",
+        "content": "Скажи коротко одним словом: столица Франции?",
+    })
+
+    turn = await agent.llm()
+    content = turn.get("content") or ""
+    assert "<thought>" not in content, f"structural <thought> leaked into content: {content!r}"
+    assert "</thought>" not in content, f"structural </thought> leaked into content: {content!r}"
+    assert content.strip(), "expected non-empty answer, got empty content"
+
+
 @pytest.mark.parametrize("get_params", PROVIDERS)
 async def test_memory_round_trip(get_params):
     """Saved turn is consumable by the API on the next call (llm -> dispatch -> memory -> llm).

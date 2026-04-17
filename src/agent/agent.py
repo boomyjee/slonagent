@@ -269,7 +269,8 @@ class Agent:
                             if not display_text and display_thinking:
                                 await self.transport.send_thinking(display_thinking, thinking_id, final=True)
                             display_text += content.removeprefix("</thought>")
-                            await self.transport.send_message(display_text, stream_id, final=False)
+                            if display_text:
+                                await self.transport.send_message(display_text, stream_id, final=False)
 
                 if display_thinking and not display_text:
                     await self.transport.send_thinking(display_thinking, thinking_id, final=True)
