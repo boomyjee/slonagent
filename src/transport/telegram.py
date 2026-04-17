@@ -564,7 +564,10 @@ class TelegramTransport(BaseTransport):
             return
 
         trigger_answer = True
-        if self.chat_id < 0:
+        # В групповых чатах с несколькими людьми (chat_id < 0 + >2 участников,
+        # т.е. помимо бота больше одного человека) отвечаем только если к боту
+        # обратились явно — reply или @mention. В 1:1-группе (я+бот) — как в DM.
+        if self.chat_id < 0 and await self.bot.get_chat_member_count(self.chat_id) > 2:
             bot_id = (await self.bot.me()).id
             bot_username = (await self.bot.me()).username
             reply = first.reply_to_message
