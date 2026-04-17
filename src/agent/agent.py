@@ -227,10 +227,19 @@ class Agent:
                 display_thinking = ""
                 thinking_id = self._stream_counter = self._stream_counter + 1
                 stream_id = self._stream_counter = self._stream_counter + 1
+                is_thought = False  # XML state machine: внутри <thought>...</thought>
                 tc_counter = 0
                 seen = {}
 
+                # Дамп всех чанков последнего тура — для отладки проблем
+                # с разделением мыслей и текста (см. fix(agent): split thoughts).
+                # Файл очищается в начале тура (handle_turn), здесь только дописываем.
+                chunk_dump_path = os.path.join(self.memory.memory_dir, "last_turn_chunks.log")
+                chunk_dump = open(chunk_dump_path, "a", encoding="utf-8")
+
                 async for chunk in stream:
+                    chunk_dump.write(chunk.model_dump_json(exclude_none=False) + "\n")
+                    chunk_dump.flush()
                     # Gemini шлёт role="assistant" в каждом чанке — openai-аккумулятор
                     # склеит в "assistantassistant…", оставляем только из первого.
                     # thought=true приходит в каждом thinking-чанке; на финальной
@@ -258,19 +267,34 @@ class Agent:
                         display_thinking += thought_extra
                         await self.transport.send_thinking(display_thinking, thinking_id)
 
-                    # google.thought=true — авторитетный сигнал что чанк это мысль.
-                    # XML-теги <thought>/</thought> openai-compat добавляет только
-                    # на границах (первый/последний thought-чанк) — снимаем их.
+                    # Gemini маркирует мысли двумя сигналами: google.thought=true
+                    # flag на чанке ИЛИ литералы <thought>...</thought> в content.
+                    # Pro-preview на тяжёлой истории может не ставить flag и не
+                    # закрывать </thought> — тогда state machine по XML удерживает
+                    # is_thought=True до конца стрима, мысли не утекают в text.
+                    # <thought> в content считаем маркером только если он стоит
+                    # в самом начале чанка и текст ещё не начался — иначе это
+                    # литерал в ответе модели.
                     if content := delta.content or "":
-                        if is_thought_chunk:
-                            display_thinking += content.removeprefix("<thought>").removesuffix("</thought>")
-                            await self.transport.send_thinking(display_thinking, thinking_id)
-                        else:
-                            if not display_text and display_thinking:
-                                await self.transport.send_thinking(display_thinking, thinking_id, final=True)
-                            display_text += content.removeprefix("</thought>")
-                            if display_text:
+                        if is_thought_chunk or (content.startswith("<thought>") and not display_text):
+                            is_thought = True
+                        if is_thought:
+                            thought, *rest = content.removeprefix("<thought>").split("</thought>", 1)
+                            display_thinking += thought
+                            if rest:
+                                is_thought = False
+                                text = rest[0]
+                                if text:
+                                    display_text += text
+                            await self.transport.send_thinking(display_thinking, thinking_id, final=not is_thought)
+                            if not is_thought and display_text:
                                 await self.transport.send_message(display_text, stream_id, final=False)
+                        else:
+                            display_text += content
+                            await self.transport.send_message(display_text, stream_id, final=False)
+
+                try: chunk_dump.close()
+                except Exception: pass
 
                 if display_thinking and not display_text:
                     await self.transport.send_thinking(display_thinking, thinking_id, final=True)
@@ -439,6 +463,7 @@ class Agent:
                     if not trigger_answer: return
 
                     await self.transport.send_processing(True)
+                    open(os.path.join(self.memory.memory_dir, "last_turn_chunks.log"), "w").close()
                     turn = await self.llm()
                     iteration = 0
                     while turn.get("tool_calls") and iteration < self.max_iterations:

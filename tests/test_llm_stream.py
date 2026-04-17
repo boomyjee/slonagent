@@ -120,6 +120,152 @@ async def test_parallel_tool_calls_stream(get_params):
         assert tc["function"].get("arguments") is not None
 
 
+class _RecordingTransport(BaseTransport):
+    """Captures every send_message/send_thinking call for assertions."""
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    async def send_message(self, text, stream_id=None, final=True):
+        self.calls.append(("send_message", text, final))
+
+    async def send_thinking(self, text, stream_id=None, final=False):
+        self.calls.append(("send_thinking", text, final))
+
+    async def send_processing(self, active): pass
+    async def send_system_prompt(self, text): pass
+    async def on_tool_call(self, name, args): pass
+    async def on_tool_result(self, name, result): pass
+
+
+def _make_replay_stream(raw_chunks: list[dict]):
+    """Turn a list of serialized delta dicts into an async iterator of ChatCompletionChunk."""
+    from openai.types.chat import ChatCompletionChunk
+
+    chunks = []
+    for i, raw in enumerate(raw_chunks):
+        extra = raw.get("model_extra") or {}
+        delta_payload = {
+            "content": raw.get("content"),
+            "role": raw.get("role"),
+            "tool_calls": raw.get("tool_calls") or None,
+            **extra,
+        }
+        chunks.append(ChatCompletionChunk.model_validate({
+            "id": f"chunk-{i}",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "gemini-test",
+            "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}],
+        }))
+    # Last chunk: set finish_reason=stop on an empty delta.
+    chunks[-1] = ChatCompletionChunk.model_validate({
+        "id": "final",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "gemini-test",
+        "choices": [{"index": 0, "delta": chunks[-1].choices[0].delta.model_dump(exclude_none=True),
+                     "finish_reason": "stop"}],
+    })
+
+    class AsyncIter:
+        def __init__(self, items): self._items = iter(items)
+        def __aiter__(self): return self
+        async def __anext__(self):
+            try: return next(self._items)
+            except StopIteration: raise StopAsyncIteration
+    return AsyncIter(chunks)
+
+
+async def _replay(raw_chunks: list[dict]) -> tuple[dict, _RecordingTransport]:
+    """Inject recorded chunks into agent.llm() via a fake client, return (turn, transport)."""
+    transport = _RecordingTransport()
+    agent = Agent(
+        id="replay",
+        model_name="gemini-test",
+        api_key="dummy",
+        base_url="http://dummy",
+        agent_dir=tempfile.mkdtemp(),
+        memory_compressor=PassthroughCompressor(),
+        transport=transport,
+    )
+    await agent.start(run_loop=False)
+
+    async def fake_create(**kw):
+        return _make_replay_stream(raw_chunks)
+
+    agent.client.chat.completions.create = fake_create
+    await agent.memory.add_turn({"role": "user", "content": "replay"})
+    turn = await agent.llm()
+    return turn, transport
+
+
+@pytest.mark.asyncio
+async def test_pro_preview_no_flag_no_close_tag():
+    """gemini-3.1-pro-preview regression: no google.thought flag, no </thought>.
+
+    In this case the model emits `<thought>...` in the first chunk and then streams
+    both reasoning and response text without ever closing the tag or setting the
+    google.thought flag on any chunk. The agent must NOT leak this content via
+    send_message — it should all go to send_thinking, with empty final content.
+    """
+    chunks = [
+        {"content": "<thought>Thinking Process:\n\n1. Analyze..."},
+        {"content": " more reasoning here"},
+        {"content": " and even more reasoning without a close tag"},
+    ]
+    turn, transport = await _replay(chunks)
+
+    leaked = [c for c in transport.calls if c[0] == "send_message" and "<thought>" in c[1]]
+    assert not leaked, f"thoughts with <thought> tag leaked into send_message: {leaked!r}"
+
+    thoughts_in_message = [c for c in transport.calls if c[0] == "send_message" and "Thinking Process" in c[1]]
+    assert not thoughts_in_message, f"thought content leaked into send_message: {thoughts_in_message!r}"
+
+    thinkings = [c for c in transport.calls if c[0] == "send_thinking"]
+    assert thinkings, "expected thoughts to be sent via send_thinking"
+    final_thinking = next((c for c in thinkings if c[2] is True), None)
+    assert final_thinking, "expected final=True on send_thinking"
+
+    assert not turn.get("content"), f"expected no content when only thoughts, got: {turn.get('content')!r}"
+
+
+@pytest.mark.asyncio
+async def test_flag_based_thought_with_clean_transition():
+    """Normal case: chunks have google.thought flag + <thought>...</thought> XML."""
+    chunks = [
+        {"content": "<thought>reasoning part 1", "model_extra": {"extra_content": {"google": {"thought": True}}}},
+        {"content": " reasoning part 2", "model_extra": {"extra_content": {"google": {"thought": True}}}},
+        {"content": "</thought>The final answer is 42."},
+    ]
+    turn, transport = await _replay(chunks)
+
+    messages = [c for c in transport.calls if c[0] == "send_message"]
+    assert messages, "expected send_message calls for response text"
+    for _, text, _ in messages:
+        assert "<thought>" not in text, f"XML tag leaked into send_message: {text!r}"
+        assert "</thought>" not in text, f"XML tag leaked into send_message: {text!r}"
+
+    assert turn.get("content") == "The final answer is 42."
+
+
+@pytest.mark.asyncio
+async def test_literal_thought_tag_in_response_preserved():
+    """If the model's response mentions <thought> literally (e.g. quoting git history),
+    it must NOT be treated as a thinking marker — once response text has started,
+    <thought> in subsequent content is literal."""
+    chunks = [
+        {"content": "<thought>analysis", "model_extra": {"extra_content": {"google": {"thought": True}}}},
+        {"content": "</thought>Был коммит, который убирал "},
+        {"content": "<thought> из вывода — он ломал парсинг."},
+    ]
+    turn, transport = await _replay(chunks)
+
+    assert turn.get("content") == "Был коммит, который убирал <thought> из вывода — он ломал парсинг."
+    full_text = "".join(c[1] for c in transport.calls if c[0] == "send_message")
+    assert "<thought>" in full_text, "literal <thought> must be preserved in message text"
+
+
 async def test_gemini_thought_not_leaked_to_content():
     """Gemini thinking must not leak into saved turn content.
 
