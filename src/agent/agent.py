@@ -1,4 +1,4 @@
-import asyncio, base64, io, json, os, logging, re, weakref
+import asyncio, base64, io, json, os, logging, weakref
 import numpy as np
 import soundfile as sf
 from datetime import datetime
@@ -227,7 +227,6 @@ class Agent:
                 display_thinking = ""
                 thinking_id = self._stream_counter = self._stream_counter + 1
                 stream_id = self._stream_counter = self._stream_counter + 1
-                is_thought = False
                 tc_counter = 0
                 seen = {}
 
@@ -247,7 +246,7 @@ class Agent:
                             if "role" in seen: delta.role = None
                             seen["role"] = True
                         google = ((delta.model_extra or {}).get("extra_content") or {}).get("google") or {}
-                        google.pop("thought", None)
+                        is_thought_chunk = bool(google.pop("thought", None))
 
                     state.handle_chunk(chunk)
                     if delta is None:
@@ -259,22 +258,17 @@ class Agent:
                         display_thinking += thought_extra
                         await self.transport.send_thinking(display_thinking, thinking_id)
 
-                    # Gemini заворачивает мысли в литералы <thought>...</thought> прямо в content
+                    # google.thought=true — авторитетный сигнал что чанк это мысль.
+                    # XML-теги <thought>/</thought> openai-compat добавляет только
+                    # на границах (первый/последний thought-чанк) — снимаем их.
                     if content := delta.content or "":
-                        text = ""
-                        if "<thought>" in content: is_thought = True
-                        if is_thought:
-                            thought, *rest = content.removeprefix("<thought>").split("</thought>")
-                            if rest:
-                                is_thought = False
-                                text = rest[0]
-                            display_thinking += thought
-                            await self.transport.send_thinking(display_thinking, thinking_id, final=not is_thought)
+                        if is_thought_chunk:
+                            display_thinking += content.removeprefix("<thought>").removesuffix("</thought>")
+                            await self.transport.send_thinking(display_thinking, thinking_id)
                         else:
-                            text = content
-                            
-                        if text:
-                            display_text += text
+                            if not display_text and display_thinking:
+                                await self.transport.send_thinking(display_thinking, thinking_id, final=True)
+                            display_text += content.removeprefix("</thought>")
                             await self.transport.send_message(display_text, stream_id, final=False)
 
                 if display_thinking and not display_text:
@@ -288,11 +282,11 @@ class Agent:
                     raise BadFinishReason(finish_reason)
 
                 turn = final.choices[0].message.model_dump(exclude_none=True)
-                if turn.get("content"):
-                    turn["content"] = re.sub(r"<thought>.*?</thought>", "", turn["content"], flags=re.DOTALL)
-                    turn["content"] = re.sub(r"<thought>.*", "", turn["content"], flags=re.DOTALL)
-                    turn["content"] = turn["content"].strip()
-                    if not turn["content"]:  del turn["content"]
+                # В content из stream попадают XML-теги <thought>...</thought> —
+                # заменяем на очищенный display_text, который мы собрали по флагу.
+                turn.pop("content", None)
+                if display_text.strip():
+                    turn["content"] = display_text.strip()
 
                 for tc in turn.get("tool_calls") or ():
                     tc.pop("index", None)
