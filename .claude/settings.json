@@ -12,5 +12,18 @@
       "Bash(mkdir *)",
       "Bash(ls *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -q 'seedance_video\\.py' && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"Seedance video generation — burns credits on Evolink, cannot be cancelled once POSTed. Confirm?\"}}' || true"
+          }
+        ]
+      }
+    ]
   }
 }

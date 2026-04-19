@@ -37,6 +37,7 @@
 16. **Reference-to-video блокирует фотореалистичные face refs** — content_policy_violation на голые портреты. Для face swap — локально через facefusion.
 17. **facefusion headless-run** — `inswapper_128` + `gfpgan_1.4` + `--face-selector-mode one` обязательно. Без `one` он в reference mode и не свапает.
 18. **Аудио-рефы в промпте** — `@Audio1 is the first line spoken by the man`. Seedance делает lip-sync, если аспект shot близко к persona.
+18a. **Музыка Seedance** — всегда добавлять в промпт `No background music, no soundtrack.` По умолчанию Seedance генерирует фоновую музыку, которая для этого проекта не нужна (склейка на посте).
 
 ## Поведение
 
