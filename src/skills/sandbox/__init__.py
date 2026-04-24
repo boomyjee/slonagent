@@ -172,11 +172,18 @@ class SandboxSkill(Skill):
 
         # Drain stderr in a background thread — if the pipe buffer fills (~64KB
         # on Windows) the container blocks on its next stderr write, and since
-        # our RPC reply also goes to stdout we'd deadlock.
+        # our RPC reply also goes to stdout we'd deadlock. We also keep a copy
+        # so that if the script dies before Channel starts (e.g. ImportError),
+        # the RPC reader sees EOF and fails pending calls with generic "channel
+        # closed" — we can still surface the real traceback from stderr.
+        stderr_buf: list[str] = []
         def _drain_stderr():
             for line in iter(proc.stderr.readline, b""):
-                logging.info("[sandbox-err] %s", line.decode("utf-8", errors="replace").rstrip())
-        threading.Thread(target=_drain_stderr, daemon=True, name="sandbox-stderr").start()
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                stderr_buf.append(decoded)
+                logging.info("[sandbox-err] %s", decoded)
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True, name="sandbox-stderr")
+        stderr_thread.start()
 
         def readline():
             line = proc.stdout.readline()
@@ -207,16 +214,23 @@ class SandboxSkill(Skill):
         ch.register("MultiTransport", MultiTransport)
         ch.start()
 
+        call_error: Exception | None = None
+        result: dict | None = None
         try:
             r = await Proxy(ch, "runner").run_tool(name=tool_name, args=args, agent=self.agent)
             result = r if isinstance(r, dict) else {"result": r}
         except Exception as e:
-            result = {"error": str(e)}
+            call_error = e
         finally:
             ch.close()
             try: proc.stdin.close()
             except Exception: pass
             await asyncio.to_thread(proc.wait)
+            stderr_thread.join(timeout=2.0)
+
+        if call_error is not None:
+            err_text = "\n".join(stderr_buf).strip()
+            result = {"error": err_text or str(call_error)}
 
         return result
 
