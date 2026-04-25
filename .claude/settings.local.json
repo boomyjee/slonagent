@@ -5,7 +5,8 @@
       "WebSearch",
       "Skill(claude-api)",
       "Skill(claude-api:*)",
-      "WebFetch(*)"
+      "WebFetch(*)",
+      "Monitor(*)"
     ]
   }
 }
