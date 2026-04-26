@@ -473,6 +473,13 @@ async def _extract_from_chunk(
             if str(getattr(choice, "finish_reason", "")).lower() in ("length", "max_tokens"):
                 raise _OutputTooLongError(f"finish_reason={choice.finish_reason}")
 
+            if choice.message is None:
+                log.warning(
+                    "[retain] chunk %d attempt %d: empty message (finish_reason=%s)",
+                    chunk_index, attempt + 1, getattr(choice, "finish_reason", "?"),
+                )
+                continue
+
             raw = choice.message.content or ""
             m = re.search(r"\{", raw)
             if not m:
