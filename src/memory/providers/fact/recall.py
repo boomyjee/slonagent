@@ -688,18 +688,14 @@ def _rerank(query: str, results: list["RecallResult"], rerank_model: str = "") -
             doc_text = f"{r.context}: {doc_text}"
         passages.append(doc_text)
 
-    try:
-        ranker = _get_ranker(rerank_model)
-        pairs = [(query, doc) for doc in passages]
-        scores = ranker.predict(pairs)
+    ranker = _get_ranker(rerank_model)
+    pairs = [(query, doc) for doc in passages]
+    scores = ranker.predict(pairs)
 
-        for r, score in zip(results, scores):
-            r.score = float(score)
+    for r, score in zip(results, scores):
+        r.score = float(score)
 
-        results.sort(key=lambda r: r.score, reverse=True)
-    except Exception as e:
-        log.warning("[recall] reranking failed, keeping RRF order: %s", e, exc_info=True)
-
+    results.sort(key=lambda r: r.score, reverse=True)
     return results
 
 
