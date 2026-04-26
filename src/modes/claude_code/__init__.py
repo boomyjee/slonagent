@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from typing import Annotated
 
 from agent import Skill, tool, bypass
@@ -34,16 +35,18 @@ class ClaudeCodeSkill(Skill):
     def _state_file(self):
         return os.path.join(self.agent.memory.memory_dir, "claude_code.json")
 
-    def _load_session_id(self) -> str:
+    def _get_session_id(self) -> str:
         try:
             with open(self._state_file) as f:
-                return json.load(f).get("session_id", "")
+                sid = json.load(f).get("session_id", "")
+                if sid:
+                    return sid
         except (FileNotFoundError, json.JSONDecodeError):
-            return ""
-
-    def _save_session_id(self, sid: str):
+            pass
+        sid = str(uuid.uuid4())
         with open(self._state_file, "w") as f:
             json.dump({"session_id": sid}, f)
+        return sid
 
     def _build_mcp_server(self, shadow):
         """Прокидывает тулы shadow-скиллов в Claude Code как SDK MCP-сервер.
@@ -81,7 +84,8 @@ class ClaudeCodeSkill(Skill):
 
     async def _send_query(self, shadow, text: str, cwd: str, mcp_server=None):
         transport = shadow.transport
-        log.info("[claude_code] query start: %r (cwd=%s, resume=%s)", text[:80], cwd, self._load_session_id() or "<new>")
+        session_id = self._get_session_id()
+        log.info("[claude_code] query start: %r (cwd=%s, session=%s)", text[:80], cwd, session_id)
 
         # 1. user turn в shadow.memory (до get_contents — чтобы новый ход попал в наблюдения)
         await shadow.memory.add_turn({"role": "user", "content": text})
@@ -116,7 +120,7 @@ class ClaudeCodeSkill(Skill):
             if line:
                 log.warning("[claude_code:stderr] %s", line)
 
-        # 3. options с resume персистентной Claude Code сессии
+        # 3. options с фиксированным session_id (наш UUID, переживает рестарты)
         options = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=cwd,
@@ -124,7 +128,7 @@ class ClaudeCodeSkill(Skill):
             model=self._model,
             include_partial_messages=True,
             setting_sources=["user"],
-            resume=self._load_session_id() or None,
+            session_id=session_id,
             system_prompt={"type": "preset", "preset": "claude_code"},
             extra_args=extra_args,
             mcp_servers={"slon": mcp_server} if mcp_server else {},
@@ -139,19 +143,9 @@ class ClaudeCodeSkill(Skill):
         tool_input_buf = ""
         tool_name = ""
         block_type = None
-        new_session_id = None
         assistant_parts: list[str] = []   # text + tool_use, для сохранения как assistant turn
 
-        msg_count = 0
         async for message in query(prompt=text, options=options):
-            msg_count += 1
-            if msg_count == 1:
-                log.info("[claude_code] first message received: %s", type(message).__name__)
-            sid = getattr(message, "session_id", None)
-            if sid and sid != new_session_id:
-                new_session_id = sid
-                log.info("[claude_code] session_id=%s", sid)
-
             if isinstance(message, StreamEvent):
                 event = message.event
                 etype = event.get("type", "")
@@ -233,11 +227,7 @@ class ClaudeCodeSkill(Skill):
                         "role": "assistant",
                         "content": "\n\n".join(assistant_parts),
                     })
-                if new_session_id:
-                    self._save_session_id(new_session_id)
                 return
-
-        log.warning("[claude_code] query stream ended without ResultMessage (msg_count=%d)", msg_count)
 
     @bypass("claude", "Запустить Claude Code", standalone=True)
     async def launch_command(self, args: str):
@@ -301,22 +291,9 @@ class ClaudeCodeSkill(Skill):
                         # _send_query крутится в отдельной таске чтобы SDK-шный
                         # cancel_scope (anyio task-group в transport.close) не утекал
                         # в наш launch-цикл при aclose async-генератора query().
-                        try:
-                            await asyncio.create_task(
-                                self._send_query(shadow, text, cwd, mcp_server=mcp_server)
-                            )
-                        except Exception as e:
-                            # Падение query() с сохранённым session_id — обычно протухший
-                            # resume. Сбрасываем и пробуем заново свежей сессией.
-                            if self._load_session_id():
-                                log.warning("[claude_code] query failed with resume, retrying fresh: %s", e)
-                                if os.path.exists(self._state_file):
-                                    os.remove(self._state_file)
-                                await asyncio.create_task(
-                                    self._send_query(shadow, text, cwd, mcp_server=mcp_server)
-                                )
-                            else:
-                                raise
+                        await asyncio.create_task(
+                            self._send_query(shadow, text, cwd, mcp_server=mcp_server)
+                        )
                     except Exception as e:
                         log.warning("[claude_code] query failed: %s", e, exc_info=True)
                         await shadow.transport.send_message(f"Ошибка: {e}")
