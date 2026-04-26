@@ -25,6 +25,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal, Optional
@@ -45,6 +46,7 @@ RERANK_MODEL_DEFAULT = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 
 # Lazy singletons по имени модели
 _rankers: dict[str, object] = {}
+_rankers_lock = threading.Lock()
 
 
 # ── Result models ──────────────────────────────────────────────────────────────
@@ -657,9 +659,11 @@ def _get_ranker(model_name: str = ""):
     """Lazy singleton SentenceTransformers CrossEncoder по имени модели."""
     model_name = model_name or RERANK_MODEL_DEFAULT
     if model_name not in _rankers:
-        from sentence_transformers import CrossEncoder
-        _rankers[model_name] = CrossEncoder(model_name)
-        log.info("[recall] CrossEncoder loaded: %s", model_name)
+        with _rankers_lock:
+            if model_name not in _rankers:  # double-check после acquire
+                from sentence_transformers import CrossEncoder
+                _rankers[model_name] = CrossEncoder(model_name)
+                log.info("[recall] CrossEncoder loaded: %s", model_name)
     return _rankers[model_name]
 
 
