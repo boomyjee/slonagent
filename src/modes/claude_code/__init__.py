@@ -310,6 +310,10 @@ class ClaudeCodeSkill(Skill):
             skills=[],
             transport=MultiTransport([self.agent.transport, coding_transport]),
         )
+        # Тащим скиллы транспорта (TelegramSkill etc) — обычно их собирает
+        # agent.loop(), но shadow с run_loop=False. Чтобы клод мог отправлять
+        # файлы/кнопки в TG — делаем это вручную после spawn.
+        shadow.add_transport_skills()
 
         url = await coding_transport.get_url('/')
         await self.agent.transport.send_message(

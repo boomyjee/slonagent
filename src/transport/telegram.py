@@ -133,16 +133,22 @@ class TelegramSkill(Skill):
         sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         host_paths = []
         for p in paths:
-            host_path = sandbox.resolve_path(p) if sandbox else None
-            if host_path is None:
-                return {"error": f"Доступ запрещён: {p}"}
+            # С sandbox'ом — резолвим container-path в host. Без — принимаем
+            # host-абсолютный путь как есть (например, для Claude Code, который
+            # бегает по хосту, а не в контейнере).
+            if sandbox:
+                host_path = sandbox.resolve_path(p)
+                if host_path is None:
+                    return {"error": f"Доступ запрещён: {p}"}
+            else:
+                host_path = os.path.abspath(p)
             if not os.path.exists(host_path):
                 return {"error": f"Файл не найден: {host_path}"}
             host_paths.append(host_path)
         return host_paths
 
     @tool("Отправить один или несколько файлов как группу. Один вызов = одна группа. Для нескольких групп — вызови несколько раз.")
-    async def send_files(self, paths: Annotated[list[str], "Список путей к файлам внутри контейнера."]):
+    async def send_files(self, paths: Annotated[list[str], "Список путей к файлам."]):
         host_paths = self._resolve_paths(paths)
         if isinstance(host_paths, dict):
             return host_paths
@@ -155,7 +161,7 @@ class TelegramSkill(Skill):
         return {"status": "ok"}
 
     @tool("Отправить одно или несколько изображений как альбом (до 10). Один вызов = один альбом. Для нескольких альбомов — вызови несколько раз.")
-    async def send_images(self, paths: Annotated[list[str], "Список путей к изображениям внутри контейнера."]):
+    async def send_images(self, paths: Annotated[list[str], "Список путей к изображениям."]):
         host_paths = self._resolve_paths(paths)
         if isinstance(host_paths, dict):
             return host_paths
@@ -187,18 +193,20 @@ class TelegramSkill(Skill):
         await self.transport._send(_markdown_to_html(text), parse_mode="HTML", reply_markup=kb)
         return {"status": "ok"}
 
-    @tool("Скачать файл, отправленный пользователем, в рабочую директорию. Путь назначения должен быть внутри /workspace/.")
+    @tool("Скачать файл, отправленный пользователем, в рабочую директорию.")
     async def download_file(
         self,
         tg_file_id: Annotated[str, "tg_file_id из метаданных прикреплённого файла."],
-        dest_path: Annotated[str, "Путь назначения внутри контейнера (например /workspace/photo.jpg)."],
+        dest_path: Annotated[str, "Путь назначения для сохранения файла."],
     ):
         from src.skills.sandbox import SandboxSkill
         sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
-        host_dest = sandbox.resolve_path(dest_path) if sandbox else None
-
-        if host_dest is None:
-            return {"error": f"Путь запрещён или недоступен: {dest_path}"}
+        if sandbox:
+            host_dest = sandbox.resolve_path(dest_path)
+            if host_dest is None:
+                return {"error": f"Путь запрещён или недоступен: {dest_path}"}
+        else:
+            host_dest = os.path.abspath(dest_path)
 
         tg_file = await self.transport.bot.get_file(tg_file_id)
         os.makedirs(os.path.dirname(host_dest), exist_ok=True)
