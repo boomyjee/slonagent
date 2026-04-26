@@ -3,11 +3,13 @@ import json
 import logging
 import os
 import uuid
+from contextlib import suppress
 from typing import Annotated
 
 from agent import Skill, tool, bypass
 from claude_agent_sdk import (
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     AssistantMessage,
     ResultMessage,
     SdkMcpTool,
@@ -15,7 +17,6 @@ from claude_agent_sdk import (
     ToolResultBlock,
     UserMessage,
     create_sdk_mcp_server,
-    query,
 )
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ class ClaudeCodeSkill(Skill):
         self._cli_path = cli_path or None
         self._model = model or None
         self._expose_tool = expose_tool
+        self._client: ClaudeSDKClient | None = None
+        self._client_append: str | None = None  # текст системки в живом клиенте
 
     def get_tools(self):
         return super().get_tools() if self._expose_tool else []
@@ -35,18 +38,16 @@ class ClaudeCodeSkill(Skill):
     def _state_file(self):
         return os.path.join(self.agent.memory.memory_dir, "claude_code.json")
 
-    def _get_session_id(self) -> str:
+    def _load_state(self) -> dict:
         try:
             with open(self._state_file) as f:
-                sid = json.load(f).get("session_id", "")
-                if sid:
-                    return sid
+                return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        sid = str(uuid.uuid4())
+            return {}
+
+    def _save_state(self, state: dict):
         with open(self._state_file, "w") as f:
-            json.dump({"session_id": sid}, f)
-        return sid
+            json.dump(state, f)
 
     def _build_mcp_server(self, shadow):
         """Прокидывает тулы shadow-скиллов в Claude Code как SDK MCP-сервер.
@@ -84,8 +85,8 @@ class ClaudeCodeSkill(Skill):
 
     async def _send_query(self, shadow, text: str, cwd: str, mcp_server=None):
         transport = shadow.transport
-        session_id = self._get_session_id()
-        log.info("[claude_code] query start: %r (cwd=%s, session=%s)", text[:80], cwd, session_id)
+        state = self._load_state()
+        session_id = state.get("session_id") or str(uuid.uuid4())
 
         # 1. user turn в shadow.memory (до get_contents — чтобы новый ход попал в наблюдения)
         await shadow.memory.add_turn({"role": "user", "content": text})
@@ -106,36 +107,73 @@ class ClaudeCodeSkill(Skill):
                 parts.append(ctx)
         append_text = "\n\n".join(p for p in parts if p)
 
-        # Пишем в файл и передаём --append-system-prompt-file: inline-аргументом
-        # переполняется Windows cmdline (CreateProcess лимит 32K → WinError 206).
-        append_path = os.path.join(shadow.memory.memory_dir, "claude_code_append.md")
-        extra_args = {}
-        if append_text:
-            with open(append_path, "w", encoding="utf-8") as f:
-                f.write(append_text)
-            extra_args["append-system-prompt-file"] = append_path
+        # 4. ClaudeSDKClient переиспользуется пока append_text тот же. Если изменился —
+        #    закрываем старый процесс и поднимаем новый (claude читает --append-system-
+        #    prompt-file только при старте процесса, апдейтить файл бесполезно).
+        if self._client and self._client_append != append_text:
+            log.info("[claude_code] system prompt changed, recreating client")
+            # SDK transport.close на disconnect утекает CancelledError в нашу таску.
+            # Гасим локально чтоб не прервать обработку текущего юзерского сообщения.
+            with suppress(Exception, asyncio.CancelledError):
+                await self._client.disconnect()
+            self._client = None
+            self._client_append = None
 
-        def _on_stderr(line: str):
-            line = line.rstrip()
-            if line:
-                log.warning("[claude_code:stderr] %s", line)
+        if self._client is None:
+            append_path = os.path.join(shadow.memory.memory_dir, "claude_code_append.md")
+            extra_args = {}
+            if append_text:
+                with open(append_path, "w", encoding="utf-8") as f:
+                    f.write(append_text)
+                extra_args["append-system-prompt-file"] = append_path
 
-        # 3. options с фиксированным session_id (наш UUID, переживает рестарты)
-        options = ClaudeAgentOptions(
-            permission_mode="bypassPermissions",
-            cwd=cwd,
-            cli_path=self._cli_path,
-            model=self._model,
-            include_partial_messages=True,
-            setting_sources=["user"],
-            session_id=session_id,
-            system_prompt={"type": "preset", "preset": "claude_code"},
-            extra_args=extra_args,
-            mcp_servers={"slon": mcp_server} if mcp_server else {},
-            stderr=_on_stderr,
-        )
+            def _on_stderr(line: str):
+                line = line.rstrip()
+                if line:
+                    log.warning("[claude_code:stderr] %s", line)
 
-        # 4. стримим query() — каждый user-message = свежий процесс claude с актуальным system_prompt
+            # --session-id создаёт новую сессию (ошибка если уже есть),
+            # --resume подключается к существующей. Первый запуск → session-id,
+            # все последующие — resume.
+            options_kwargs = dict(
+                permission_mode="bypassPermissions",
+                cwd=cwd,
+                cli_path=self._cli_path,
+                model=self._model,
+                include_partial_messages=True,
+                setting_sources=["user"],
+                system_prompt={"type": "preset", "preset": "claude_code"},
+                extra_args=extra_args,
+                mcp_servers={"slon": mcp_server} if mcp_server else {},
+                stderr=_on_stderr,
+            )
+            async def _connect(use_resume: bool):
+                opts = dict(options_kwargs)
+                opts["resume" if use_resume else "session_id"] = session_id
+                log.info(
+                    "[claude_code] %s claude (session=%s)",
+                    "resuming" if use_resume else "spawning fresh", session_id,
+                )
+                self._client = ClaudeSDKClient(options=ClaudeAgentOptions(**opts))
+                await self._client.connect()
+
+            try:
+                await _connect(use_resume=bool(state.get("created")))
+            except Exception:
+                # Резервный путь: state не совпал с реальностью claude (потеря/расход
+                # state-файла). Переключаемся на противоположный режим и пробуем ещё раз.
+                self._client = None
+                await _connect(use_resume=not state.get("created"))
+
+            self._client_append = append_text
+            self._save_state({"session_id": session_id, "created": True})
+        else:
+            log.info("[claude_code] reusing live claude")
+
+        log.info("[claude_code] query: %r", text[:80])
+        await self._client.query(text, session_id=session_id)
+
+        # 5. стримим ответ
         text_buf = ""
         text_stream_id = None
         thinking_buf = ""
@@ -145,7 +183,7 @@ class ClaudeCodeSkill(Skill):
         block_type = None
         assistant_parts: list[str] = []   # text + tool_use, для сохранения как assistant turn
 
-        async for message in query(prompt=text, options=options):
+        async for message in self._client.receive_response():
             if isinstance(message, StreamEvent):
                 event = message.event
                 etype = event.get("type", "")
@@ -288,12 +326,7 @@ class ClaudeCodeSkill(Skill):
                         break
                     await shadow.transport.send_processing(True)
                     try:
-                        # _send_query крутится в отдельной таске чтобы SDK-шный
-                        # cancel_scope (anyio task-group в transport.close) не утекал
-                        # в наш launch-цикл при aclose async-генератора query().
-                        await asyncio.create_task(
-                            self._send_query(shadow, text, cwd, mcp_server=mcp_server)
-                        )
+                        await self._send_query(shadow, text, cwd, mcp_server=mcp_server)
                     except Exception as e:
                         log.warning("[claude_code] query failed: %s", e, exc_info=True)
                         await shadow.transport.send_message(f"Ошибка: {e}")
@@ -305,6 +338,11 @@ class ClaudeCodeSkill(Skill):
                     p.get("text", "") for p in content_parts if isinstance(p, dict)
                 ).strip()
         finally:
+            if self._client:
+                with suppress(Exception, asyncio.CancelledError):
+                    await self._client.disconnect()
+                self._client = None
+                self._client_append = None
             coding_transport.cleanup()
 
         return {"status": "finished"}
