@@ -218,7 +218,10 @@ cl.msg = css`
   &.user, &.inject { background: var(--accent); color: #1e1e2e; margin-left: auto; }
   &.assistant { background: var(--surface2); }
   &.thinking { background: var(--surface2); font-size: 12px; color: var(--text-dim); font-style: italic; }
-  &.thinking.collapsed { max-height: 34px; overflow: hidden; cursor: pointer; opacity: 0.5; }
+  &.thinking.collapsed {
+    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+    overflow: hidden; cursor: pointer; opacity: 0.5;
+  }
   &.thinking.collapsed:hover { opacity: 0.7; }
   & h1, & h2, & h3, & h4, & h5, & h6 { font-size: 14px; font-weight: 600; margin: 4px 0; }
   & a { color: inherit; text-decoration: underline; }
