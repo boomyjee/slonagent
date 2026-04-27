@@ -109,10 +109,19 @@ export class Editor extends Component {
         // tab switch, so without this an in-place reload loses position.
         this._onUnload = () => this._saveViewState(this._lastActive);
         window.addEventListener('beforeunload', this._onUnload);
+        // Drop focus whenever a tap lands outside the editor DOM —
+        // mobile only dismisses the soft keyboard when the hidden
+        // <textarea> actually loses focus, and Monaco doesn't do that
+        // by itself when you tap, say, the same tab again.
+        this._onPointerDown = (e) => {
+            if (this._el && !this._el.contains(e.target)) this.blur();
+        };
+        document.addEventListener('pointerdown', this._onPointerDown);
     }
 
     componentWillUnmount() {
         if (this._onUnload) window.removeEventListener('beforeunload', this._onUnload);
+        if (this._onPointerDown) document.removeEventListener('pointerdown', this._onPointerDown);
     }
 
     componentDidUpdate(prevProps) {
@@ -135,6 +144,12 @@ export class Editor extends Component {
 
     _loadViewState(path) {
         return persist.get(this._viewStateKey(path), null);
+    }
+
+    blur() {
+        // Drops focus from Monaco's hidden <textarea>, which is the only
+        // way to dismiss the mobile soft keyboard once the editor was tapped.
+        this._editor?.getDomNode()?.querySelector('.inputarea')?.blur();
     }
 
     _handleActive() {
