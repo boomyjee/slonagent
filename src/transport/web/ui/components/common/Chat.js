@@ -2,6 +2,30 @@ import { html, Component, css, keyframes } from '../../lib.js';
 
 const cl = {};
 
+// Minimal markdown → HTML, mirrors src/transport/telegram.py:_markdown_to_html.
+// Code spans/blocks are stashed first so their contents don't get re-formatted.
+function mdToHtml(text) {
+    if (!text) return '';
+    const blocks = [];
+    text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, c) => `\x00CB${blocks.push(c) - 1}\x00`);
+    const inlines = [];
+    text = text.replace(/`([^`]+)`/g, (_, c) => `\x00IC${inlines.push(c) - 1}\x00`);
+    text = text.replace(/^>\s*(.*)$/gm, '$1');
+    text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    text = text.replace(/^(#{1,6})\s+(.+)$/gm, (_, h, t) => `<h${h.length}>${t}</h${h.length}>`);
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    text = text.replace(/__(.+?)__/g, '<b>$1</b>');
+    text = text.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<i>$1</i>');
+    text = text.replace(/(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])/g, '<i>$1</i>');
+    text = text.replace(/~~(.+?)~~/g, '<s>$1</s>');
+    text = text.replace(/^[-*]\s+/gm, '• ');
+    const esc = c => c.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    inlines.forEach((c, i) => { text = text.replace(`\x00IC${i}\x00`, `<code>${esc(c)}</code>`); });
+    blocks.forEach((c, i) => { text = text.replace(`\x00CB${i}\x00`, `<pre><code>${esc(c)}</code></pre>`); });
+    return text;
+}
+
 export class Chat extends Component {
     constructor(props) {
         super(props);
@@ -131,7 +155,8 @@ export class Chat extends Component {
                 <div class=${cl.messages} ref=${el => this._scroll = el} onScroll=${this._onScroll}>
                     ${messages.map((m, i) => {
                         if (m.kind === 'msg') return html`
-                            <div class="${cl.msg} ${m.role}">${m.text}</div>
+                            <div class="${cl.msg} ${m.role}"
+                                 dangerouslySetInnerHTML=${{__html: mdToHtml(m.text)}}></div>
                         `;
                         if (m.kind === 'thinking') {
                             const isCollapsed = !(expanded[i] ?? false) && m.final;
@@ -139,7 +164,7 @@ export class Chat extends Component {
                                 <div
                                     class="${cl.msg} thinking${isCollapsed ? ' collapsed' : ''}"
                                     onClick=${() => this.setState(({ expanded: e }) => ({ expanded: { ...e, [i]: isCollapsed } }))}
-                                >${m.text.trimEnd()}</div>
+                                    dangerouslySetInnerHTML=${{__html: mdToHtml((m.text || '').trimEnd())}}></div>
                             `;
                         }
                         if (m.kind === 'tool') {
@@ -195,6 +220,13 @@ cl.msg = css`
   &.thinking { background: var(--surface2); font-size: 12px; color: var(--text-dim); font-style: italic; }
   &.thinking.collapsed { max-height: 34px; overflow: hidden; cursor: pointer; opacity: 0.5; }
   &.thinking.collapsed:hover { opacity: 0.7; }
+  & h1, & h2, & h3, & h4, & h5, & h6 { font-size: 14px; font-weight: 600; margin: 4px 0; }
+  & a { color: inherit; text-decoration: underline; }
+  & code { background: rgba(0,0,0,0.25); padding: 1px 4px; border-radius: 3px;
+           font-family: monospace; font-size: 12px; }
+  & pre { background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 4px;
+          margin: 4px 0; overflow-x: auto; white-space: pre; }
+  & pre code { background: transparent; padding: 0; }
 `;
 cl.tool = css`
   margin-bottom: 5px; border: 1px solid var(--border); border-radius: 3px; font-size: 12px;
