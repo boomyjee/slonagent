@@ -1,5 +1,5 @@
 import { html, Component, css } from '../lib.js';
-import { api } from './api.js';
+import { api, currentRoot } from './api.js';
 
 const cl = {};
 const LANG = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'typescript',json:'json',md:'markdown',html:'html',css:'css',yaml:'yaml',yml:'yaml',sh:'shell',bash:'shell',rs:'rust',go:'go',java:'java',rb:'ruby',c:'c',cpp:'cpp',h:'c',hpp:'cpp',toml:'ini',cfg:'ini',txt:'plaintext'};
@@ -280,7 +280,10 @@ export class Editor extends Component {
     render({ active }, { mediaPath }) {
         const kind = mediaPath ? mediaKind(mediaPath) : null;
         const showMonaco = !!active && !mediaPath;
-        const src = mediaPath ? `api/file/raw?path=${encodeURIComponent(mediaPath)}` : '';
+        const root = currentRoot();
+        const src = mediaPath
+            ? `api/file/raw?path=${encodeURIComponent(mediaPath)}${root ? `&root=${encodeURIComponent(root)}` : ''}`
+            : '';
         return html`<div class=${cl.editor}>
             ${!active && html`<div class=${cl.welcome}>Select a file to view</div>`}
             <div class=${cl.monacoWrap} style=${{display: showMonaco ? 'block' : 'none'}}

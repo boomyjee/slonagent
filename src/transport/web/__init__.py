@@ -399,7 +399,7 @@ class WebTransport(BaseTransport):
         await self._transport_event("on_tool_result", name=name, result=result)
 
     async def send_processing(self, active: bool):
-        await self._transport_event("send_processing", replay=False, active=active)
+        await self._transport_event("send_processing", active=active)
 
     async def inject_message(self, text: str):
         await self._transport_event("inject_message", text=text)

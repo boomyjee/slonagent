@@ -271,8 +271,10 @@ class TelegramTransport(BaseTransport):
 
     def set_agent(self, agent):
         super().set_agent(agent)
-
         async def update_commands():
+            # Skills get added by Agent.loop() (add_transport_skills) shortly
+            # after set_agent runs; sleep so /dashboard etc. land in the list.
+            await asyncio.sleep(1)
             all_commands = {
                 cmd: desc
                 for skill in agent.skills
