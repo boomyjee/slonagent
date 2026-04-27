@@ -1,5 +1,5 @@
 import { html, Component, css, persist } from '../lib.js';
-import { api } from './api.js';
+import { api, currentRoot } from './api.js';
 
 const cl = {};
 
@@ -136,6 +136,7 @@ export class FileTree extends Component {
         }
         if (!entry.is_dir) {
             items.push({ label: 'Git blame', action: () => this.props.onOpenGitBlame?.(entry.path, entry.name) });
+            items.push({ label: 'Download', action: () => this._download(entry) });
         }
         if (isRoot && this.props.onChangeRoot) {
             items.push({ label: 'Change Root…', action: () => this.props.onChangeRoot() });
@@ -169,6 +170,17 @@ export class FileTree extends Component {
         });
         if (data.error) { alert(data.error); return; }
         await tree.refresh([entry.path]);
+    }
+
+    _download(entry) {
+        const root = currentRoot();
+        const url = `api/file/raw?path=${encodeURIComponent(entry.path)}${root ? `&root=${encodeURIComponent(root)}` : ''}`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = entry.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
     }
 
     async _delete(entry) {
