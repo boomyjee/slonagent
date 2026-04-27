@@ -88,7 +88,8 @@ class WebTransport(BaseTransport):
         self._prefix = prefix
         self.verbose = verbose
         self._clients: set[WebSocket] = set()
-        self._replay_buffer: deque = deque(maxlen=500)
+        self._replay_transport: deque = deque(maxlen=100)
+        self._replay_other: deque = deque(maxlen=400)
         self._routes: list = []
         self._mount_id: str | None = None
         # Monotonic id stamped on every outgoing event. Clients track the
@@ -364,7 +365,9 @@ class WebTransport(BaseTransport):
     async def ws_handle_message(self, msg: dict, ws=None):
         if msg.get("type") == "replay" and ws is not None:
             last_seen = msg.get("last_seen_id", -1)
-            for event in list(self._replay_buffer):
+            import heapq
+            stream = heapq.merge(self._replay_transport, self._replay_other,key=lambda e: e.get("id", 0))
+            for event in stream:
                 if event.get("id", 0) > last_seen:
                     await ws.send_text(json.dumps(event, ensure_ascii=False))
             return
@@ -382,7 +385,9 @@ class WebTransport(BaseTransport):
     async def send(self, event: dict, replay=False):
         self._message_id_counter += 1
         event = {**event, "id": self._message_id_counter}
-        if replay: self._replay_buffer.append(event)
+        if replay:
+            buf = self._replay_transport if event.get("type") == "transport" else self._replay_other
+            buf.append(event)
         if not self._clients: return
         data = json.dumps(event, ensure_ascii=False)
         dead = set()
