@@ -127,6 +127,9 @@ export class FileTree extends Component {
         if (entry.is_dir && entry.has_git) {
             items.push({ label: 'Open git commit', action: () => this.props.onOpenGit?.(entry.path, entry.name) });
         }
+        if (!entry.is_dir) {
+            items.push({ label: 'Git blame', action: () => this.props.onOpenGitBlame?.(entry.path, entry.name) });
+        }
         if (!items.length) return;
         e.preventDefault();
         this.setState({ menu: { x: e.clientX, y: e.clientY, items } });

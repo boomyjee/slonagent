@@ -79,13 +79,14 @@ class App extends Component {
         }
     }
 
-    _openFile = (path, name) => {
+    _openFile = (path, name, line) => {
         this.setState(({ tabs }) => {
             const next = tabs.some(t => t.id === path)
                 ? tabs
                 : [...tabs, { id: path, label: name, closable: true }];
             return { tabs: next, activeTab: path };
         });
+        if (line) this._editor?.revealLine(path, line);
     };
 
     _openGit = (path, name) => {
@@ -94,6 +95,28 @@ class App extends Component {
             const next = tabs.some(t => t.id === id)
                 ? tabs
                 : [...tabs, { id, label: `⎇ ${name}`, closable: true }];
+            return { tabs: next, activeTab: id };
+        });
+    };
+
+    _openGitShow = (repo, ref, file, line) => {
+        const id = `git-show:${encodeURIComponent(repo)}:${encodeURIComponent(ref)}:${encodeURIComponent(file)}`;
+        const name = file.split('/').pop();
+        this.setState(({ tabs }) => {
+            const next = tabs.some(t => t.id === id)
+                ? tabs
+                : [...tabs, { id, label: `${name} @ ${ref.slice(0,7)}`, closable: true }];
+            return { tabs: next, activeTab: id };
+        });
+        if (line) this._editor?.revealLine(id, line);
+    };
+
+    _openGitBlame = (path, name) => {
+        const id = `git-blame:${path}`;
+        this.setState(({ tabs }) => {
+            const next = tabs.some(t => t.id === id)
+                ? tabs
+                : [...tabs, { id, label: `blame: ${name}`, closable: true }];
             return { tabs: next, activeTab: id };
         });
     };
@@ -124,7 +147,10 @@ class App extends Component {
                 <div class=${cl.sidebar}>
                     <div class=${cl.sidebarHdr}>Explorer</div>
                     <div class=${cl.tree}>
-                        <${FileTree} rootPath=${rootPath} onOpen=${this._openFile} onOpenGit=${this._openGit} />
+                        <${FileTree} rootPath=${rootPath}
+                                     onOpen=${this._openFile}
+                                     onOpenGit=${this._openGit}
+                                     onOpenGitBlame=${this._openGitBlame} />
                     </div>
                 </div>
                 <${Resizer} side="left" persistKey="sidebar" />
@@ -139,7 +165,9 @@ class App extends Component {
                         ${tabs.filter(t => t.id.startsWith('git:')).map(t => html`
                             <div key=${t.id} class=${cl.pane}
                                  style=${{display: activeTab === t.id ? 'flex' : 'none'}}>
-                                <${Git} path=${t.id.slice(4)} refreshKey=${gitRefreshKey} />
+                                <${Git} path=${t.id.slice(4)} refreshKey=${gitRefreshKey}
+                                        onOpenFile=${this._openFile}
+                                        onOpenGitShow=${this._openGitShow} />
                             </div>`)}
                         <div class=${cl.pane} style=${{display: activeFile ? 'flex' : 'none'}}>
                             <${Editor} ref=${c => this._editor = c}

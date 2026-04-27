@@ -1,148 +1,431 @@
-import { html, Component, css } from '../lib.js';
+import { html, Component, Fragment, css, persist } from '../lib.js';
 
 const cl = {};
 const BASE = new URL('./', location.href).href;
 const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
+const post = (path, body) => api(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+});
+
+const HISTORY_PAGE = 15;
+
+// ─── component ────────────────────────────────────────────────────────────
 
 export class Git extends Component {
     constructor(props) {
         super(props);
+        const saved = persist.get(this._persistKey(props.path), {});
         this.state = {
-            branch: '',
-            files: [],
-            message: '',
-            expanded: {},   // path -> diff text or null while loading
+            view: saved.view || 'working_tree',
+            selectedCommit: saved.selectedCommit || '',
+            historyDepth: saved.historyDepth || 1,
+            message: saved.message || '',
+            branch: '', branches: [],
+            files: [], statusHash: '',
+            commits: [], afterCommits: [],
+            historyMore: false,
+            expanded: {},
             error: '',
+            menu: null,    // { name, x, y, items }
         };
     }
 
+    _persistKey(path) { return `git:${path || this.props.path}`; }
+    _PERSISTED = ['view', 'selectedCommit', 'historyDepth', 'message'];
+
     componentDidMount() {
+        document.addEventListener('click', this._closeMenu);
         this._refresh();
     }
 
-    componentDidUpdate(prev) {
-        // Auto-refresh when watcher signals files_changed.
-        if (prev.refreshKey !== this.props.refreshKey) this._refresh();
+    componentDidUpdate(prevProps, prevState) {
+        if (prevProps.refreshKey !== this.props.refreshKey) this._refresh();
+        if (this._PERSISTED.some(k => prevState[k] !== this.state[k])) {
+            const data = {};
+            for (const k of this._PERSISTED) data[k] = this.state[k];
+            persist.set(this._persistKey(), data);
+        }
+    }
+
+    componentWillUnmount() {
+        document.removeEventListener('click', this._closeMenu);
+    }
+
+    // ─── data loading ──────────────────────────────────────────────
+
+    _q(extra) {
+        const base = `path=${encodeURIComponent(this.props.path)}`;
+        return extra ? `${base}&${extra}` : base;
     }
 
     async _refresh() {
-        const data = await api(`api/git/status?path=${encodeURIComponent(this.props.path)}`);
-        if (data.error) { this.setState({ error: data.error }); return; }
-        this.setState({ branch: data.branch, files: data.files, error: '' });
-    }
-
-    async _toggleStaged(file, staged) {
-        await api('api/git/stage', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ path: this.props.path, file, staged }),
-        });
-        this._refresh();
-    }
-
-    async _toggleDiff(file, staged) {
-        const { expanded } = this.state;
-        if (file in expanded) {
-            const next = { ...expanded };
-            delete next[file];
-            this.setState({ expanded: next });
-            return;
+        const br = await api(`api/git/branches?${this._q()}`);
+        if (br.error) { this.setState({ error: br.error }); return; }
+        this.setState({ branch: br.current, branches: br.all || [], error: '' });
+        if (this.state.view === 'working_tree') {
+            await this._loadStatus();
+        } else {
+            await this._loadHistory(br.current);
         }
-        this.setState({ expanded: { ...expanded, [file]: null } });
-        const q = `path=${encodeURIComponent(this.props.path)}&file=${encodeURIComponent(file)}&staged=${staged ? 1 : 0}`;
-        const data = await api(`api/git/diff?${q}`);
-        this.setState(({ expanded: e }) => ({ expanded: { ...e, [file]: data.diff || '(no diff)' } }));
     }
 
+    async _loadStatus() {
+        const s = await api(`api/git/status?${this._q()}`);
+        if (s.error) { this.setState({ error: s.error }); return; }
+        this.setState({
+            files: s.files, statusHash: s.status_hash,
+            expanded: {}, error: '',
+        });
+    }
+
+    async _loadHistory(branch, selectedSha) {
+        const data = await api(`api/git/log?${this._q(`branch=${encodeURIComponent(branch)}&limit=${HISTORY_PAGE}`)}`);
+        if (data.error) { this.setState({ error: data.error }); return; }
+        const commits = data.commits || [];
+        const selected = selectedSha && commits.find(c => c.sha_full === selectedSha)
+            ? selectedSha
+            : (commits[0]?.sha_full || '');
+        const skip = commits.findIndex(c => c.sha_full === selected) + 1;
+        const after = await api(`api/git/log?${this._q(`branch=${encodeURIComponent(branch)}&limit=${HISTORY_PAGE}&skip=${skip}`)}`);
+        const more = await api(`api/git/log?${this._q(`branch=${encodeURIComponent(branch)}&limit=1&skip=${commits.length}`)}`);
+        const files = selected
+            ? (await api(`api/git/history?${this._q(`commit=${encodeURIComponent(selected)}&depth=${this.state.historyDepth}`)}`)).files || []
+            : [];
+        this.setState({
+            commits, afterCommits: after.commits || [],
+            historyMore: !!(more.commits || []).length,
+            selectedCommit: selected,
+            files, expanded: {}, error: '',
+        });
+    }
+
+    // ─── menu helpers ──────────────────────────────────────────────
+
+    _openMenu(name, e) {
+        e.preventDefault(); e.stopPropagation();
+        const r = e.currentTarget.getBoundingClientRect();
+        this.setState({ menu: { name, x: r.left, y: r.bottom + 2 } });
+    }
+    _closeMenu = () => { if (this.state.menu) this.setState({ menu: null }); };
+
+    // ─── actions ──────────────────────────────────────────────────
+
+    async _toggleStaged(f) {
+        await post('api/git/stage', { path: this.props.path, file: f.file, staged: !f.staged });
+        this._loadStatus();
+    }
     async _stageAll() {
-        const unstaged = this.state.files.filter(f => !f.staged);
-        await Promise.all(unstaged.map(f => api('api/git/stage', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ path: this.props.path, file: f.file, staged: true }),
-        })));
-        this._refresh();
+        await Promise.all(this.state.files.filter(f => !f.staged).map(f =>
+            post('api/git/stage', { path: this.props.path, file: f.file, staged: true })
+        ));
+        this._loadStatus();
     }
-
+    async _checkout(f) {
+        if (!confirm(`Discard changes to ${f.file}?`)) return;
+        await post('api/git/checkout', { path: this.props.path, file: f.file, old_file: f.old_file });
+        this._loadStatus();
+    }
     async _commit() {
         const message = this.state.message.trim();
         if (!message) return;
-        const data = await api('api/git/commit', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ path: this.props.path, message }),
+        const data = await post('api/git/commit', {
+            path: this.props.path, message, status_hash: this.state.statusHash,
         });
+        if (data.status_hash) this.setState({ statusHash: data.status_hash });
         if (data.error || data.status !== 'ok') {
             this.setState({ error: data.error || data.output || 'commit failed' });
+            this._loadStatus();
             return;
         }
         this.setState({ message: '', error: '' });
+        this._loadStatus();
+    }
+    async _amend() {
+        const message = this.state.message.trim();
+        if (!confirm('Amend last commit?')) return;
+        const data = await post('api/git/amend', {
+            path: this.props.path, message, status_hash: this.state.statusHash,
+        });
+        if (data.status_hash) this.setState({ statusHash: data.status_hash });
+        if (data.error || data.status !== 'ok') {
+            this.setState({ error: data.error || data.output || 'amend failed' });
+            this._loadStatus();
+            return;
+        }
+        this.setState({ message: '', error: '' });
+        this._loadStatus();
+    }
+    async _switchBranch(name) {
+        const data = await post('api/git/switch_branch', { path: this.props.path, branch: name });
+        if (data.error || data.status !== 'ok') {
+            this.setState({ error: data.error || data.output || 'switch failed' });
+            return;
+        }
         this._refresh();
     }
+    async _selectCommit(sha) {
+        this.setState({ selectedCommit: sha });
+        await this._loadHistory(this.state.branch, sha);
+    }
+    async _selectDepth(n) {
+        this.setState({ historyDepth: n }, () => this._loadHistory(this.state.branch, this.state.selectedCommit));
+    }
+    async _switchView(v) {
+        this.setState({ view: v }, () => this._refresh());
+    }
 
-    render(_, { branch, files, message, expanded, error }) {
+    // ─── diff ─────────────────────────────────────────────────────
+
+    async _toggleDiff(f) {
+        const { expanded, view, selectedCommit, historyDepth } = this.state;
+        if (f.file in expanded) {
+            const next = { ...expanded };
+            delete next[f.file];
+            this.setState({ expanded: next });
+            return;
+        }
+        this.setState({ expanded: { ...expanded, [f.file]: { loading: true } } });
+        let data;
+        if (view === 'working_tree') {
+            const q = this._q(`file=${encodeURIComponent(f.file)}&staged=${f.staged && !f.partial ? 1 : 0}`);
+            data = await api(`api/git/diff?${q}`);
+        } else {
+            const sha1 = `${selectedCommit}~${historyDepth}`;
+            const sha2 = selectedCommit;
+            const q = this._q(`file=${encodeURIComponent(f.file)}&sha1=${encodeURIComponent(sha1)}&sha2=${encodeURIComponent(sha2)}`);
+            data = await api(`api/git/diff_between?${q}`);
+        }
+        const parts = view === 'working_tree'
+            ? ['HEAD', f.staged && !f.partial ? 'index' : 'WT']
+            : [`${selectedCommit}~${historyDepth}`, selectedCommit];
+        this.setState(({ expanded: e }) => ({
+            expanded: { ...e, [f.file]: { text: data.diff || '(no diff)', parts } },
+        }));
+    }
+
+    _onLineClick = (file, line, side) => {
+        const repo = this.props.path;
+        if (side === 'WT') {
+            const path = repo.replace(/\/$/, '') + '/' + file;
+            this.props.onOpenFile?.(path, file.split('/').pop(), line);
+        } else {
+            // 'index' is the staged side; reading staged content via show requires
+            // ':<file>' (empty ref). For viewing, fall back to HEAD — index isn't a
+            // first-class ref the show endpoint accepts cleanly.
+            const ref = side === 'index' ? 'HEAD' : side;
+            this.props.onOpenGitShow?.(repo, ref, file, line);
+        }
+    };
+
+    // ─── render ───────────────────────────────────────────────────
+
+    render() {
+        const { view, branch, branches, files, commits, afterCommits, historyMore,
+                selectedCommit, historyDepth, message, expanded, error, menu } = this.state;
         const stagedCount = files.filter(f => f.staged).length;
+        const isHistory = view === 'history';
+
+        const menuItems = () => {
+            const m = this.state.menu;
+            if (!m) return [];
+            if (m.name === 'branch') {
+                return branches.map(b => ({
+                    label: b, selected: b === branch, action: () => this._switchBranch(b),
+                }));
+            }
+            if (m.name === 'commit') {
+                return [
+                    ...commits.map(c => ({
+                        label: html`<b>${c.sha_short}</b> ${c.date.slice(0, 10)} — ${truncate(c.message, 80)}`,
+                        selected: c.sha_full === selectedCommit,
+                        action: () => this._selectCommit(c.sha_full),
+                    })),
+                    ...(historyMore ? [{ label: html`<b>Show more</b>`, keepOpen: true, action: () => this._showMoreCommits() }] : []),
+                ];
+            }
+            if (m.name === 'depth') {
+                return afterCommits.map((c, i) => ({
+                    label: html`<b>~${i + 1}</b> ${c.sha_short} — ${truncate(c.message, 80)}`,
+                    selected: (i + 1) === historyDepth,
+                    action: () => this._selectDepth(i + 1),
+                }));
+            }
+            if (m.name === 'commitMore') {
+                return [{ label: 'Amend', action: () => this._amend() }];
+            }
+            return [];
+        };
+
         return html`<div class=${cl.wrap}>
-            <div class=${cl.bar}>
-                <span class=${cl.branch}>⎇ ${branch || '(detached)'}</span>
-                <button class=${cl.btn} onClick=${() => this._stageAll()}
-                        disabled=${!files.some(f => !f.staged)}>Stage all</button>
-                <button class=${cl.btn} onClick=${() => this._refresh()}>↻</button>
+            <div class=${cl.toolbar}>
+                <button class=${cl.btn} onClick=${() => this._refresh()}>Refresh</button>
+                <${ComboButton} label=${isHistory ? 'history' : 'working tree'}
+                                onClick=${() => this._switchView(isHistory ? 'working_tree' : 'history')} />
+                <${ComboButton} label=${branch || '(detached)'} onClick=${e => this._openMenu('branch', e)} />
+                ${isHistory ? html`
+                    <${ComboButton} label=${selectedCommit ? selectedCommit.slice(0,7) : '(empty)'}
+                                    onClick=${e => this._openMenu('commit', e)} />
+                    <${ComboButton} label=${'~' + historyDepth} onClick=${e => this._openMenu('depth', e)} />
+                ` : html`
+                    <button class=${cl.btn} onClick=${() => this._stageAll()}
+                            disabled=${!files.some(f => !f.staged)}>Stage All</button>
+                    <input class=${cl.msg} type="text" placeholder="commit message"
+                           value=${message}
+                           onInput=${e => this.setState({ message: e.target.value })}
+                           onKeyDown=${e => { if (e.key === 'Enter') this._commit(); }} />
+                    <div class=${cl.commitGroup}>
+                        <button class=${cl.btn + ' ' + cl.commitMain} onClick=${() => this._commit()}
+                                disabled=${stagedCount === 0 || !message.trim()}>Commit</button>
+                        <button class=${cl.btn + ' ' + cl.commitArrow}
+                                onClick=${e => this._openMenu('commitMore', e)}>▾</button>
+                    </div>
+                `}
             </div>
-            <div class=${cl.commitRow}>
-                <input class=${cl.msg} type="text" placeholder="commit message"
-                       value=${message}
-                       onInput=${e => this.setState({ message: e.target.value })}
-                       onKeyDown=${e => { if (e.key === 'Enter') this._commit(); }} />
-                <button class=${cl.btn} onClick=${() => this._commit()}
-                        disabled=${stagedCount === 0 || !message.trim()}>Commit</button>
-            </div>
+
             ${error && html`<div class=${cl.error}>${error}</div>`}
-            <div class=${cl.list}>
-                ${!files.length && html`<div class=${cl.empty}>working tree clean</div>`}
-                ${files.map(f => html`
-                    <div key=${f.file}>
-                        <div class=${cl.row}>
-                            <input type="checkbox" checked=${f.staged}
-                                   class=${f.partial ? cl.partial : ''}
-                                   onChange=${e => this._toggleStaged(f.file, e.target.checked)} />
-                            <span class=${cl.state}>${f.state}</span>
-                            <span class=${cl.file} onClick=${() => this._toggleDiff(f.file, f.staged && !f.partial)}>
-                                ${f.old_file ? `${f.old_file} → ${f.file}` : f.file}
-                            </span>
-                        </div>
-                        ${f.file in expanded && html`
-                            <pre class=${cl.diff}>${expanded[f.file] === null ? 'loading…' : renderDiff(expanded[f.file])}</pre>`}
-                    </div>`)}
+
+            <div class=${cl.scroll}>
+                <table class=${cl.table}>
+                    <thead><tr>
+                        ${!isHistory && html`<th class="staged">Staged</th>`}
+                        <th class="state">State</th>
+                        <th class="filename">Filename</th>
+                        ${!isHistory && html`<th class="checkout">Checkout</th>`}
+                        <th class="empty"></th>
+                    </tr></thead>
+                    <tbody>
+                        ${files.length === 0 && html`<tr><td colspan="5" class=${cl.emptyRow}>
+                            ${isHistory ? 'No changes in this commit' : 'Nothing to commit, working tree clean'}
+                        </td></tr>`}
+                        ${files.map(f => html`
+                            <${FileRow} key=${f.file} f=${f} isHistory=${isHistory}
+                                onToggleStaged=${() => this._toggleStaged(f)}
+                                onCheckout=${() => this._checkout(f)}
+                                onClickName=${() => this._toggleDiff(f)}
+                                expanded=${expanded[f.file]}
+                                onLineClick=${this._onLineClick} />
+                        `)}
+                    </tbody>
+                </table>
             </div>
+
+            ${menu && html`<${Menu} menu=${menu} items=${menuItems()} onClose=${this._closeMenu} />`}
         </div>`;
+    }
+
+    async _showMoreCommits() {
+        const { branch, commits } = this.state;
+        const more = await api(`api/git/log?${this._q(`branch=${encodeURIComponent(branch)}&limit=${HISTORY_PAGE}&skip=${commits.length}`)}`);
+        const next = [...commits, ...(more.commits || [])];
+        const probe = await api(`api/git/log?${this._q(`branch=${encodeURIComponent(branch)}&limit=1&skip=${next.length}`)}`);
+        this.setState({ commits: next, historyMore: !!(probe.commits || []).length });
     }
 }
 
-// Inline-color a unified diff by line prefix. Returns an array of vnodes.
-function renderDiff(text) {
-    return text.split('\n').map((line, i) => {
-        let cls = '';
-        if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff ') || line.startsWith('index ')) cls = 'meta';
-        else if (line.startsWith('@@')) cls = 'hunk';
-        else if (line.startsWith('+')) cls = 'add';
-        else if (line.startsWith('-')) cls = 'del';
-        return html`<div key=${i} class=${cls}>${line || ' '}</div>`;
-    });
+// ─── small helpers ────────────────────────────────────────────────────────
+
+function truncate(s, n) { return s.length > n ? s.slice(0, n) + '…' : s; }
+
+function ComboButton({ label, onClick }) {
+    return html`<button class=${cl.combo} onClick=${onClick}>${label} <span class="arr">▾</span></button>`;
 }
 
+function Menu({ menu, items, onClose }) {
+    return html`<div class=${cl.menu} style=${{ left: menu.x + 'px', top: menu.y + 'px' }}
+                     onClick=${e => e.stopPropagation()}>
+        ${items.map((it, i) => html`
+            <div key=${i} class="${cl.menuItem}${it.selected ? ' selected' : ''}"
+                 onClick=${e => { e.stopPropagation(); it.action(); if (!it.keepOpen) onClose(); }}>
+                ${it.label}
+            </div>`)}
+    </div>`;
+}
+
+// ─── file row + diff ──────────────────────────────────────────────────────
+
+function FileRow({ f, isHistory, onToggleStaged, onCheckout, onClickName, expanded, onLineClick }) {
+    const name = f.old_file ? html`<span class=${cl.rename}>${f.old_file}</span> → ${f.file}` : f.file;
+    return html`<${Fragment}>
+        <tr class=${cl.fileRow}>
+            ${!isHistory && html`<td class="staged">
+                <input type="checkbox" checked=${f.staged}
+                       class=${f.partial ? cl.partial : ''}
+                       onChange=${onToggleStaged} />
+            </td>`}
+            <td class="state">${f.state}</td>
+            <td class="filename" onClick=${onClickName}>${name}</td>
+            ${!isHistory && html`<td class="checkout">
+                <button class=${cl.xBtn} title="Discard changes" onClick=${onCheckout}>×</button>
+            </td>`}
+            <td class="empty"></td>
+        </tr>
+        ${expanded && html`<tr><td colspan="5" class=${cl.diffCell}>
+            ${expanded.loading
+                ? html`<div class=${cl.loading}>loading…</div>`
+                : html`<${Diff} text=${expanded.text} parts=${expanded.parts} file=${f.file} onLineClick=${onLineClick} />`}
+        </td></tr>`}
+    </${Fragment}>`;
+}
+
+// ─── unified-diff renderer with clickable lines ───────────────────────────
+
+function Diff({ text, parts, file, onLineClick }) {
+    if (!text || text === '(no diff)') return html`<div class=${cl.diffEmpty}>(no diff)</div>`;
+    const lines = text.split('\n');
+    const hunks = [];
+    let current = null;
+    let oldNum = 0, newNum = 0;
+
+    for (const line of lines) {
+        if (line.startsWith('diff ') || line.startsWith('index ') ||
+            line.startsWith('--- ') || line.startsWith('+++ ') || line === '') continue;
+        if (line.startsWith('@@')) {
+            const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (!m) continue;
+            oldNum = parseInt(m[1]);
+            newNum = parseInt(m[2]);
+            current = { header: line, rows: [] };
+            hunks.push(current);
+            continue;
+        }
+        if (!current) continue;
+        if (line.startsWith('\\')) continue;
+        if (line.startsWith('+')) {
+            current.rows.push({ kind: 'add', oldN: '', newN: newNum, text: line.slice(1) });
+            newNum++;
+        } else if (line.startsWith('-')) {
+            current.rows.push({ kind: 'del', oldN: oldNum, newN: '', text: line.slice(1) });
+            oldNum++;
+        } else {
+            current.rows.push({ kind: 'ctx', oldN: oldNum, newN: newNum, text: line.slice(1) });
+            oldNum++; newNum++;
+        }
+    }
+
+    return html`<div class=${cl.diff}>
+        ${hunks.map((h, i) => html`<div key=${i} class=${cl.hunk}>
+            <div class="hdr">${h.header}</div>
+            ${h.rows.map((r, j) => html`<div key=${j} class="row ${r.kind}"
+                onClick=${() => {
+                    if (r.kind === 'add' || r.kind === 'ctx') onLineClick?.(file, r.newN, parts[1]);
+                    else onLineClick?.(file, r.oldN, parts[0]);
+                }}>
+                <span class="numDel">${r.oldN}</span>
+                <span class="numAdd">${r.newN}</span>
+                <span class="content">${r.text || ' '}</span>
+            </div>`)}
+        </div>`)}
+    </div>`;
+}
+
+// ─── styles ───────────────────────────────────────────────────────────────
+
 cl.wrap = css`flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0;`;
-cl.bar = css`
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 10px; background: var(--surface);
-  border-bottom: 1px solid var(--border); flex-shrink: 0;
-`;
-cl.branch = css`font-size: 12px; color: var(--text); flex: 1;`;
-cl.commitRow = css`
-  display: flex; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--border);
-  background: var(--surface); flex-shrink: 0;
-`;
-cl.msg = css`
-  flex: 1; background: var(--bg); color: var(--text);
-  border: 1px solid var(--border); padding: 6px 8px; font-size: 12px; outline: none;
-  &:focus { border-color: var(--accent); }
+cl.toolbar = css`
+  display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+  background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
 `;
 cl.btn = css`
   background: var(--surface2); color: var(--text); border: 1px solid var(--border);
@@ -150,28 +433,83 @@ cl.btn = css`
   &:hover:not(:disabled) { background: var(--surface3); }
   &:disabled { opacity: 0.5; cursor: default; }
 `;
+cl.combo = css`
+  background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+  padding: 4px 8px; cursor: pointer; font-size: 12px; display: inline-flex; align-items: center; gap: 4px;
+  &:hover { background: var(--surface3); }
+  & .arr { color: var(--text-dim); font-size: 9px; }
+`;
+cl.msg = css`
+  flex: 1; min-width: 120px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); padding: 4px 8px; font-size: 12px; outline: none;
+  &:focus { border-color: var(--accent); }
+`;
 cl.error = css`
   padding: 6px 10px; background: var(--surface2); color: var(--red);
   font-size: 12px; white-space: pre-wrap; border-bottom: 1px solid var(--border);
 `;
-cl.list = css`flex: 1; overflow: auto;`;
-cl.empty = css`padding: 16px; color: var(--text-dim); font-size: 12px; font-style: italic;`;
-cl.row = css`
-  display: flex; align-items: center; gap: 8px; padding: 4px 10px;
-  font-size: 12px; border-bottom: 1px solid var(--border);
-  &:hover { background: var(--surface2); }
+cl.scroll = css`flex: 1; overflow: auto;`;
+cl.table = css`
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  & thead th {
+    text-align: left; font-weight: normal; color: var(--text-dim);
+    background: var(--surface); padding: 4px 8px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0;
+  }
+  & th.staged, & th.state, & th.checkout { width: 60px; }
+  & th.empty { width: 100%; }
+`;
+cl.fileRow = css`
+  & td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  & td.filename { cursor: pointer; user-select: none; }
+  & td.filename:hover { color: var(--accent); }
+  & td.state { font-family: monospace; color: var(--accent); user-select: none; }
+  & input[type="checkbox"] {
+    accent-color: var(--accent);
+    color-scheme: dark;
+    cursor: pointer;
+  }
 `;
 cl.partial = css`opacity: 0.5;`;
-cl.state = css`
-  font-family: monospace; font-size: 11px; color: var(--accent);
-  width: 28px; flex-shrink: 0;
+cl.commitGroup = css`display: inline-flex; align-items: stretch;`;
+cl.commitMain = css`border-right: none;`;
+cl.commitArrow = css`padding: 4px 6px; border-left: none;`;
+cl.rename = css`color: var(--text-dim);`;
+cl.xBtn = css`
+  background: transparent; border: none; color: var(--text-dim); cursor: pointer;
+  font-size: 14px; padding: 0 4px;
+  &:hover { color: var(--red); }
 `;
-cl.file = css`flex: 1; cursor: pointer; color: var(--text); &:hover { text-decoration: underline; }`;
-cl.diff = css`
-  margin: 0; padding: 8px 12px; background: var(--bg); font-size: 11px; line-height: 1.4;
-  white-space: pre; overflow-x: auto; border-bottom: 1px solid var(--border);
-  & .meta { color: var(--text-dim); }
-  & .hunk { color: var(--accent); }
-  & .add { color: var(--green); }
-  & .del { color: var(--red); }
+cl.emptyRow = css`text-align: center; color: var(--text-dim); padding: 16px; font-style: italic;`;
+cl.diffCell = css`padding: 0 !important; background: var(--bg);`;
+cl.loading = css`padding: 8px 12px; color: var(--text-dim); font-size: 12px;`;
+cl.diffEmpty = css`padding: 8px 12px; color: var(--text-dim); font-size: 12px; font-style: italic;`;
+cl.diff = css`font-family: monospace; font-size: 11px; line-height: 1.5;`;
+cl.hunk = css`
+  border-bottom: 1px solid var(--border);
+  & .hdr { background: var(--surface2); color: var(--accent); padding: 2px 8px; }
+  & .row { display: flex; cursor: pointer; }
+  & .row:hover { background: var(--surface2); }
+  & .numDel, & .numAdd {
+    width: 50px; padding: 0 6px; text-align: right; flex-shrink: 0;
+    color: var(--text-dim); user-select: none; border-right: 1px solid var(--border);
+  }
+  & .content { padding: 0 8px; white-space: pre; }
+  & .row.add .content { color: var(--green); }
+  & .row.add { background: rgba(166,227,161,0.05); }
+  & .row.del .content { color: var(--red); }
+  & .row.del { background: rgba(243,139,168,0.05); }
+`;
+cl.menu = css`
+  position: fixed; z-index: 200; min-width: 180px; max-width: 480px;
+  max-height: 400px; overflow-y: auto;
+  background: var(--surface2); border: 1px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4); padding: 4px 0; font-size: 12px;
+`;
+cl.menuItem = css`
+  padding: 4px 12px; color: var(--text); cursor: pointer; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+  &:hover { background: var(--accent); color: #1e1e2e; }
+  &.selected { background: var(--surface3); }
+  & b { font-weight: 700; color: inherit; }
 `;

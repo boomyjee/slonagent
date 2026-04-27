@@ -5,6 +5,25 @@ const LANG = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'
 const BASE = new URL('./', location.href).href;
 const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
 
+// Virtual paths used to view files at git refs / with blame decorations.
+// Format: <scheme>:<encoded-repo>:<encoded-ref>:<encoded-file>.
+export function makeGitPath(scheme, repo, ref, file) {
+    return `${scheme}:${encodeURIComponent(repo)}:${encodeURIComponent(ref)}:${encodeURIComponent(file)}`;
+}
+function parseGitPath(path) {
+    const colon = path.indexOf(':');
+    const parts = path.slice(colon + 1).split(':');
+    return {
+        scheme: path.slice(0, colon),
+        repo: decodeURIComponent(parts[0] || ''),
+        ref: decodeURIComponent(parts[1] || ''),
+        file: decodeURIComponent(parts[2] || ''),
+    };
+}
+function fileLang(file) {
+    return LANG[file.split('.').pop()] || 'plaintext';
+}
+
 let monacoPromise = null;
 function loadMonaco() {
     if (monacoPromise) return monacoPromise;
@@ -84,20 +103,58 @@ export class Editor extends Component {
         }
     }
 
+    _applyTabOptions(tab) {
+        this._editor.updateOptions({
+            readOnly: !!tab.readOnly,
+            lineNumbers: tab.lineNumbers || 'on',
+            lineNumbersMinChars: tab.lineNumbersMinChars || 5,
+        });
+    }
+
     async _activate(path) {
         const existing = this.models[path];
         if (existing) {
             this._editor.setModel(existing.model);
+            this._applyTabOptions(existing);
+            this._restoreCursor(path);
             return;
         }
-        const ext = path.split('.').pop();
-        const model = this.monaco.editor.createModel('Loading...', LANG[ext] || 'plaintext');
-        const tab = { model, saved: '', dirty: false, diskChanged: false };
+        const tab = await this._load(path);
         this.models[path] = tab;
-        this._editor.setModel(model);
+        this._editor.setModel(tab.model);
+        this._applyTabOptions(tab);
+        this._restoreCursor(path);
+    }
 
+    _restoreCursor(path) {
+        const pending = this._pendingReveal?.[path];
+        if (!pending) return;
+        delete this._pendingReveal[path];
+        const pos = { lineNumber: pending.line, column: 1 };
+        this._editor.focus();
+        this._editor.setPosition(pos);
+        this._editor.revealLineInCenter(pos.lineNumber);
+    }
+
+    revealLine(path, line) {
+        // Called externally (e.g. from a diff click) to position the cursor
+        // once `path` becomes active.
+        this._pendingReveal = this._pendingReveal || {};
+        this._pendingReveal[path] = { line };
+        if (this.props.active === path && this.models[path]) this._restoreCursor(path);
+    }
+
+    async _load(path) {
+        if (path.startsWith('git-show:')) return this._loadGitShow(path);
+        if (path.startsWith('git-blame:')) return this._loadGitBlame(path);
+        return this._loadFile(path);
+    }
+
+    async _loadFile(path) {
+        const model = this.monaco.editor.createModel('Loading...', fileLang(path));
+        const tab = { model, saved: '', dirty: false, diskChanged: false };
         const data = await api(`api/file?path=${encodeURIComponent(path)}`);
-        if (data.error) { model.setValue(`Error: ${data.error}`); return; }
+        if (data.error) { model.setValue(`Error: ${data.error}`); return tab; }
         tab.saved = data.content;
         model.setValue(data.content);
         model.onDidChangeContent(() => {
@@ -105,6 +162,48 @@ export class Editor extends Component {
             tab.dirty = model.getValue() !== tab.saved;
             if (tab.dirty !== was) this.props.onDirtyChange?.(path, tab.dirty, tab.diskChanged);
         });
+        return tab;
+    }
+
+    async _loadGitShow(path) {
+        const { repo, ref, file } = parseGitPath(path);
+        const q = `path=${encodeURIComponent(repo)}&ref=${encodeURIComponent(ref)}&file=${encodeURIComponent(file)}`;
+        const data = await api(`api/git/show?${q}`);
+        const content = data.error ? `Error: ${data.error}` : (data.content || '');
+        const model = this.monaco.editor.createModel(content, fileLang(file));
+        return { model, saved: content, dirty: false, diskChanged: false, readOnly: true };
+    }
+
+    async _loadGitBlame(path) {
+        // Two flavours:
+        //   git-blame:<workspace path>           — auto-detect repo, blame HEAD
+        //   git-blame:<repo>:<ref>:<file>        — explicit repo/ref (from Git panel)
+        const body = path.slice('git-blame:'.length);
+        const parts = body.split(':');
+        let url, displayFile;
+        if (parts.length >= 3) {
+            const { repo, ref, file } = parseGitPath(path);
+            displayFile = file;
+            url = `api/git/blame?path=${encodeURIComponent(repo)}&ref=${encodeURIComponent(ref)}&file=${encodeURIComponent(file)}`;
+        } else {
+            displayFile = body;
+            url = `api/git/blame_at?path=${encodeURIComponent(body)}`;
+        }
+        const data = await api(url);
+        if (data.error) {
+            const model = this.monaco.editor.createModel(`Error: ${data.error}`, 'plaintext');
+            return { model, saved: '', dirty: false, diskChanged: false, readOnly: true };
+        }
+        const lines = data.lines || [];
+        const content = lines.map(l => l.content).join('\n');
+        const labels = lines.map((l, i) => `${l.sha.slice(0,8)} ${l.author} ${l.date} ${i+1}`);
+        const maxLen = labels.reduce((m, s) => Math.max(m, s.length), 5);
+        const model = this.monaco.editor.createModel(content, fileLang(displayFile));
+        return {
+            model, saved: content, dirty: false, diskChanged: false, readOnly: true,
+            lineNumbers: (n) => labels[n-1] || String(n),
+            lineNumbersMinChars: maxLen,
+        };
     }
 
     closeFile(path) {
