@@ -213,7 +213,10 @@ class WebTransport(BaseTransport):
             log.info("WebTransport server: http://localhost:%d", WebTransport._port)
             await server.serve()
 
-        logging.getLogger("asyncssh").setLevel(logging.WARNING)
+        # asyncssh logs connection lifecycle (keepalive timeouts, server
+        # disconnect reasons) at INFO. Keeping it on so when the tunnel
+        # dies we can see why instead of guessing.
+        logging.getLogger("asyncssh").setLevel(logging.INFO)
         logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
         def _spawn_server():
@@ -237,8 +240,19 @@ class WebTransport(BaseTransport):
                     WebTransport._tunnel_url = url
                 except Exception as e:
                     log.warning("Tunnel failed: %s", e)
-                finally:
                     WebTransport._tunnel_ready.set()
+                    return
+                WebTransport._tunnel_ready.set()
+                # Watch for the SSH conn dying so we don't silently keep
+                # serving a dead URL. wait_closed returns when asyncssh tears
+                # the conn down (keepalive timeout, server disconnect, etc).
+                try:
+                    await WebTransport._tunnel_conn.wait_closed()
+                except Exception as e:
+                    log.warning("Tunnel watcher error: %s", e)
+                log.warning("Tunnel closed: was %s", WebTransport._tunnel_url)
+                WebTransport._tunnel_url = None
+                WebTransport._tunnel_conn = None
             WebTransport._loop.call_soon_threadsafe(asyncio.create_task, _tunnel())
 
     def register_route(self, method, path, handler):
