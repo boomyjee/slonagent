@@ -6,9 +6,10 @@
         "TRANSFORMERS_VERBOSITY": "error"
     },
     "keys": {
-        "gemini": "YOUR_GEMINI_API_KEY",
         "llm": "YOUR_LLM_API_KEY",
         "llm_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "gemini": "YOUR_GEMINI_API_KEY",
+        "gemini_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "brave": "YOUR_BRAVE_API_KEY",
         "openrouter": "YOUR_OPENROUTER_API_KEY"
     },
@@ -61,7 +62,7 @@
                     "provider": "openai",
                     "model": "gemini-embedding-001",
                     "api_key": "$keys.gemini",
-                    "base_url": "$keys.llm_url"
+                    "base_url": "$keys.gemini_url"
                 }
             },
             "personality": {
