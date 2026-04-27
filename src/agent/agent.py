@@ -54,7 +54,10 @@ class Agent:
             if "__class__" not in v: return {k: inst(val) for k, val in v.items()}
             mod, name = v["__class__"].rsplit(".", 1)
             return getattr(importlib.import_module(mod), name)(**{k: inst(val) for k, val in v.items() if k != "__class__"})
-        agent = cls(**{**inst(cfg), **inst(overrides)})
+        # cfg может задать свой подкласс через "__class__" (e.g. "src.agent.claude_agent.ClaudeAgent");
+        # если не задал — подставляем cls по умолчанию.
+        merged = {"__class__": f"{cls.__module__}.{cls.__name__}", **cfg, **overrides}
+        agent = inst(merged)
         agent._config = cfg
         return agent
 
@@ -146,6 +149,9 @@ class Agent:
     def stop(self):
         """Прервать текущий ответ. Частичный ответ не сохраняется в историю."""
         self._stop_event.set()
+
+    async def close(self):
+        pass
 
     def strip_contents_private(self, turns: list, model_name: str = None) -> list:
         model = model_name or self.model_name
@@ -454,33 +460,35 @@ class Agent:
 
     async def loop(self):
         await self.add_transport_skills()
-        while True:
-            self._stop_event.clear()
+        try:
+            while True:
+                self._stop_event.clear()
+                async def handle_turn():
+                    content_parts, user_message_id, trigger_answer = await self.next_message()
+                    try:
+                        await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
+                        if not trigger_answer: return
 
-            async def handle_turn():
-                content_parts, user_message_id, trigger_answer = await self.next_message()
-                try:
-                    await self.memory.add_turn({"role": "user", "content": content_parts, "_user_message_id": user_message_id})
-                    if not trigger_answer: return
+                        await self.transport.send_processing(True)
+                        open(os.path.join(self.memory.memory_dir, "last_turn_chunks.log"), "w").close()
+                        turns = r if isinstance(r := await self.llm(), list) else [r]
+                        iteration = 0
+                        while turns[-1].get("tool_calls") and iteration < self.max_iterations:
+                            result_turns = await self.dispatch_tool_calls(turns[-1])
+                            await self.memory.add_turn(*turns, *result_turns)
+                            iteration += 1
+                            turns = r if isinstance(r := await self.llm(), list) else [r]
+                        if turns[-1].get("tool_calls"):
+                            logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
+                            await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
+                        else:
+                            await self.memory.add_turn(*turns)
+                    except Exception as e:
+                        logging.warning("Ошибка агента: %s", e, exc_info=True)
+                        await self.transport.send_message(f"Ошибка: {e}")
+                    finally:
+                        await self.transport.send_processing(False)
 
-                    await self.transport.send_processing(True)
-                    open(os.path.join(self.memory.memory_dir, "last_turn_chunks.log"), "w").close()
-                    turn = await self.llm()
-                    iteration = 0
-                    while turn.get("tool_calls") and iteration < self.max_iterations:
-                        result_turns = await self.dispatch_tool_calls(turn)
-                        await self.memory.add_turn(turn, *result_turns)
-                        iteration += 1
-                        turn = await self.llm()
-                    if turn.get("tool_calls"):
-                        logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
-                        await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
-                    else:
-                        await self.memory.add_turn(turn)
-                except Exception as e:
-                    logging.warning("Ошибка агента: %s", e, exc_info=True)
-                    await self.transport.send_message(f"Ошибка: {e}")
-                finally:
-                    await self.transport.send_processing(False)
-
-            await stoppable(handle_turn(), self._stop_event)
+                await stoppable(handle_turn(), self._stop_event)
+        finally:
+            await self.close()
