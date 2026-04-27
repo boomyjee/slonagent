@@ -222,20 +222,26 @@ class WebTransport(BaseTransport):
                         WebTransport._sish_port, WebTransport._sish_key,
                     )
                     WebTransport._tunnel_url = url
-                    # Warm up the reverse-port-forward channel so the first
-                    # real request doesn't pay a 2s cold-start penalty.
+                except Exception as e:
+                    log.warning("Tunnel failed: %s", e)
+                    return
+                finally:
+                    WebTransport._tunnel_ready.set()
+
+                # The reverse-forwarded channel goes "cold" after ~10s of
+                # idle (sish-side, judging by reproducers): the first request
+                # then pays a ~2s TTFB while something inside sish/asyncssh
+                # re-establishes flow. Keep it warm with a tiny periodic hit.
+                import urllib.request, ssl
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                while True:
                     try:
-                        import urllib.request, ssl
-                        ctx = ssl.create_default_context()
-                        ctx.check_hostname = False
-                        ctx.verify_mode = ssl.CERT_NONE
                         await asyncio.to_thread(urllib.request.urlopen, url, context=ctx, timeout=5)
                     except Exception:
                         pass
-                except Exception as e:
-                    log.warning("Tunnel failed: %s", e)
-                finally:
-                    WebTransport._tunnel_ready.set()
+                    await asyncio.sleep(5)
             WebTransport._loop.call_soon_threadsafe(asyncio.create_task, _tunnel())
 
     def register_route(self, method, path, handler):
