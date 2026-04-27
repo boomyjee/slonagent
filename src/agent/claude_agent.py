@@ -187,7 +187,9 @@ class ClaudeAgent(Agent):
         # turn'ы в list. agent.loop запишет всё в memory и решит по tool_calls
         # последнего turn'а нужен ли внешний tool-dispatch (нам не нужен — клод
         # отрабатывает тулы сам через MCP).
+        text_buf = ""
         text_stream_id = None
+        thinking_buf = ""
         thinking_stream_id = None
         tool_use_names: dict[str, str] = {}
         block_type = None
@@ -199,21 +201,27 @@ class ClaudeAgent(Agent):
                 etype = event.get("type", "")
                 if etype == "content_block_start":
                     block_type = event.get("content_block", {}).get("type")
-                    if block_type == "thinking":
+                    if block_type == "text":
+                        text_buf = ""
+                        text_stream_id = id(event)
+                    elif block_type == "thinking":
+                        thinking_buf = ""
                         thinking_stream_id = id(event)
                 elif etype == "content_block_delta":
                     delta = event.get("delta", {})
                     dtype = delta.get("type")
                     if dtype == "text_delta":
-                        if text_stream_id is None:
-                            text_stream_id = id(delta)
-                        await self.transport.send_message(delta.get("text", ""), stream_id=text_stream_id)
+                        text_buf += delta.get("text", "")
+                        await self.transport.send_message(text_buf, stream_id=text_stream_id)
                     elif dtype == "thinking_delta":
-                        await self.transport.send_thinking(delta.get("thinking", ""), stream_id=thinking_stream_id)
+                        thinking_buf += delta.get("thinking", "")
+                        await self.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
                 elif etype == "content_block_stop":
                     if block_type == "text":
+                        await self.transport.send_message(text_buf, stream_id=text_stream_id, final=True)
                         text_stream_id = None
                     elif block_type == "thinking":
+                        await self.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
                         thinking_stream_id = None
                     block_type = None
 
