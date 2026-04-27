@@ -1,4 +1,4 @@
-import { html, Component, css } from '../lib.js';
+import { html, Component, css, persist } from '../lib.js';
 import { api, currentRoot } from './api.js';
 
 const cl = {};
@@ -105,13 +105,46 @@ export class Editor extends Component {
         });
         this.setState({ ready: true });
         this._handleActive();
+        // Persist scroll/cursor on F5/close — _handleActive only fires on
+        // tab switch, so without this an in-place reload loses position.
+        this._onUnload = () => this._saveViewState(this._lastActive);
+        window.addEventListener('beforeunload', this._onUnload);
+    }
+
+    componentWillUnmount() {
+        if (this._onUnload) window.removeEventListener('beforeunload', this._onUnload);
     }
 
     componentDidUpdate(prevProps) {
         if (prevProps.active !== this.props.active) this._handleActive();
     }
 
+    _viewStateKey(path) {
+        return `viewstate:${this.props.rootKey || ''}:${path}`;
+    }
+
+    _saveViewState(path) {
+        if (!path || !this._editor) return;
+        const tab = this.models[path];
+        if (!tab) return;
+        const vs = this._editor.saveViewState();
+        if (!vs) return;
+        tab.viewState = vs;
+        persist.set(this._viewStateKey(path), vs);
+    }
+
+    _loadViewState(path) {
+        return persist.get(this._viewStateKey(path), null);
+    }
+
     _handleActive() {
+        // Save view state (cursor + scroll) of the tab we're leaving so
+        // _activate can restore it on the way back.
+        if (this._lastActive && this._lastActive !== this.props.active) {
+            this._saveViewState(this._lastActive);
+        }
+        this._lastActive = this.props.active;
+
         const path = this.props.active;
         if (!path) return;
         // Only real workspace paths render as media — virtual schemes
@@ -141,6 +174,8 @@ export class Editor extends Component {
         if (existing) {
             this._editor.setModel(existing.model);
             this._applyTabOptions(existing);
+            const vs = existing.viewState || this._loadViewState(path);
+            if (vs) this._editor.restoreViewState(vs);
             this._restoreCursor(path);
             return;
         }
@@ -148,6 +183,8 @@ export class Editor extends Component {
         this.models[path] = tab;
         this._editor.setModel(tab.model);
         this._applyTabOptions(tab);
+        const vs = this._loadViewState(path);
+        if (vs) this._editor.restoreViewState(vs);
         this._restoreCursor(path);
     }
 

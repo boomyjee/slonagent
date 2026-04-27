@@ -285,6 +285,7 @@ class App extends Component {
                         <div class=${cl.pane} style=${{display: activeFile ? 'flex' : 'none'}}>
                             <${Editor} ref=${c => this._editor = c}
                                        active=${activeFile}
+                                       rootKey=${rootKey}
                                        onDirtyChange=${this._onDirtyChange} />
                         </div>
                     </div>
