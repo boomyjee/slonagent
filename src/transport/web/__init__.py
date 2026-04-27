@@ -327,13 +327,18 @@ class WebTransport(BaseTransport):
                 except json.JSONDecodeError:
                     log.warning("ws: invalid JSON: %s", data[:200])
                     continue
-                await self.ws_handle_message(msg)
+                await self.ws_handle_message(msg, ws)
         except WebSocketDisconnect:
             pass
         finally:
             self._clients.discard(ws)
+            self.on_ws_close(ws)
 
-    async def ws_handle_message(self, msg: dict):
+    def on_ws_close(self, ws):
+        """Hook for subclasses to clean up per-connection state. Base no-op."""
+        pass
+
+    async def ws_handle_message(self, msg: dict, ws=None):
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
             # Echo back through send() so it lands in the buffer and gets
             # replayed on reconnect. Chat.js no longer adds user messages

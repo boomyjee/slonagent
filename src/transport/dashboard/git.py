@@ -229,19 +229,16 @@ class GitAPI:
         t.register_route("post", "/api/git/amend", self.amend)
         t.register_route("post", "/api/git/switch_branch", self.switch_branch)
 
-    def _git(self, path: str):
-        sandbox = self._sandbox
-        if not sandbox:
-            return None, JSONResponse({"error": "No sandbox"}, 503)
-        host = sandbox.resolve_path(path)
+    def _git(self, root: str, path: str):
+        host = self.transport._files.resolve(root, path)
         if host is None:
-            return None, JSONResponse({"error": f"Access denied: {path}"}, 403)
+            return None, JSONResponse({"error": f"Invalid path: {path}"}, 400)
         if not os.path.isdir(host):
             return None, JSONResponse({"error": f"Not a directory: {path}"}, 400)
         return Git(host), None
 
-    async def status(self, path: str = Query(...)):
-        git, err = self._git(path)
+    async def status(self, root: str = Query(""), path: str = Query(...)):
+        git, err = self._git(root, path)
         if err: return err
         files = await git.status()
         return JSONResponse({
@@ -250,37 +247,36 @@ class GitAPI:
             "status_hash": Git.status_hash(files),
         })
 
-    async def diff(self, path: str = Query(...), file: str = Query(...), staged: bool = Query(False)):
-        git, err = self._git(path)
+    async def diff(self, root: str = Query(""), path: str = Query(...),
+                   file: str = Query(...), staged: bool = Query(False)):
+        git, err = self._git(root, path)
         if err: return err
         return JSONResponse({"diff": await git.diff(file, staged=staged)})
 
-    async def diff_between(self, path: str = Query(...), file: str = Query(...),
+    async def diff_between(self, root: str = Query(""), path: str = Query(...), file: str = Query(...),
                            sha1: str = Query(...), sha2: str = Query(...)):
-        git, err = self._git(path)
+        git, err = self._git(root, path)
         if err: return err
         return JSONResponse({"diff": await git.diff_between(file, sha1, sha2)})
 
-    async def show(self, path: str = Query(...), file: str = Query(...), ref: str = Query("HEAD")):
-        git, err = self._git(path)
+    async def show(self, root: str = Query(""), path: str = Query(...),
+                   file: str = Query(...), ref: str = Query("HEAD")):
+        git, err = self._git(root, path)
         if err: return err
         return JSONResponse({"content": await git.show_file(file, ref)})
 
-    async def blame(self, path: str = Query(...), file: str = Query(...), ref: str = Query("")):
-        git, err = self._git(path)
+    async def blame(self, root: str = Query(""), path: str = Query(...),
+                    file: str = Query(...), ref: str = Query("")):
+        git, err = self._git(root, path)
         if err: return err
         return JSONResponse({"lines": await git.blame(file, ref or None)})
 
-    async def blame_at(self, path: str = Query(...)):
-        """Blame for a file at workspace path. Auto-discovers the repo via
-        `git rev-parse --show-toplevel`, so the caller doesn't need to know
-        which folder owns the .git."""
-        sandbox = self._sandbox
-        if not sandbox:
-            return JSONResponse({"error": "No sandbox"}, 503)
-        host = sandbox.resolve_path(path)
+    async def blame_at(self, root: str = Query(""), path: str = Query(...)):
+        """Blame for a file at the given root-relative path. Auto-discovers
+        the owning repo via `git rev-parse --show-toplevel`."""
+        host = self.transport._files.resolve(root, path)
         if host is None:
-            return JSONResponse({"error": f"Access denied: {path}"}, 403)
+            return JSONResponse({"error": f"Invalid path: {path}"}, 400)
         if not os.path.isfile(host):
             return JSONResponse({"error": f"Not a file: {path}"}, 400)
         proc = await asyncio.create_subprocess_exec(
@@ -295,19 +291,20 @@ class GitAPI:
         rel = os.path.relpath(host, repo).replace("\\", "/")
         return JSONResponse({"lines": await Git(repo).blame(rel)})
 
-    async def branches(self, path: str = Query(...)):
-        git, err = self._git(path)
+    async def branches(self, root: str = Query(""), path: str = Query(...)):
+        git, err = self._git(root, path)
         if err: return err
         return JSONResponse({"current": await git.current_branch(), "all": await git.branches()})
 
-    async def log(self, path: str = Query(...), branch: str = Query(...),
+    async def log(self, root: str = Query(""), path: str = Query(...), branch: str = Query(...),
                   limit: int = Query(15), skip: int = Query(0)):
-        git, err = self._git(path)
+        git, err = self._git(root, path)
         if err: return err
         return JSONResponse({"commits": await git.last_commits(branch, limit, skip)})
 
-    async def history(self, path: str = Query(...), commit: str = Query(...), depth: int = Query(1)):
-        git, err = self._git(path)
+    async def history(self, root: str = Query(""), path: str = Query(...),
+                      commit: str = Query(...), depth: int = Query(1)):
+        git, err = self._git(root, path)
         if err: return err
         return JSONResponse({"files": await git.history(commit, depth)})
 
@@ -325,21 +322,21 @@ class GitAPI:
 
     async def stage(self, request: Request):
         data = await request.json()
-        git, err = self._git(data["path"])
+        git, err = self._git(data.get("root", ""), data["path"])
         if err: return err
         out, code = await (git.stage(data["file"]) if data.get("staged") else git.unstage(data["file"]))
         return JSONResponse({"status": "ok" if code == 0 else "error", "output": out})
 
     async def checkout(self, request: Request):
         data = await request.json()
-        git, err = self._git(data["path"])
+        git, err = self._git(data.get("root", ""), data["path"])
         if err: return err
         out, code = await git.checkout_file(data["file"], data.get("old_file"))
         return JSONResponse({"status": "ok" if code == 0 else "error", "output": out})
 
     async def commit(self, request: Request):
         data = await request.json()
-        git, err = self._git(data["path"])
+        git, err = self._git(data.get("root", ""), data["path"])
         if err: return err
         if (mismatch := await self._check_hash(git, data)): return mismatch
         message = (data.get("message") or "").strip()
@@ -350,7 +347,7 @@ class GitAPI:
 
     async def amend(self, request: Request):
         data = await request.json()
-        git, err = self._git(data["path"])
+        git, err = self._git(data.get("root", ""), data["path"])
         if err: return err
         if (mismatch := await self._check_hash(git, data)): return mismatch
         out, code = await git.amend((data.get("message") or "").strip() or None)
@@ -358,7 +355,7 @@ class GitAPI:
 
     async def switch_branch(self, request: Request):
         data = await request.json()
-        git, err = self._git(data["path"])
+        git, err = self._git(data.get("root", ""), data["path"])
         if err: return err
         out, code = await git.switch_branch(data["branch"])
         return JSONResponse({"status": "ok" if code == 0 else "error", "output": out})

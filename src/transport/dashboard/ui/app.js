@@ -1,27 +1,43 @@
 import { render, html, Component, css, persist } from './lib.js';
 import { Chat } from './components/common/Chat.js';
 import { Resizer } from './components/common/Resizer.js';
-import { FileTree, refreshTree, isInGitRepo } from './components/FileTree.js';
+import { FileTree, refreshTree, setTreeScope, isInGitRepo } from './components/FileTree.js';
+import { openChangeRootDialog } from './components/ChangeRootDialog.js';
 import { Editor } from './components/Editor.js';
 import { Tabs } from './components/Tabs.js';
 import { Logs } from './components/Logs.js';
 import { Git } from './components/Git.js';
-
-const BASE = new URL('./', location.href).href;
-const api = (path) => fetch(BASE + path).then(r => r.json());
+import { currentRoot, setCurrentRoot } from './components/api.js';
 
 const cl = {};
 const LOGS_TAB = { id: 'logs', label: '☰', closable: false };
 
+// Stable cheap hash → 8-char base36 — enough to scope localStorage keys
+// per root so paths from different host folders don't collide.
+function rootHash(root) {
+    if (!root) return '';
+    let h = 0;
+    for (let i = 0; i < root.length; i++) h = ((h << 5) - h + root.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+}
+function rootBasename(root) {
+    if (!root) return '';
+    return root.replace(/[\/\\]+$/, '').split(/[\/\\]/).pop() || root;
+}
+
 class App extends Component {
     constructor(props) {
         super(props);
-        const savedTabs = persist.get('dashboard.tabs', []).filter(t => t.id !== 'logs');
-        const savedActive = persist.get('dashboard.activeTab', 'logs');
+        const root = currentRoot();
+        const rootKey = rootHash(root);
+        setTreeScope(rootKey);
+        const savedTabs = persist.get(`tabs:${rootKey}`, []).filter(t => t.id !== 'logs');
+        const savedActive = persist.get(`activeTab:${rootKey}`, 'logs');
         this.state = {
             connected: false,
-            rootPath: null,
-            tabs: [LOGS_TAB, ...savedTabs.map(t => ({...t, closable: true}))],
+            root,
+            rootKey,
+            tabs: [LOGS_TAB, ...savedTabs.map(t => ({ ...t, closable: true }))],
             activeTab: savedActive,
             logs: { agent: [], memory: [], transport: [] },
             gitRefreshKey: 0,
@@ -32,7 +48,6 @@ class App extends Component {
 
     componentDidMount() {
         this._connect();
-        api('api/config').then(c => { if (c.root_path) this.setState({ rootPath: c.root_path }); });
         document.addEventListener('keydown', e => {
             if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                 e.preventDefault();
@@ -43,21 +58,51 @@ class App extends Component {
     }
 
     componentDidUpdate(_, prev) {
-        if (prev.tabs !== this.state.tabs || prev.activeTab !== this.state.activeTab) {
+        const key = this.state.rootKey;
+        if (key && (prev.tabs !== this.state.tabs || prev.activeTab !== this.state.activeTab)) {
             const tabs = this.state.tabs.filter(t => t.id !== 'logs').map(t => ({ id: t.id, label: t.label }));
-            persist.set('dashboard.tabs', tabs);
-            persist.set('dashboard.activeTab', this.state.activeTab);
+            persist.set(`tabs:${key}`, tabs);
+            persist.set(`activeTab:${key}`, this.state.activeTab);
         }
     }
 
     _connect() {
         const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
         this._ws = new WebSocket(proto + location.host + location.pathname + 'ws');
-        this._ws.onopen = () => this.setState({ connected: true });
+        this._ws.onopen = () => {
+            this.setState({ connected: true });
+            this._subscribeWatcher();
+        };
         this._ws.onclose = () => { this.setState({ connected: false }); setTimeout(() => this._connect(), 2000); };
         this._ws.onerror = () => this._ws.close();
         this._ws.onmessage = e => this._onMessage(JSON.parse(e.data));
     }
+
+    _subscribeWatcher() {
+        // Server replaces any prior subscription on this WS — empty root
+        // gets resolved to the sandbox default on the server side.
+        this.send({ type: 'watch', root: this.state.root });
+    }
+
+    _onChangeRoot = () => openChangeRootDialog({
+        initialPath: this.state.root,
+        onConfirm: this._onRootConfirmed,
+    });
+
+    _onRootConfirmed = (newRoot) => {
+        setCurrentRoot(newRoot);
+        const rootKey = rootHash(newRoot);
+        setTreeScope(rootKey);
+        this._editor?.purge();
+        const savedTabs = persist.get(`tabs:${rootKey}`, []).filter(t => t.id !== 'logs');
+        const savedActive = persist.get(`activeTab:${rootKey}`, 'logs');
+        this.setState({
+            root: newRoot,
+            rootKey,
+            tabs: [LOGS_TAB, ...savedTabs.map(t => ({ ...t, closable: true }))],
+            activeTab: savedActive,
+        }, () => this._subscribeWatcher());
+    };
 
     send(msg) {
         if (this._ws?.readyState === WebSocket.OPEN) this._ws.send(JSON.stringify(msg));
@@ -185,7 +230,7 @@ class App extends Component {
         }));
     };
 
-    render(_, { connected, rootPath, tabs, activeTab, logs, gitRefreshKey }) {
+    render(_, { connected, root, rootKey, tabs, activeTab, logs, gitRefreshKey }) {
         const isLogs = activeTab === 'logs';
         const isGit = activeTab.startsWith('git:');
         const activeFile = !isLogs && !isGit ? activeTab : null;
@@ -194,10 +239,12 @@ class App extends Component {
                 <div class=${cl.sidebar}>
                     <div class=${cl.sidebarHdr}>Explorer</div>
                     <div class=${cl.tree}>
-                        <${FileTree} rootPath=${rootPath}
+                        <${FileTree} rootPath="/"
+                                     rootName=${rootBasename(root)}
                                      onOpen=${this._openFile}
                                      onOpenGit=${this._openGit}
-                                     onOpenGitBlame=${this._openGitBlame} />
+                                     onOpenGitBlame=${this._openGitBlame}
+                                     onChangeRoot=${this._onChangeRoot} />
                     </div>
                 </div>
                 <${Resizer} side="left" persistKey="sidebar" />
@@ -214,7 +261,9 @@ class App extends Component {
                         ${tabs.filter(t => t.id.startsWith('git:')).map(t => html`
                             <div key=${t.id} class=${cl.pane}
                                  style=${{display: activeTab === t.id ? 'flex' : 'none'}}>
-                                <${Git} path=${t.id.slice(4)} refreshKey=${gitRefreshKey}
+                                <${Git} path=${t.id.slice(4)}
+                                        rootKey=${rootKey}
+                                        refreshKey=${gitRefreshKey}
                                         onOpenFile=${this._openFile}
                                         onOpenGitShow=${this._openGitShow} />
                             </div>`)}

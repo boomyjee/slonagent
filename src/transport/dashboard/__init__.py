@@ -10,6 +10,7 @@ from src.transport.web import WebTransport
 from src.transport.dashboard.files import FilesAPI
 from src.transport.dashboard.git import GitAPI
 from src.transport.dashboard.sandbox_proxy import SandboxProxy
+from src.transport.dashboard.watcher import WatcherPool
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,12 @@ class _LogHandler(logging.Handler):
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 return
-            loop.call_soon_threadsafe(asyncio.ensure_future, transport.send(event, replay=True))
+            # Defer coroutine creation into the closure so a loop that's
+            # already shutting down doesn't leave an un-awaited coroutine
+            # behind ("RuntimeWarning: coroutine ... was never awaited").
+            loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(transport.send(event, replay=True))
+            )
         except Exception:
             self.handleError(record)
 
@@ -80,7 +86,7 @@ class DashboardTransport(WebTransport):
         self._proxy = SandboxProxy(self)
         self._files = FilesAPI(self)
         self._git = GitAPI(self)
-        self._watch_task = None
+        self._watchers = WatcherPool(self._files)
 
     @property
     def _sandbox(self):
@@ -91,7 +97,6 @@ class DashboardTransport(WebTransport):
         return [self._skill]
 
     def register_routes(self):
-        self.register_route("get", "/api/config", self._api_config)
         self._files.register()
         self._git.register()
         self.register_route("get", "/web/{filepath:path}", self._serve_web)
@@ -105,39 +110,13 @@ class DashboardTransport(WebTransport):
             self.register_route(m, "/sandbox/{port:int}/{filepath:path}", self._proxy.handle_http)
         super().register_routes()
 
-    async def _api_config(self):
-        return JSONResponse({"root_path": "/workspace" if self._sandbox else None})
 
-    async def _watch_files(self):
-        from watchfiles import awatch, Change
-        sandbox = self._sandbox
-        if not sandbox:
-            return
-        host_base = Path(sandbox.workspace_dir)
-        try:
-            async for changes in awatch(sandbox.workspace_dir):
-                paths = []
-                has_create_delete = False
-                for change_type, path in changes:
-                    try:
-                        rel = "/workspace/" + Path(path).relative_to(host_base).as_posix()
-                    except ValueError:
-                        continue
-                    paths.append(rel)
-                    if change_type in (Change.added, Change.deleted):
-                        has_create_delete = True
-                if paths:
-                    await self.send({"type": "files_changed", "paths": paths, "tree": has_create_delete})
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            log.warning("[dashboard] file watcher crashed", exc_info=True)
+    async def ws_handle_message(self, msg: dict, ws=None):
+        await self._watchers.ws_handle_message(msg, ws)
+        await super().ws_handle_message(msg, ws)
 
-    def cleanup(self):
-        if self._watch_task:
-            self._watch_task.cancel()
-            self._watch_task = None
-        super().cleanup()
+    def on_ws_close(self, ws):
+        self._watchers.on_ws_close(ws)
 
     async def _serve_web(self, filepath: str):
         sandbox = self._sandbox
@@ -172,6 +151,3 @@ class DashboardTransport(WebTransport):
 
         _LogHandler._instances[agent.id] = self
         agent_context.set(agent.id)
-
-        if self._sandbox and self._watch_task is None:
-            self._watch_task = WebTransport._loop.create_task(self._watch_files())

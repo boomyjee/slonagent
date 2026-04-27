@@ -1,8 +1,7 @@
 import { html, Component, css, persist } from '../lib.js';
+import { api } from './api.js';
 
 const cl = {};
-const BASE = new URL('./', location.href).href;
-const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
 
 const FILE_ICONS = {
     py: ['Py', '#4584b6'], js: ['JS', '#f7df1e'], ts: ['TS', '#3178c6'],
@@ -27,8 +26,14 @@ function fileIcon(name) {
     return html`<span class=${cl.fileIcon} style=${{color: 'var(--text-dim)'}}>F</span>`;
 }
 
+// Tree state scoped by root: paths from /Users/me/projectA mean nothing
+// under /Users/me/projectB. setScope() rebinds expanded to the per-root
+// persistence slot.
+let _scope = '';
+const _expandedKey = () => `tree.expanded:${_scope}`;
+
 const tree = {
-    expanded: new Set(persist.get('tree.expanded', [])),
+    expanded: new Set(),
     children: {},
     _listener: null,
 
@@ -41,7 +46,7 @@ const tree = {
             this.expanded.add(path);
             if (!this.children[path]) await this._fetch(path);
         }
-        persist.set('tree.expanded', [...this.expanded]);
+        persist.set(_expandedKey(), [...this.expanded]);
         this._notify();
     },
 
@@ -116,11 +121,12 @@ export class FileTree extends Component {
 
     _onContextMenu = (e, entry) => {
         const items = [];
+        const isRoot = entry.path === this.props.rootPath;
         if (entry.is_dir) {
             items.push({ label: 'New file', action: () => this._create(entry, 'file') });
             items.push({ label: 'New folder', action: () => this._create(entry, 'folder') });
         }
-        if (entry.path !== this.props.rootPath) {
+        if (!isRoot) {
             items.push({ label: 'Rename', action: () => this._rename(entry) });
             items.push({ label: 'Delete', action: () => this._delete(entry) });
         }
@@ -129,6 +135,9 @@ export class FileTree extends Component {
         }
         if (!entry.is_dir) {
             items.push({ label: 'Git blame', action: () => this.props.onOpenGitBlame?.(entry.path, entry.name) });
+        }
+        if (isRoot && this.props.onChangeRoot) {
+            items.push({ label: 'Change Root…', action: () => this.props.onChangeRoot() });
         }
         if (!items.length) return;
         e.preventDefault();
@@ -168,9 +177,13 @@ export class FileTree extends Component {
         await tree.refresh([entry.path]);
     }
 
-    render({ rootPath, onOpen }, { menu }) {
-        if (!rootPath) return html`<div class=${cl.empty}>No sandbox</div>`;
-        const root = { path: rootPath, name: rootPath, is_dir: true };
+    render({ rootPath, rootName, onOpen }, { menu }) {
+        if (!rootPath) return html`<div class=${cl.empty}>No root</div>`;
+        // The root entry is synthetic — server's per-entry has_git only
+        // covers children. Detect "root itself is a repo" by spotting a
+        // `.git` child in the root's listing (loaded once expanded).
+        const rootHasGit = (tree.children[rootPath] || []).some(e => e.name === '.git');
+        const root = { path: rootPath, name: rootName || rootPath, is_dir: true, has_git: rootHasGit };
         return html`<div>
             <${DirNode} entry=${root} depth=${0} onOpen=${onOpen} onContextMenu=${this._onContextMenu} />
             ${menu && html`
@@ -187,21 +200,34 @@ export class FileTree extends Component {
 // Imperative entry for the websocket "files_changed" event.
 export const refreshTree = (paths) => tree.refresh(paths);
 
-// True if any cached ancestor of `path` is a folder with .git inside.
-// Returns false when the answer is unknown (the relevant parent listing
-// hasn't been fetched yet) — callers treat that as "don't offer git ops".
+// Bind tree state to a specific root (e.g. hash of root host path).
+// Pulls saved expansions for that scope; the children cache is dropped
+// since paths repeat across roots but mean different files.
+export function setTreeScope(key) {
+    if (key === _scope) return;
+    _scope = key;
+    tree.expanded = new Set(persist.get(_expandedKey(), []));
+    tree.children = {};
+    tree._notify();
+    tree.restoreExpanded();
+}
+
+// True if any cached ancestor of `path` is a git repo. Two signals:
+//   - `entry.has_git` set by the server on the parent's listing
+//   - a `.git` child visible in the ancestor's own listing
+// The second covers the root (no parent listing) and folders whose listing
+// is loaded but whose parent's isn't.
 export function isInGitRepo(path) {
     let cur = path;
     while (cur.includes('/')) {
-        cur = cur.substring(0, cur.lastIndexOf('/'));
-        if (!cur) break;
-        const parent = cur.substring(0, cur.lastIndexOf('/')) || cur;
-        if (parent === cur) break;
-        const list = tree.children[parent];
-        if (list) {
-            const entry = list.find(e => e.path === cur);
+        cur = cur.substring(0, cur.lastIndexOf('/')) || '/';
+        if ((tree.children[cur] || []).some(e => e.name === '.git')) return true;
+        if (cur !== '/') {
+            const parent = cur.substring(0, cur.lastIndexOf('/')) || '/';
+            const entry = (tree.children[parent] || []).find(e => e.path === cur);
             if (entry?.has_git) return true;
         }
+        if (cur === '/') break;
     }
     return false;
 }

@@ -1,11 +1,19 @@
-"""File API: list/read/write/create/rename/delete inside the sandbox workspace.
+"""File API: list/read/write/create/rename/delete inside a per-request root.
 
-Owns its own FastAPI route handlers so the dashboard module stays a thin shell.
-All paths are workspace-scoped; sandbox.resolve_path() enforces the boundary.
+The server is stateless about "current root" — every endpoint takes the
+root host path as a query/body argument. If omitted, the sandbox's
+workspace_dir (if a SandboxSkill is mounted) is used as the default.
+The client owns root selection (in localStorage) and sends it on each call.
+
+API paths are root-relative and start with `/`: `/foo` resolves to
+`<root>/foo`. There are no `..` checks — the dashboard is auth-gated
+and meant for the user themselves.
 """
 import os
 import mimetypes
 import shutil
+import string
+import sys
 
 from fastapi import Query, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -28,23 +36,28 @@ class FilesAPI:
         t.register_route("post", "/api/file/create", self.create)
         t.register_route("patch", "/api/file/rename", self.rename)
         t.register_route("delete", "/api/file", self.delete)
+        t.register_route("get", "/api/dirs", self.list_dirs)
 
-    def _resolve(self, path: str) -> str | None:
-        sandbox = self._sandbox
-        if not sandbox:
+    def default_root(self) -> str | None:
+        return self._sandbox.workspace_dir if self._sandbox else None
+
+    def resolve(self, root: str | None, path: str) -> str | None:
+        actual = root or self.default_root()
+        if actual is None or not path.startswith("/"):
             return None
-        return sandbox.resolve_path(path)
+        rel = path.lstrip("/")
+        return os.path.join(actual, rel) if rel else actual
 
-    async def list(self, path: str = Query("/")):
-        host = self._resolve(path)
+    # ─── file ops ──────────────────────────────────────────────────
+
+    async def list(self, root: str = Query(""), path: str = Query("/")):
+        host = self.resolve(root, path)
         if host is None:
-            return JSONResponse({"error": "No sandbox or access denied"}, 503)
+            return JSONResponse({"error": "No root resolvable"}, 400)
         if not os.path.isdir(host):
             return JSONResponse({"error": f"Not a directory: {path}"}, 400)
         entries = []
         for name in sorted(os.listdir(host)):
-            if name.startswith("."):
-                continue
             full = os.path.join(host, name)
             is_dir = os.path.isdir(full)
             entry = {
@@ -57,10 +70,10 @@ class FilesAPI:
             entries.append(entry)
         return JSONResponse({"entries": entries})
 
-    async def read(self, path: str = Query(...)):
-        host = self._resolve(path)
+    async def read(self, root: str = Query(""), path: str = Query(...)):
+        host = self.resolve(root, path)
         if host is None:
-            return JSONResponse({"error": "No sandbox or access denied"}, 503)
+            return JSONResponse({"error": "No root resolvable"}, 400)
         if not os.path.isfile(host):
             return JSONResponse({"error": f"Not a file: {path}"}, 400)
         try:
@@ -69,12 +82,12 @@ class FilesAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, 500)
 
-    async def read_raw(self, path: str = Query(...)):
+    async def read_raw(self, root: str = Query(""), path: str = Query(...)):
         """Stream raw bytes — for images/videos rendered directly by the
         browser. Mime is guessed from extension."""
-        host = self._resolve(path)
+        host = self.resolve(root, path)
         if host is None:
-            return JSONResponse({"error": "No sandbox or access denied"}, 503)
+            return JSONResponse({"error": "No root resolvable"}, 400)
         if not os.path.isfile(host):
             return JSONResponse({"error": f"Not a file: {path}"}, 400)
         mime, _ = mimetypes.guess_type(host)
@@ -82,26 +95,25 @@ class FilesAPI:
 
     async def write(self, request: Request):
         data = await request.json()
-        path, content = data.get("path"), data.get("content", "")
-        host = self._resolve(path)
+        host = self.resolve(data.get("root", ""), data.get("path"))
         if host is None:
-            return JSONResponse({"error": "No sandbox or access denied"}, 503)
+            return JSONResponse({"error": "No root resolvable"}, 400)
         try:
             os.makedirs(os.path.dirname(host), exist_ok=True)
             with open(host, "w", encoding="utf-8") as f:
-                f.write(content)
+                f.write(data.get("content", ""))
             return JSONResponse({"status": "ok"})
         except Exception as e:
             return JSONResponse({"error": str(e)}, 500)
 
     async def create(self, request: Request):
         data = await request.json()
-        path, kind = data.get("path"), data.get("type", "file")
-        host = self._resolve(path)
+        host = self.resolve(data.get("root", ""), data.get("path"))
         if host is None:
-            return JSONResponse({"error": "No sandbox or access denied"}, 503)
+            return JSONResponse({"error": "No root resolvable"}, 400)
         if os.path.exists(host):
-            return JSONResponse({"error": f"Already exists: {path}"}, 409)
+            return JSONResponse({"error": "Already exists"}, 409)
+        kind = data.get("type", "file")
         try:
             if kind == "folder":
                 os.makedirs(host)
@@ -117,9 +129,9 @@ class FilesAPI:
         path, name = data.get("path"), data.get("name", "")
         if not name or "/" in name or "\\" in name:
             return JSONResponse({"error": "Invalid name"}, 400)
-        host = self._resolve(path)
+        host = self.resolve(data.get("root", ""), path)
         if host is None:
-            return JSONResponse({"error": "No sandbox or access denied"}, 503)
+            return JSONResponse({"error": "No root resolvable"}, 400)
         if not os.path.exists(host):
             return JSONResponse({"error": f"Not found: {path}"}, 404)
         new_host = os.path.join(os.path.dirname(host), name)
@@ -132,10 +144,10 @@ class FilesAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, 500)
 
-    async def delete(self, path: str = Query(...)):
-        host = self._resolve(path)
+    async def delete(self, root: str = Query(""), path: str = Query(...)):
+        host = self.resolve(root, path)
         if host is None:
-            return JSONResponse({"error": "No sandbox or access denied"}, 503)
+            return JSONResponse({"error": "No root resolvable"}, 400)
         if not os.path.exists(host):
             return JSONResponse({"error": f"Not found: {path}"}, 404)
         try:
@@ -146,3 +158,38 @@ class FilesAPI:
             return JSONResponse({"status": "ok"})
         except Exception as e:
             return JSONResponse({"error": str(e)}, 500)
+
+    # ─── host fs browser (for the Change Root picker) ────────────────
+
+    async def list_dirs(self, path: str = Query("")):
+        """Lists subdirectories of any host path; with no `path` returns
+        drive roots on Windows or `/` on unix. Used by the Change Root
+        picker — which traffics in absolute host paths by definition.
+
+        All returned paths are normalized to forward slashes so the
+        client's display doesn't mix `E:/dev\\slonagent\\memory`."""
+        norm = lambda p: p.replace("\\", "/")
+        if not path:
+            if sys.platform == "win32":
+                entries = []
+                for letter in string.ascii_uppercase:
+                    drive = f"{letter}:\\"
+                    if os.path.exists(drive):
+                        entries.append({"name": norm(drive), "path": norm(drive)})
+                return JSONResponse({"path": "", "parent": None, "entries": entries})
+            return JSONResponse({"path": "", "parent": None,
+                                 "entries": [{"name": "/", "path": "/"}]})
+        if not os.path.isdir(path):
+            return JSONResponse({"error": f"Not a directory: {path}"}, 400)
+        entries = []
+        try:
+            for name in sorted(os.listdir(path)):
+                full = os.path.join(path, name)
+                if os.path.isdir(full):
+                    entries.append({"name": name, "path": norm(full)})
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, 403)
+        parent = os.path.dirname(path.rstrip("/").rstrip(os.sep))
+        if parent == path or not parent:
+            parent = ""
+        return JSONResponse({"path": norm(path), "parent": norm(parent), "entries": entries})

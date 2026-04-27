@@ -1,8 +1,7 @@
 import { html, Component, Fragment, css, persist } from '../lib.js';
+import { api } from './api.js';
 
 const cl = {};
-const BASE = new URL('./', location.href).href;
-const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
 const post = (path, body) => api(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -34,7 +33,7 @@ export class Git extends Component {
         this._toRestore = saved.expandedFiles || [];
     }
 
-    _persistKey(path) { return `git:${path || this.props.path}`; }
+    _persistKey(path) { return `git:${this.props.rootKey || ''}:${path || this.props.path}`; }
     _PERSISTED = ['view', 'selectedCommit', 'historyDepth', 'message'];
 
     componentDidMount() {

@@ -1,9 +1,8 @@
 import { html, Component, css } from '../lib.js';
+import { api } from './api.js';
 
 const cl = {};
 const LANG = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'typescript',json:'json',md:'markdown',html:'html',css:'css',yaml:'yaml',yml:'yaml',sh:'shell',bash:'shell',rs:'rust',go:'go',java:'java',rb:'ruby',c:'c',cpp:'cpp',h:'c',hpp:'cpp',toml:'ini',cfg:'ini',txt:'plaintext'};
-const BASE = new URL('./', location.href).href;
-const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
 
 // Virtual paths used to view files at git refs / with blame decorations.
 // Format: <scheme>:<encoded-repo>:<encoded-ref>:<encoded-file>.
@@ -120,7 +119,10 @@ export class Editor extends Component {
         const isFilePath = path.startsWith('/');
         if (isFilePath && mediaKind(path)) {
             this.setState({ mediaPath: path });
-        } else if (this.state.ready) {
+        } else if (this._editor) {
+            // Use the instance directly — `state.ready` lags one render
+            // behind the setState in componentDidMount, which would skip
+            // loading a tab that's already active when the editor mounts.
             if (this.state.mediaPath) this.setState({ mediaPath: null });
             this._activate(path);
         }
@@ -232,6 +234,14 @@ export class Editor extends Component {
     closeFile(path) {
         this.models[path]?.model.dispose();
         delete this.models[path];
+    }
+
+    purge() {
+        // Drop all cached models — used after Change Root, where the same
+        // path now refers to a different file.
+        for (const tab of Object.values(this.models)) tab.model.dispose();
+        this.models = {};
+        if (this._editor) this._editor.setModel(null);
     }
 
     async save(path) {
