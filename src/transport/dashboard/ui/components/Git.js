@@ -135,7 +135,7 @@ export class Git extends Component {
     _openMenu(name, e) {
         e.preventDefault(); e.stopPropagation();
         const r = e.currentTarget.getBoundingClientRect();
-        this.setState({ menu: { name, x: r.left, y: r.bottom + 2 } });
+        this.setState({ menu: { name, x: r.left, y: r.bottom + 2, right: r.right } });
     }
     _closeMenu = () => { if (this.state.menu) this.setState({ menu: null }); };
 
@@ -146,7 +146,7 @@ export class Git extends Component {
         this._loadStatus();
     }
     async _stageAll() {
-        await Promise.all(this.state.files.filter(f => !f.staged).map(f =>
+        await Promise.all(this.state.files.filter(f => !f.staged || f.partial).map(f =>
             post('api/git/stage', { path: this.props.path, file: f.file, staged: true })
         ));
         this._loadStatus();
@@ -294,8 +294,8 @@ export class Git extends Component {
 
         return html`<div class=${cl.wrap}>
             <div class=${cl.toolbar}>
-                <button class=${cl.btn} onClick=${() => this._refresh()}>Refresh</button>
-                <${ComboButton} label=${isHistory ? 'history' : 'working tree'}
+                <button class=${cl.btn} onClick=${() => this._refresh()} title="Refresh">↻</button>
+                <${ComboButton} label=${isHistory ? 'history' : 'tree'}
                                 onClick=${() => this._switchView(isHistory ? 'working_tree' : 'history')} />
                 <${ComboButton} label=${branch || '(detached)'} onClick=${e => this._openMenu('branch', e)} />
                 ${isHistory ? html`
@@ -304,7 +304,7 @@ export class Git extends Component {
                     <${ComboButton} label=${'~' + historyDepth} onClick=${e => this._openMenu('depth', e)} />
                 ` : html`
                     <button class=${cl.btn} onClick=${() => this._stageAll()}
-                            disabled=${!files.some(f => !f.staged)}>Stage All</button>
+                            disabled=${!files.some(f => !f.staged || f.partial)} title="Stage All">✓</button>
                     <input class=${cl.msg} type="text" placeholder="commit message"
                            value=${message}
                            onInput=${e => this.setState({ message: e.target.value })}
@@ -346,7 +346,8 @@ export class Git extends Component {
                 </table>
             </div>
 
-            ${menu && html`<${Menu} menu=${menu} items=${menuItems()} onClose=${this._closeMenu} />`}
+            ${menu && html`<${Menu} menu=${menu} items=${menuItems()} onClose=${this._closeMenu}
+                                alignRight=${menu.name === 'commitMore'} />`}
         </div>`;
     }
 
@@ -367,8 +368,11 @@ function ComboButton({ label, onClick }) {
     return html`<button class=${cl.combo} onClick=${onClick}>${label} <span class="arr">▾</span></button>`;
 }
 
-function Menu({ menu, items, onClose }) {
-    return html`<div class=${cl.menu} style=${{ left: menu.x + 'px', top: menu.y + 'px' }}
+function Menu({ menu, items, onClose, alignRight }) {
+    const pos = alignRight
+        ? { right: (window.innerWidth - menu.right) + 'px', top: menu.y + 'px' }
+        : { left: menu.x + 'px', top: menu.y + 'px' };
+    return html`<div class=${cl.menu} style=${pos}
                      onClick=${e => e.stopPropagation()}>
         ${items.map((it, i) => html`
             <div key=${i} class="${cl.menuItem}${it.selected ? ' selected' : ''}"

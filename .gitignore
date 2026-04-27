@@ -59,3 +59,4 @@ scripts/test_mode/memory/
 # Movie experiment (separate repo)
 scripts/movie_experiment/
 memory/last_turn_chunks.log
+*.log
