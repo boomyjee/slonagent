@@ -7,8 +7,9 @@ log = logging.getLogger(__name__)
 
 
 class ClaudeCodeSkill(Skill):
-    def __init__(self, expose_tool: bool = True):
+    def __init__(self, model: str, expose_tool: bool = True):
         super().__init__()
+        self._model = model
         self._expose_tool = expose_tool
 
     def get_tools(self):
@@ -40,9 +41,10 @@ class ClaudeCodeSkill(Skill):
 
         sub = await self.agent.spawn_subagent(
             "claude_code",
+            __class__="src.agent.claude_agent.ClaudeAgent",
             skills=[],
             transport=MultiTransport([self.agent.transport, coding_transport]),
-            __class__="src.agent.claude_agent.ClaudeAgent",
+            model_name=self._model,
         )
 
         url = await coding_transport.get_url('/')
