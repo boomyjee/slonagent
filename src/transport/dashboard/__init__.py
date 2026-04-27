@@ -1,12 +1,14 @@
-import asyncio, logging, os
+import asyncio, logging
 from contextvars import ContextVar
 from pathlib import Path
 
-from fastapi import Query, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from agent import Skill, bypass
 from src.transport.web import WebTransport
+from src.transport.dashboard.files import FilesAPI
+from src.transport.dashboard.git import GitAPI
 from src.transport.dashboard.sandbox_proxy import SandboxProxy
 
 log = logging.getLogger(__name__)
@@ -76,6 +78,8 @@ class DashboardTransport(WebTransport):
         super().__init__(prefix="/dashboard")
         self._skill = DashboardSkill(self)
         self._proxy = SandboxProxy(self)
+        self._files = FilesAPI(self)
+        self._git = GitAPI(self)
         self._watch_task = None
 
     @property
@@ -88,9 +92,8 @@ class DashboardTransport(WebTransport):
 
     def register_routes(self):
         self.register_route("get", "/api/config", self._api_config)
-        self.register_route("get", "/api/files", self._api_list_files)
-        self.register_route("get", "/api/file", self._api_read_file)
-        self.register_route("put", "/api/file", self._api_write_file)
+        self._files.register()
+        self._git.register()
         self.register_route("get", "/web/{filepath:path}", self._serve_web)
         self.register_route("post", "/web-hook", self._web_hook)
         # Reverse-tunnel proxy for ports bound inside the sandbox container.
@@ -104,60 +107,6 @@ class DashboardTransport(WebTransport):
 
     async def _api_config(self):
         return JSONResponse({"root_path": "/workspace" if self._sandbox else None})
-
-    async def _api_list_files(self, path: str = Query("/")):
-        sandbox = self._sandbox
-        if not sandbox:
-            return JSONResponse({"error": "No sandbox"}, 503)
-        host_path = sandbox.resolve_path(path)
-        if host_path is None:
-            return JSONResponse({"error": f"Access denied: {path}"}, 403)
-        if not os.path.isdir(host_path):
-            return JSONResponse({"error": f"Not a directory: {path}"}, 400)
-        entries = []
-        for name in sorted(os.listdir(host_path)):
-            if name.startswith("."):
-                continue
-            full = os.path.join(host_path, name)
-            entries.append({
-                "name": name,
-                "is_dir": os.path.isdir(full),
-                "path": path.rstrip("/") + "/" + name,
-            })
-        return JSONResponse({"entries": entries})
-
-    async def _api_read_file(self, path: str = Query(...)):
-        sandbox = self._sandbox
-        if not sandbox:
-            return JSONResponse({"error": "No sandbox"}, 503)
-        host_path = sandbox.resolve_path(path)
-        if host_path is None:
-            return JSONResponse({"error": f"Access denied: {path}"}, 403)
-        if not os.path.isfile(host_path):
-            return JSONResponse({"error": f"Not a file: {path}"}, 400)
-        try:
-            with open(host_path, encoding="utf-8", errors="replace") as f:
-                content = f.read()
-            return JSONResponse({"path": path, "content": content})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, 500)
-
-    async def _api_write_file(self, request: Request):
-        sandbox = self._sandbox
-        if not sandbox:
-            return JSONResponse({"error": "No sandbox"}, 503)
-        data = await request.json()
-        path, content = data.get("path"), data.get("content")
-        host_path = sandbox.resolve_path(path)
-        if host_path is None:
-            return JSONResponse({"error": f"Access denied: {path}"}, 403)
-        try:
-            os.makedirs(os.path.dirname(host_path), exist_ok=True)
-            with open(host_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            return JSONResponse({"status": "ok"})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, 500)
 
     async def _watch_files(self):
         from watchfiles import awatch, Change

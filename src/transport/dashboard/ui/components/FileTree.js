@@ -2,7 +2,7 @@ import { html, Component, css, persist } from '../lib.js';
 
 const cl = {};
 const BASE = new URL('./', location.href).href;
-const api = (path) => fetch(BASE + path).then(r => r.json());
+const api = (path, opts) => fetch(BASE + path, opts).then(r => r.json());
 
 const FILE_ICONS = {
     py: ['Py', '#4584b6'], js: ['JS', '#f7df1e'], ts: ['TS', '#3178c6'],
@@ -74,35 +74,110 @@ const tree = {
     _notify() { this._listener?.(); },
 };
 
-function DirNode({ path, name, depth, onOpen }) {
-    const open = tree.isOpen(path);
-    const children = tree.children[path];
+function DirNode({ entry, depth, onOpen, onContextMenu }) {
+    const open = tree.isOpen(entry.path);
+    const children = tree.children[entry.path];
     const pad = (8 + depth * 8) + 'px';
     return html`<div>
-        <div class=${cl.node} style=${{paddingLeft: pad}} onClick=${() => tree.toggle(path)}>
-            <span class=${cl.chevron}>${open ? '▾' : '▸'}</span><span>${name}</span>
+        <div class=${cl.node} style=${{paddingLeft: pad}}
+             onClick=${() => tree.toggle(entry.path)}
+             onContextMenu=${e => onContextMenu(e, entry)}>
+            <span class=${cl.chevron}>${open ? '▾' : '▸'}</span><span>${entry.name}</span>
         </div>
         ${open && children && children.map(e => e.is_dir
-            ? html`<${DirNode} key=${e.path} path=${e.path} name=${e.name} depth=${depth + 1} onOpen=${onOpen} />`
+            ? html`<${DirNode} key=${e.path} entry=${e} depth=${depth + 1} onOpen=${onOpen} onContextMenu=${onContextMenu} />`
             : html`<div class=${cl.node} style=${{paddingLeft: (8 + (depth+1) * 8) + 'px'}}
-                        onClick=${() => onOpen(e.path, e.name)}>
+                        onClick=${() => onOpen(e.path, e.name)}
+                        onContextMenu=${ev => onContextMenu(ev, e)}>
                         <span class=${cl.chevron}></span>${fileIcon(e.name)}<span>${e.name}</span></div>`
         )}
     </div>`;
 }
 
 export class FileTree extends Component {
+    constructor(props) {
+        super(props);
+        this.state = { menu: null };
+    }
     componentDidMount() {
         tree._listener = () => this.forceUpdate();
         if (this.props.rootPath) tree.restoreExpanded();
+        document.addEventListener('click', this._closeMenu);
     }
     componentDidUpdate(prev) {
         if (!prev.rootPath && this.props.rootPath) tree.restoreExpanded();
     }
-    componentWillUnmount() { tree._listener = null; }
-    render({ rootPath, onOpen }) {
+    componentWillUnmount() {
+        tree._listener = null;
+        document.removeEventListener('click', this._closeMenu);
+    }
+
+    _closeMenu = () => { if (this.state.menu) this.setState({ menu: null }); };
+
+    _onContextMenu = (e, entry) => {
+        const items = [];
+        if (entry.is_dir) {
+            items.push({ label: 'New file', action: () => this._create(entry, 'file') });
+            items.push({ label: 'New folder', action: () => this._create(entry, 'folder') });
+        }
+        if (entry.path !== this.props.rootPath) {
+            items.push({ label: 'Rename', action: () => this._rename(entry) });
+            items.push({ label: 'Delete', action: () => this._delete(entry) });
+        }
+        if (entry.is_dir && entry.has_git) {
+            items.push({ label: 'Open git commit', action: () => this.props.onOpenGit?.(entry.path, entry.name) });
+        }
+        if (!items.length) return;
+        e.preventDefault();
+        this.setState({ menu: { x: e.clientX, y: e.clientY, items } });
+    };
+
+    async _create(entry, type) {
+        const name = prompt(`New ${type} name:`);
+        if (!name) return;
+        const path = entry.path.replace(/\/$/, '') + '/' + name;
+        const data = await api('api/file/create', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ path, type }),
+        });
+        if (data.error) { alert(data.error); return; }
+        // Expand parent if collapsed (toggle does its own fetch+notify),
+        // otherwise just refetch its listing.
+        if (!tree.isOpen(entry.path)) await tree.toggle(entry.path);
+        else await tree.refresh([path]);
+    }
+
+    async _rename(entry) {
+        const name = prompt('New name:', entry.name);
+        if (!name || name === entry.name) return;
+        const data = await api('api/file/rename', {
+            method: 'PATCH', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ path: entry.path, name }),
+        });
+        if (data.error) { alert(data.error); return; }
+        await tree.refresh([entry.path]);
+    }
+
+    async _delete(entry) {
+        if (!confirm(`Delete ${entry.name}?`)) return;
+        const data = await api(`api/file?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' });
+        if (data.error) { alert(data.error); return; }
+        await tree.refresh([entry.path]);
+    }
+
+    render({ rootPath, onOpen }, { menu }) {
         if (!rootPath) return html`<div class=${cl.empty}>No sandbox</div>`;
-        return html`<${DirNode} path=${rootPath} name=${rootPath} depth=${0} onOpen=${onOpen} />`;
+        const root = { path: rootPath, name: rootPath, is_dir: true };
+        return html`<div>
+            <${DirNode} entry=${root} depth=${0} onOpen=${onOpen} onContextMenu=${this._onContextMenu} />
+            ${menu && html`
+                <div class=${cl.menu} style=${{left: menu.x + 'px', top: menu.y + 'px'}}>
+                    ${menu.items.map(i => html`
+                        <div class=${cl.menuItem} onClick=${() => { i.action(); this._closeMenu(); }}>
+                            ${i.label}
+                        </div>`)}
+                </div>`}
+        </div>`;
     }
 }
 
@@ -120,3 +195,12 @@ cl.fileIcon = css`
   font-size: 9px; font-weight: 700; font-family: monospace; letter-spacing: -0.5px;
 `;
 cl.empty = css`padding: 16px; color: var(--text-dim); font-size: 12px; font-style: italic;`;
+cl.menu = css`
+  position: fixed; z-index: 100; min-width: 160px;
+  background: var(--surface2); border: 1px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4); padding: 4px 0;
+`;
+cl.menuItem = css`
+  padding: 6px 12px; font-size: 12px; color: var(--text); cursor: pointer;
+  &:hover { background: var(--accent); color: #1e1e2e; }
+`;

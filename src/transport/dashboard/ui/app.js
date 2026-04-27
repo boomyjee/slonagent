@@ -5,24 +5,26 @@ import { FileTree, refreshTree } from './components/FileTree.js';
 import { Editor } from './components/Editor.js';
 import { Tabs } from './components/Tabs.js';
 import { Logs } from './components/Logs.js';
+import { Git } from './components/Git.js';
 
 const BASE = new URL('./', location.href).href;
 const api = (path) => fetch(BASE + path).then(r => r.json());
 
 const cl = {};
-const LOGS_TAB = { id: 'logs', label: 'Logs', closable: false };
+const LOGS_TAB = { id: 'logs', label: '☰', closable: false };
 
 class App extends Component {
     constructor(props) {
         super(props);
-        const savedFiles = persist.get('dashboard.tabs', []);
+        const savedTabs = persist.get('dashboard.tabs', []).filter(t => t.id !== 'logs');
         const savedActive = persist.get('dashboard.activeTab', 'logs');
         this.state = {
             connected: false,
             rootPath: null,
-            tabs: [LOGS_TAB, ...savedFiles.map(t => ({...t, closable: true}))],
+            tabs: [LOGS_TAB, ...savedTabs.map(t => ({...t, closable: true}))],
             activeTab: savedActive,
             logs: { agent: [], memory: [], transport: [] },
+            gitRefreshKey: 0,
         };
         this._chat = null;
         this._editor = null;
@@ -34,15 +36,16 @@ class App extends Component {
         document.addEventListener('keydown', e => {
             if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                 e.preventDefault();
-                if (this.state.activeTab !== 'logs') this._editor?.save(this.state.activeTab);
+                const id = this.state.activeTab;
+                if (id !== 'logs' && !id.startsWith('git:')) this._editor?.save(id);
             }
         });
     }
 
     componentDidUpdate(_, prev) {
         if (prev.tabs !== this.state.tabs || prev.activeTab !== this.state.activeTab) {
-            const files = this.state.tabs.filter(t => t.id !== 'logs').map(t => ({ id: t.id, label: t.label }));
-            persist.set('dashboard.tabs', files);
+            const tabs = this.state.tabs.filter(t => t.id !== 'logs').map(t => ({ id: t.id, label: t.label }));
+            persist.set('dashboard.tabs', tabs);
             persist.set('dashboard.activeTab', this.state.activeTab);
         }
     }
@@ -72,6 +75,7 @@ class App extends Component {
         } else if (ev.type === 'files_changed') {
             this._editor?.handleFilesChanged(ev.paths);
             if (ev.tree) refreshTree(ev.paths);
+            this.setState(({ gitRefreshKey }) => ({ gitRefreshKey: gitRefreshKey + 1 }));
         }
     }
 
@@ -84,6 +88,16 @@ class App extends Component {
         });
     };
 
+    _openGit = (path, name) => {
+        const id = `git:${path}`;
+        this.setState(({ tabs }) => {
+            const next = tabs.some(t => t.id === id)
+                ? tabs
+                : [...tabs, { id, label: `⎇ ${name}`, closable: true }];
+            return { tabs: next, activeTab: id };
+        });
+    };
+
     _closeTab = (id) => {
         if (id === 'logs') return;
         this.setState(({ tabs, activeTab }) => {
@@ -92,7 +106,7 @@ class App extends Component {
             const active = activeTab === id ? (idx > 0 ? tabs[idx - 1].id : 'logs') : activeTab;
             return { tabs: next, activeTab: active };
         });
-        this._editor?.closeFile(id);
+        if (!id.startsWith('git:')) this._editor?.closeFile(id);
     };
 
     _onDirtyChange = (path, dirty, diskChanged) => {
@@ -101,15 +115,16 @@ class App extends Component {
         }));
     };
 
-    render(_, { connected, rootPath, tabs, activeTab, logs }) {
-        const showLogs = activeTab === 'logs';
-        const activeFile = showLogs ? null : activeTab;
+    render(_, { connected, rootPath, tabs, activeTab, logs, gitRefreshKey }) {
+        const isLogs = activeTab === 'logs';
+        const isGit = activeTab.startsWith('git:');
+        const activeFile = !isLogs && !isGit ? activeTab : null;
         return html`
             <div class=${cl.app}>
                 <div class=${cl.sidebar}>
                     <div class=${cl.sidebarHdr}>Explorer</div>
                     <div class=${cl.tree}>
-                        <${FileTree} rootPath=${rootPath} onOpen=${this._openFile} />
+                        <${FileTree} rootPath=${rootPath} onOpen=${this._openFile} onOpenGit=${this._openGit} />
                     </div>
                 </div>
                 <${Resizer} side="left" persistKey="sidebar" />
@@ -118,10 +133,15 @@ class App extends Component {
                              onSelect=${id => this.setState({ activeTab: id })}
                              onClose=${this._closeTab} />
                     <div class=${cl.content}>
-                        <div class=${cl.pane} style=${{display: showLogs ? 'flex' : 'none'}}>
+                        <div class=${cl.pane} style=${{display: isLogs ? 'flex' : 'none'}}>
                             <${Logs} logs=${logs} />
                         </div>
-                        <div class=${cl.pane} style=${{display: showLogs ? 'none' : 'flex'}}>
+                        ${tabs.filter(t => t.id.startsWith('git:')).map(t => html`
+                            <div key=${t.id} class=${cl.pane}
+                                 style=${{display: activeTab === t.id ? 'flex' : 'none'}}>
+                                <${Git} path=${t.id.slice(4)} refreshKey=${gitRefreshKey} />
+                            </div>`)}
+                        <div class=${cl.pane} style=${{display: activeFile ? 'flex' : 'none'}}>
                             <${Editor} ref=${c => this._editor = c}
                                        active=${activeFile}
                                        onDirtyChange=${this._onDirtyChange} />
