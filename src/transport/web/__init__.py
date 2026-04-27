@@ -90,6 +90,7 @@ class WebTransport(BaseTransport):
         self._clients: set[WebSocket] = set()
         self._replay_buffer: deque = deque(maxlen=500)
         self._routes: list = []
+        self._mount_id: str | None = None
         # Monotonic id stamped on every outgoing event. Clients track the
         # highest id they've seen and ask for "give me everything since X"
         # via {type:"replay", last_seen_id: X} on ws.open — that way a
@@ -127,7 +128,9 @@ class WebTransport(BaseTransport):
         (`/{agent_id}{prefix}{sub_path}`). Uses the tunnel URL if one is
         available; pass `force_localhost=True` to skip it. Awaits tunnel
         startup if it's still in progress."""
-        path = f"/{self.agent.id}{self._prefix}{sub_path}"
+        if self._mount_id is None:
+            raise RuntimeError("get_url called before set_agent (or transport has _mount=False and no URL)")
+        path = f"/{self._mount_id}{self._prefix}{sub_path}"
         if not force_localhost and WebTransport._tunnel_ready is not None:
             await WebTransport._tunnel_ready.wait()
         if not force_localhost and WebTransport._tunnel_url:
@@ -259,9 +262,8 @@ class WebTransport(BaseTransport):
 
     def set_agent(self, agent):
         super().set_agent(agent)
-        if not self._mount:
-            return
-        self.remove_routes()
+        if not self._mount or self._routes: return
+        self._mount_id = agent.id
         self._ensure_server()
         self.register_routes()
 
