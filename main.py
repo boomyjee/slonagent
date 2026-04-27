@@ -61,7 +61,8 @@ _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 async def run_cli():
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
-    transport = CliTransport()
+    DashboardTransport.set_server_config(**config.get("web", {}))
+    transport = MultiTransport([CliTransport(), DashboardTransport()])
     agent = Agent.from_config(resolve(config["agent"]), id="main", agent_dir=os.getcwd(), transport=transport)
     await agent.start()
 
