@@ -4,10 +4,11 @@ Owns its own FastAPI route handlers so the dashboard module stays a thin shell.
 All paths are workspace-scoped; sandbox.resolve_path() enforces the boundary.
 """
 import os
+import mimetypes
 import shutil
 
 from fastapi import Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 
 class FilesAPI:
@@ -22,6 +23,7 @@ class FilesAPI:
         t = self.transport
         t.register_route("get", "/api/files", self.list)
         t.register_route("get", "/api/file", self.read)
+        t.register_route("get", "/api/file/raw", self.read_raw)
         t.register_route("put", "/api/file", self.write)
         t.register_route("post", "/api/file/create", self.create)
         t.register_route("patch", "/api/file/rename", self.rename)
@@ -66,6 +68,17 @@ class FilesAPI:
                 return JSONResponse({"path": path, "content": f.read()})
         except Exception as e:
             return JSONResponse({"error": str(e)}, 500)
+
+    async def read_raw(self, path: str = Query(...)):
+        """Stream raw bytes — for images/videos rendered directly by the
+        browser. Mime is guessed from extension."""
+        host = self._resolve(path)
+        if host is None:
+            return JSONResponse({"error": "No sandbox or access denied"}, 503)
+        if not os.path.isfile(host):
+            return JSONResponse({"error": f"Not a file: {path}"}, 400)
+        mime, _ = mimetypes.guess_type(host)
+        return FileResponse(host, media_type=mime or "application/octet-stream")
 
     async def write(self, request: Request):
         data = await request.json()

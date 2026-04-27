@@ -24,6 +24,17 @@ function fileLang(file) {
     return LANG[file.split('.').pop()] || 'plaintext';
 }
 
+const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
+const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi']);
+const AUDIO_EXT = new Set(['mp3', 'wav', 'ogg', 'flac', 'm4a']);
+function mediaKind(path) {
+    const ext = path.split('.').pop().toLowerCase();
+    if (IMAGE_EXT.has(ext)) return 'image';
+    if (VIDEO_EXT.has(ext)) return 'video';
+    if (AUDIO_EXT.has(ext)) return 'audio';
+    return null;
+}
+
 let monacoPromise = null;
 function loadMonaco() {
     if (monacoPromise) return monacoPromise;
@@ -82,7 +93,7 @@ function loadMonaco() {
 export class Editor extends Component {
     constructor(props) {
         super(props);
-        this.state = { ready: false };
+        this.state = { ready: false, mediaPath: null };
         this.models = {};
     }
 
@@ -94,12 +105,21 @@ export class Editor extends Component {
             automaticLayout: true, scrollBeyondLastLine: false,
         });
         this.setState({ ready: true });
-        if (this.props.active) this._activate(this.props.active);
+        this._handleActive();
     }
 
     componentDidUpdate(prevProps) {
-        if (this.state.ready && prevProps.active !== this.props.active && this.props.active) {
-            this._activate(this.props.active);
+        if (prevProps.active !== this.props.active) this._handleActive();
+    }
+
+    _handleActive() {
+        const path = this.props.active;
+        if (!path) return;
+        if (mediaKind(path)) {
+            this.setState({ mediaPath: path });
+        } else if (this.state.ready) {
+            if (this.state.mediaPath) this.setState({ mediaPath: null });
+            this._activate(path);
         }
     }
 
@@ -244,11 +264,19 @@ export class Editor extends Component {
         }
     }
 
-    render({ active }) {
+    render({ active }, { mediaPath }) {
+        const kind = mediaPath ? mediaKind(mediaPath) : null;
+        const showMonaco = !!active && !mediaPath;
+        const src = mediaPath ? `api/file/raw?path=${encodeURIComponent(mediaPath)}` : '';
         return html`<div class=${cl.editor}>
             ${!active && html`<div class=${cl.welcome}>Select a file to view</div>`}
-            <div class=${cl.monacoWrap} style=${{display: active ? 'block' : 'none'}}
+            <div class=${cl.monacoWrap} style=${{display: showMonaco ? 'block' : 'none'}}
                  ref=${el => this._el = el}></div>
+            ${mediaPath && html`<div class=${cl.media}>
+                ${kind === 'image' && html`<img src=${src} />`}
+                ${kind === 'video' && html`<video controls src=${src}></video>`}
+                ${kind === 'audio' && html`<audio controls src=${src}></audio>`}
+            </div>`}
         </div>`;
     }
 }
@@ -259,3 +287,9 @@ cl.welcome = css`
   color: var(--text-dim); font-size: 16px;
 `;
 cl.monacoWrap = css`flex: 1;`;
+cl.media = css`
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  overflow: auto; background: var(--bg); padding: 16px;
+  & img, & video { max-width: 100%; max-height: 100%; object-fit: contain; }
+  & audio { width: 80%; }
+`;

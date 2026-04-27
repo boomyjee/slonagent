@@ -30,6 +30,8 @@ export class Git extends Component {
             error: '',
             menu: null,    // { name, x, y, items }
         };
+        // Re-expanded after the file list arrives (set in _restoreExpanded).
+        this._toRestore = saved.expandedFiles || [];
     }
 
     _persistKey(path) { return `git:${path || this.props.path}`; }
@@ -42,8 +44,14 @@ export class Git extends Component {
 
     componentDidUpdate(prevProps, prevState) {
         if (prevProps.refreshKey !== this.props.refreshKey) this._refresh();
-        if (this._PERSISTED.some(k => prevState[k] !== this.state[k])) {
-            const data = {};
+        const fieldChanged = this._PERSISTED.some(k => prevState[k] !== this.state[k]);
+        const expandedKeys = Object.keys(this.state.expanded);
+        const prevKeys = Object.keys(prevState.expanded);
+        const expandedChanged =
+            expandedKeys.length !== prevKeys.length ||
+            expandedKeys.some(k => !prevKeys.includes(k));
+        if (fieldChanged || expandedChanged) {
+            const data = { expandedFiles: expandedKeys };
             for (const k of this._PERSISTED) data[k] = this.state[k];
             persist.set(this._persistKey(), data);
         }
@@ -67,16 +75,28 @@ export class Git extends Component {
         if (this.state.view === 'working_tree') {
             await this._loadStatus();
         } else {
-            await this._loadHistory(br.current);
+            await this._loadHistory(br.current, this.state.selectedCommit);
+        }
+        await this._restoreExpanded();
+    }
+
+    async _restoreExpanded() {
+        const toOpen = this._toRestore || [];
+        this._toRestore = null;
+        if (!toOpen.length) return;
+        const fileSet = new Set(this.state.files.map(f => f.file));
+        for (const path of toOpen) {
+            const f = this.state.files.find(x => x.file === path);
+            if (f && fileSet.has(path)) await this._toggleDiff(f);
         }
     }
 
     async _loadStatus() {
         const s = await api(`api/git/status?${this._q()}`);
-        if (s.error) { this.setState({ error: s.error }); return; }
+        if (s.error) { this.setState({ error: s.error, loading: false }); return; }
         this.setState({
             files: s.files, statusHash: s.status_hash,
-            expanded: {}, error: '',
+            expanded: {}, error: '', loading: false,
         });
     }
 
@@ -97,7 +117,7 @@ export class Git extends Component {
             commits, afterCommits: after.commits || [],
             historyMore: !!(more.commits || []).length,
             selectedCommit: selected,
-            files, expanded: {}, error: '',
+            files, expanded: {}, error: '', loading: false,
         });
     }
 
@@ -173,7 +193,10 @@ export class Git extends Component {
         this.setState({ historyDepth: n }, () => this._loadHistory(this.state.branch, this.state.selectedCommit));
     }
     async _switchView(v) {
-        this.setState({ view: v }, () => this._refresh());
+        // Wipe data instantly so the panel doesn't flash old content from
+        // the previous view while async fetches are in flight.
+        this.setState({ view: v, files: [], commits: [], afterCommits: [], expanded: {}, loading: true },
+            () => this._refresh());
     }
 
     // ─── diff ─────────────────────────────────────────────────────
@@ -223,7 +246,7 @@ export class Git extends Component {
 
     render() {
         const { view, branch, branches, files, commits, afterCommits, historyMore,
-                selectedCommit, historyDepth, message, expanded, error, menu } = this.state;
+                selectedCommit, historyDepth, message, expanded, error, menu, loading } = this.state;
         const stagedCount = files.filter(f => f.staged).length;
         const isHistory = view === 'history';
 
@@ -297,7 +320,8 @@ export class Git extends Component {
                     </tr></thead>
                     <tbody>
                         ${files.length === 0 && html`<tr><td colspan="5" class=${cl.emptyRow}>
-                            ${isHistory ? 'No changes in this commit' : 'Nothing to commit, working tree clean'}
+                            ${loading ? 'loading…' :
+                                (isHistory ? 'No changes in this commit' : 'Nothing to commit, working tree clean')}
                         </td></tr>`}
                         ${files.map(f => html`
                             <${FileRow} key=${f.file} f=${f} isHistory=${isHistory}

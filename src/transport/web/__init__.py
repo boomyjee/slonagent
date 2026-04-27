@@ -228,10 +228,11 @@ class WebTransport(BaseTransport):
                 finally:
                     WebTransport._tunnel_ready.set()
 
-                # The reverse-forwarded channel goes "cold" after ~10s of
-                # idle (sish-side, judging by reproducers): the first request
-                # then pays a ~2s TTFB while something inside sish/asyncssh
-                # re-establishes flow. Keep it warm with a tiny periodic hit.
+                # The reverse-forwarded channel goes "cold" after ~10s of idle:
+                # the next request pays a ~2s TTFB while sish/asyncssh re-warm.
+                # SSH-level keepalive doesn't count as activity for sish's idle
+                # detector (verified: keepalive_interval=3 didn't help) — only
+                # HTTP traffic does. Keep the channel warm with periodic hits.
                 import urllib.request, ssl
                 ctx = ssl.create_default_context()
                 ctx.check_hostname = False
