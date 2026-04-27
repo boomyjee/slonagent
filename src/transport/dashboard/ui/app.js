@@ -1,7 +1,7 @@
 import { render, html, Component, css, persist } from './lib.js';
 import { Chat } from './components/common/Chat.js';
 import { Resizer } from './components/common/Resizer.js';
-import { FileTree, refreshTree } from './components/FileTree.js';
+import { FileTree, refreshTree, isInGitRepo } from './components/FileTree.js';
 import { Editor } from './components/Editor.js';
 import { Tabs } from './components/Tabs.js';
 import { Logs } from './components/Logs.js';
@@ -132,6 +132,53 @@ class App extends Component {
         if (!id.startsWith('git:')) this._editor?.closeFile(id);
     };
 
+    _closeOthers = (keepId) => {
+        const closing = this.state.tabs.filter(t => t.closable !== false && t.id !== keepId);
+        for (const t of closing) {
+            if (!t.id.startsWith('git:')) this._editor?.closeFile(t.id);
+        }
+        this.setState(({ tabs }) => ({
+            tabs: tabs.filter(t => t.closable === false || t.id === keepId),
+            activeTab: keepId,
+        }));
+    };
+
+    _closeAll = () => {
+        const closing = this.state.tabs.filter(t => t.closable !== false);
+        for (const t of closing) {
+            if (!t.id.startsWith('git:')) this._editor?.closeFile(t.id);
+        }
+        this.setState(({ tabs }) => ({
+            tabs: tabs.filter(t => t.closable === false),
+            activeTab: 'logs',
+        }));
+    };
+
+    _reorderTab = (srcId, insertAt) => {
+        this.setState(({ tabs }) => {
+            const srcIdx = tabs.findIndex(t => t.id === srcId);
+            if (srcIdx < 0) return {};
+            const src = tabs[srcIdx];
+            const filtered = tabs.filter(t => t.id !== srcId);
+            // After removing src, insertions past srcIdx shift left by one.
+            const target = insertAt > srcIdx ? insertAt - 1 : insertAt;
+            return { tabs: [...filtered.slice(0, target), src, ...filtered.slice(target)] };
+        });
+    };
+
+    _tabContextItems = (tab) => {
+        const closable = tab.closable !== false;
+        const isFile = tab.id.startsWith('/') && !tab.id.startsWith('git-');
+        const blameable = isFile && isInGitRepo(tab.id);
+        const others = this.state.tabs.filter(t => t.closable !== false && t.id !== tab.id);
+        return [
+            { label: 'Close', disabled: !closable, action: () => this._closeTab(tab.id) },
+            { label: 'Close Others', disabled: !others.length, action: () => this._closeOthers(tab.id) },
+            { label: 'Close All', action: () => this._closeAll() },
+            ...(blameable ? [{ label: 'Git Blame', action: () => this._openGitBlame(tab.id, tab.label) }] : []),
+        ];
+    };
+
     _onDirtyChange = (path, dirty, diskChanged) => {
         this.setState(({ tabs }) => ({
             tabs: tabs.map(t => t.id === path ? { ...t, dirty, diskChanged } : t),
@@ -157,7 +204,9 @@ class App extends Component {
                 <div class=${cl.main}>
                     <${Tabs} tabs=${tabs} active=${activeTab}
                              onSelect=${id => this.setState({ activeTab: id })}
-                             onClose=${this._closeTab} />
+                             onClose=${this._closeTab}
+                             onReorder=${this._reorderTab}
+                             contextItems=${this._tabContextItems} />
                     <div class=${cl.content}>
                         <div class=${cl.pane} style=${{display: isLogs ? 'flex' : 'none'}}>
                             <${Logs} logs=${logs} />

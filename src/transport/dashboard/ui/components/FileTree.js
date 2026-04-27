@@ -187,6 +187,25 @@ export class FileTree extends Component {
 // Imperative entry for the websocket "files_changed" event.
 export const refreshTree = (paths) => tree.refresh(paths);
 
+// True if any cached ancestor of `path` is a folder with .git inside.
+// Returns false when the answer is unknown (the relevant parent listing
+// hasn't been fetched yet) — callers treat that as "don't offer git ops".
+export function isInGitRepo(path) {
+    let cur = path;
+    while (cur.includes('/')) {
+        cur = cur.substring(0, cur.lastIndexOf('/'));
+        if (!cur) break;
+        const parent = cur.substring(0, cur.lastIndexOf('/')) || cur;
+        if (parent === cur) break;
+        const list = tree.children[parent];
+        if (list) {
+            const entry = list.find(e => e.path === cur);
+            if (entry?.has_git) return true;
+        }
+    }
+    return false;
+}
+
 cl.node = css`
   display: flex; align-items: center; padding: 2px 8px; cursor: pointer;
   white-space: nowrap; user-select: none; font-size: 13px;

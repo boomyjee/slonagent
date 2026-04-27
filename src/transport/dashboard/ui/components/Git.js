@@ -94,9 +94,14 @@ export class Git extends Component {
     async _loadStatus() {
         const s = await api(`api/git/status?${this._q()}`);
         if (s.error) { this.setState({ error: s.error, loading: false }); return; }
-        this.setState({
-            files: s.files, statusHash: s.status_hash,
-            expanded: {}, error: '', loading: false,
+        this.setState(({ expanded }) => {
+            const stillThere = new Set(s.files.map(f => f.file));
+            const next = {};
+            for (const k of Object.keys(expanded)) if (stillThere.has(k)) next[k] = expanded[k];
+            return {
+                files: s.files, statusHash: s.status_hash,
+                expanded: next, error: '', loading: false,
+            };
         });
     }
 
@@ -113,11 +118,16 @@ export class Git extends Component {
         const files = selected
             ? (await api(`api/git/history?${this._q(`commit=${encodeURIComponent(selected)}&depth=${this.state.historyDepth}`)}`)).files || []
             : [];
-        this.setState({
-            commits, afterCommits: after.commits || [],
-            historyMore: !!(more.commits || []).length,
-            selectedCommit: selected,
-            files, expanded: {}, error: '', loading: false,
+        this.setState(({ expanded }) => {
+            const stillThere = new Set(files.map(f => f.file));
+            const next = {};
+            for (const k of Object.keys(expanded)) if (stillThere.has(k)) next[k] = expanded[k];
+            return {
+                commits, afterCommits: after.commits || [],
+                historyMore: !!(more.commits || []).length,
+                selectedCommit: selected,
+                files, expanded: next, error: '', loading: false,
+            };
         });
     }
 
@@ -426,6 +436,13 @@ function Diff({ text, parts, file, onLineClick }) {
             current.rows.push({ kind: 'ctx', oldN: oldNum, newN: newNum, text: line.slice(1) });
             oldNum++; newNum++;
         }
+    }
+
+    // No hunks usually means a binary diff ("Binary files a/x and b/x differ").
+    // Show whatever git did emit so the user isn't staring at an empty cell.
+    if (!hunks.length) {
+        const summary = lines.find(l => l.startsWith('Binary files')) || lines.find(l => l.trim()) || '(no textual diff)';
+        return html`<div class=${cl.diffEmpty}>${summary}</div>`;
     }
 
     return html`<div class=${cl.diff}>

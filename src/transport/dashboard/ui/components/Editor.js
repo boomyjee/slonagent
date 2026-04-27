@@ -115,7 +115,10 @@ export class Editor extends Component {
     _handleActive() {
         const path = this.props.active;
         if (!path) return;
-        if (mediaKind(path)) {
+        // Only real workspace paths render as media — virtual schemes
+        // (git-show:, git-blame:) keep going through the monaco loader.
+        const isFilePath = path.startsWith('/');
+        if (isFilePath && mediaKind(path)) {
             this.setState({ mediaPath: path });
         } else if (this.state.ready) {
             if (this.state.mediaPath) this.setState({ mediaPath: null });
