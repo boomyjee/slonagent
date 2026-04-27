@@ -90,6 +90,11 @@ class WebTransport(BaseTransport):
         self._clients: set[WebSocket] = set()
         self._replay_buffer: deque = deque(maxlen=500)
         self._routes: list = []
+        # Monotonic id stamped on every outgoing event. Clients track the
+        # highest id they've seen and ask for "give me everything since X"
+        # via {type:"replay", last_seen_id: X} on ws.open — that way a
+        # mobile reconnect into a still-alive page doesn't redraw history.
+        self._message_id_counter: int = 0
 
     @staticmethod
     def set_server_config(
@@ -317,8 +322,9 @@ class WebTransport(BaseTransport):
         await self.ws_connect(ws)    
 
     async def ws_connect(self, ws: WebSocket):
-        for event in list(self._replay_buffer):
-            await ws.send_text(json.dumps(event, ensure_ascii=False))
+        # No auto-replay — clients ask for it explicitly via a "replay"
+        # message after they connect (so reconnects on a live page can
+        # specify last_seen_id and skip what they already have).
         self._clients.add(ws)
         try:
             while True:
@@ -340,6 +346,12 @@ class WebTransport(BaseTransport):
         pass
 
     async def ws_handle_message(self, msg: dict, ws=None):
+        if msg.get("type") == "replay" and ws is not None:
+            last_seen = msg.get("last_seen_id", -1)
+            for event in list(self._replay_buffer):
+                if event.get("id", 0) > last_seen:
+                    await ws.send_text(json.dumps(event, ensure_ascii=False))
+            return
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
             # Echo back through send() so it lands in the buffer and gets
             # replayed on reconnect. Chat.js no longer adds user messages
@@ -352,6 +364,8 @@ class WebTransport(BaseTransport):
             )
 
     async def send(self, event: dict, replay=False):
+        self._message_id_counter += 1
+        event = {**event, "id": self._message_id_counter}
         if replay: self._replay_buffer.append(event)
         if not self._clients: return
         data = json.dumps(event, ensure_ascii=False)

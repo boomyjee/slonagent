@@ -50,6 +50,7 @@ class App extends Component {
     }
 
     componentDidMount() {
+        this._lastSeenId = -1;
         this._connect();
         document.addEventListener('keydown', e => {
             if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -79,6 +80,7 @@ class App extends Component {
         this._ws = new WebSocket(proto + location.host + location.pathname + 'ws');
         this._ws.onopen = () => {
             this.setState({ connected: true });
+            this.send({ type: 'replay', last_seen_id: this._lastSeenId });
             this._subscribeWatcher();
         };
         this._ws.onclose = () => { this.setState({ connected: false }); setTimeout(() => this._connect(), 2000); };
@@ -117,6 +119,7 @@ class App extends Component {
     }
 
     _onMessage(ev) {
+        if (ev.id != null && ev.id > this._lastSeenId) this._lastSeenId = ev.id;
         if (ev.type === 'transport') {
             this._chat?.handleMessage(ev);
         } else if (ev.type === 'log') {
