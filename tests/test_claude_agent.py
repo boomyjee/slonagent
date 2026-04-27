@@ -260,11 +260,11 @@ class TestLlmBlockConversion:
         agent._current_content_parts = [{"type": "text", "text": "hi"}]
         await agent.llm()
 
-        # Ожидаем 4 вызова: 3 дельты + 1 финальный flush
-        sent_texts = [c.args[0] for c in agent.transport.send_message.call_args_list]
+        # Стрим-вызовы (с stream_id) — отдельно от финального "Готово ($cost)" без stream_id
+        stream_calls = [c for c in agent.transport.send_message.call_args_list if c.kwargs.get("stream_id")]
+        sent_texts = [c.args[0] for c in stream_calls]
         assert sent_texts == ["Hi", "Hi, ", "Hi, world!", "Hi, world!"]
-        # Все вызовы — с одним stream_id (UI обновляет одно сообщение в месте)
-        sent_stream_ids = [c.kwargs["stream_id"] for c in agent.transport.send_message.call_args_list]
+        sent_stream_ids = [c.kwargs["stream_id"] for c in stream_calls]
         assert len(set(sent_stream_ids)) == 1
 
     @pytest.mark.asyncio
@@ -447,14 +447,13 @@ class TestClaudeAgentIntegration:
         finally:
             await agent.close()
 
-        calls = agent.transport.send_message.call_args_list
-        assert len(calls) >= 3, f"ожидаем стрим из >=3 вызовов, получили {len(calls)}"
-        sent_texts = [c.args[0] for c in calls if c.args]
-        # Каждый следующий — длиннее предыдущего (накопление)
+        # Стрим-вызовы (с stream_id) — без финального "Готово" без stream_id
+        stream_calls = [c for c in agent.transport.send_message.call_args_list if c.kwargs.get("stream_id")]
+        assert len(stream_calls) >= 3, f"ожидаем стрим из >=3 вызовов, получили {len(stream_calls)}"
+        sent_texts = [c.args[0] for c in stream_calls]
         for prev, cur in zip(sent_texts, sent_texts[1:]):
             assert len(cur) >= len(prev), f"текст не накапливается: {prev!r} → {cur!r}"
-        # Все из одного блока — один stream_id
-        ids = {c.kwargs.get("stream_id") for c in calls}
+        ids = {c.kwargs["stream_id"] for c in stream_calls}
         assert len(ids) == 1, f"ожидаем один stream_id, получили {ids}"
 
     @pytest.mark.asyncio

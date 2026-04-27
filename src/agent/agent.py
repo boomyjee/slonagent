@@ -471,18 +471,24 @@ class Agent:
 
                         await self.transport.send_processing(True)
                         open(os.path.join(self.memory.memory_dir, "last_turn_chunks.log"), "w").close()
-                        turns = r if isinstance(r := await self.llm(), list) else [r]
-                        iteration = 0
-                        while turns[-1].get("tool_calls") and iteration < self.max_iterations:
-                            result_turns = await self.dispatch_tool_calls(turns[-1])
-                            await self.memory.add_turn(*turns, *result_turns)
-                            iteration += 1
-                            turns = r if isinstance(r := await self.llm(), list) else [r]
-                        if turns[-1].get("tool_calls"):
-                            logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
-                            await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
+                        result = await self.llm()
+                        if isinstance(result, list): # llm сам отработал тулы внутри
+                            await self.memory.add_turn(*result)
                         else:
-                            await self.memory.add_turn(*turns)
+                            turn = result
+                            iteration = 0
+                            while turn.get("tool_calls"):
+                                if iteration >= self.max_iterations:
+                                    logging.warning("[agent] max_iterations=%d reached", self.max_iterations)
+                                    await self.transport.send_message(f"⚠️ Достигнут лимит итераций ({self.max_iterations}). Ответ может быть неполным.")
+                                    break
+                                result_turns = await self.dispatch_tool_calls(turn)
+                                await self.memory.add_turn(turn, *result_turns)
+                                iteration += 1
+                                turn = await self.llm()
+                            else:
+                                await self.memory.add_turn(turn)
+                                
                     except Exception as e:
                         logging.warning("Ошибка агента: %s", e, exc_info=True)
                         await self.transport.send_message(f"Ошибка: {e}")
