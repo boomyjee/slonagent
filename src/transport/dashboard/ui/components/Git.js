@@ -271,6 +271,7 @@ export class Git extends Component {
                 return [
                     ...commits.map(c => ({
                         label: html`<b>${c.sha_short}</b> ${c.date.slice(0, 10)} — ${truncate(c.message, 80)}`,
+                        tooltip: `${c.sha_short} ${c.date}\n${c.message}`,
                         selected: c.sha_full === selectedCommit,
                         action: () => this._selectCommit(c.sha_full),
                     })),
@@ -280,6 +281,7 @@ export class Git extends Component {
             if (m.name === 'depth') {
                 return afterCommits.map((c, i) => ({
                     label: html`<b>~${i + 1}</b> ${c.sha_short} — ${truncate(c.message, 80)}`,
+                    tooltip: `~${i + 1}  ${c.sha_short} ${c.date}\n${c.message}`,
                     selected: (i + 1) === historyDepth,
                     action: () => this._selectDepth(i + 1),
                 }));
@@ -370,6 +372,7 @@ function Menu({ menu, items, onClose }) {
                      onClick=${e => e.stopPropagation()}>
         ${items.map((it, i) => html`
             <div key=${i} class="${cl.menuItem}${it.selected ? ' selected' : ''}"
+                 title=${it.tooltip || ''}
                  onClick=${e => { e.stopPropagation(); it.action(); if (!it.keepOpen) onClose(); }}>
                 ${it.label}
             </div>`)}
@@ -549,7 +552,7 @@ cl.menu = css`
 cl.menuItem = css`
   padding: 4px 12px; color: var(--text); cursor: pointer; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
-  &:hover { background: var(--accent); color: #1e1e2e; }
   &.selected { background: var(--surface3); }
+  &:hover { background: var(--accent); color: #1e1e2e; }
   & b { font-weight: 700; color: inherit; }
 `;
