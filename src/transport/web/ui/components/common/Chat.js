@@ -219,7 +219,10 @@ cl.msg = css`
   &.assistant { background: var(--surface2); }
   &.thinking { background: var(--surface2); font-size: 12px; color: var(--text-dim); font-style: italic; }
   &.thinking.collapsed {
-    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+    /* line-height becomes the visual height of the box; line 2 starts
+       AT the bottom edge so overflow has nothing to clip mid-glyph. */
+    line-height: 34px; height: 34px;
+    padding-top: 0; padding-bottom: 0;
     overflow: hidden; cursor: pointer; opacity: 0.5;
   }
   &.thinking.collapsed:hover { opacity: 0.7; }
