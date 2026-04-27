@@ -26,38 +26,31 @@ class ClaudeCodeSkill(Skill):
         project_path: Annotated[str, "Путь к проекту"] = "",
     ) -> dict:
         from src.agent.agent import stoppable
-        from src.modes.coding import CodingTransport
         from src.skills.sandbox import SandboxSkill
-        from src.transport.multi import MultiTransport
+        from src.transport.dashboard import DashboardTransport
 
         sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         if not sandbox:
             return {"error": "Требуется SandboxSkill с Docker-контейнером"}
 
-        coding_transport = CodingTransport(project_path or "/workspace")
-        coding_transport.resolve_path = sandbox.resolve_path
-        coding_transport.workspace_host_dir = sandbox.workspace_dir
-        coding_transport.start_watcher()
-
         sub = await self.agent.spawn_subagent(
             "claude_code",
             __class__="src.agent.claude_agent.ClaudeAgent",
             skills=[],
-            transport=MultiTransport([self.agent.transport, coding_transport]),
             model_name=self._model,
         )
 
-        url = await coding_transport.get_url('/')
+        def find(t): return t if isinstance(t, DashboardTransport) else next((d for c in getattr(t, 'transports', []) if (d := find(c))), None)
+        dashboard = find(self.agent.transport)
+        url = await dashboard.get_url('/') if dashboard else ""
         await self.agent.transport.send_message(
-            f"\U0001f4bb Claude Code: {url}\nДля выхода: /stop"
+            f"\U0001f4bb Claude Code: {url}\nДля выхода: /stop" if url
+            else "\U0001f4bb Claude Code\nДля выхода: /stop"
         )
 
         if task:
             await sub.process_message([{"type": "text", "text": task}])
 
-        try:
-            await stoppable(sub.loop(), sub._stop_event)
-        finally:
-            coding_transport.cleanup()
+        await stoppable(sub.loop(), sub._stop_event)
 
         return {"status": "finished"}
