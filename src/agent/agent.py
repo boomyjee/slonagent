@@ -61,12 +61,13 @@ class Agent:
     def get_agent_dir(self) -> str:
         return self.agent_dir
 
-    def add_transport_skills(self):
+    async def add_transport_skills(self):
         if not self.transport:
             return
         for skill in self.transport.get_skills():
             if skill not in self.skills:
                 skill.register(self)
+                await skill.start()
                 self.skills.insert(0, skill)
 
     async def spawn_subagent(self, name: str, **cfg_overrides) -> "Agent":
@@ -452,7 +453,7 @@ class Agent:
 
 
     async def loop(self):
-        self.add_transport_skills()
+        await self.add_transport_skills()
         while True:
             self._stop_event.clear()
 

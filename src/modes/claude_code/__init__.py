@@ -8,13 +8,15 @@ from typing import Annotated
 
 from agent import Skill, tool, bypass
 from claude_agent_sdk import (
+    AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
-    AssistantMessage,
     ResultMessage,
     SdkMcpTool,
     StreamEvent,
+    TextBlock,
     ToolResultBlock,
+    ToolUseBlock,
     UserMessage,
     create_sdk_mcp_server,
 )
@@ -173,98 +175,83 @@ class ClaudeCodeSkill(Skill):
         log.info("[claude_code] query: %r", text[:80])
         await self._client.query(text, session_id=session_id)
 
-        # 5. стримим ответ
-        text_buf = ""
+        # 5. стримим ответ.
+        #    StreamEvent → только UI (deltas через transport).
+        #    AssistantMessage / UserMessage → запись в shadow.memory вместе с uuid
+        #    из claude jsonl (по одному блоку на turn — как клод хранит у себя).
+        #    Формат памяти — OpenAI: text → assistant.content, tool_use → tool_calls,
+        #    tool_result → role:tool. thinking в memory не пишем (нет в OpenAI).
         text_stream_id = None
-        thinking_buf = ""
         thinking_stream_id = None
-        tool_input_buf = ""
-        tool_name = ""
+        tool_use_names: dict[str, str] = {}  # id → name, для tool_result.name
         block_type = None
-        assistant_parts: list[str] = []   # text + tool_use, для сохранения как assistant turn
 
         async for message in self._client.receive_response():
             if isinstance(message, StreamEvent):
                 event = message.event
                 etype = event.get("type", "")
-
                 if etype == "content_block_start":
-                    block = event.get("content_block", {})
-                    block_type = block.get("type")
-                    if block_type == "tool_use":
-                        if text_buf:
-                            await transport.send_message(text_buf, stream_id=text_stream_id)
-                            assistant_parts.append(text_buf)
-                            text_buf = ""
-                            text_stream_id = None
-                        tool_name = block.get("name", "?")
-                        tool_input_buf = ""
-                    elif block_type == "thinking":
-                        thinking_buf = ""
+                    block_type = event.get("content_block", {}).get("type")
+                    if block_type == "thinking":
                         thinking_stream_id = id(event)
-
                 elif etype == "content_block_delta":
                     delta = event.get("delta", {})
                     dtype = delta.get("type")
                     if dtype == "text_delta":
-                        text_buf += delta.get("text", "")
                         if text_stream_id is None:
                             text_stream_id = id(delta)
-                        await transport.send_message(text_buf, stream_id=text_stream_id)
+                        await transport.send_message(delta.get("text", ""), stream_id=text_stream_id)
                     elif dtype == "thinking_delta":
-                        thinking_buf += delta.get("thinking", "")
-                        await transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
-                    elif dtype == "input_json_delta":
-                        tool_input_buf += delta.get("partial_json", "")
-
+                        await transport.send_thinking(delta.get("thinking", ""), stream_id=thinking_stream_id)
                 elif etype == "content_block_stop":
-                    if block_type == "tool_use":
-                        try:
-                            args = json.loads(tool_input_buf) if tool_input_buf else {}
-                        except json.JSONDecodeError:
-                            args = {"raw": tool_input_buf}
-                        await transport.on_tool_call(tool_name, args)
-                        assistant_parts.append(
-                            f"[tool_use {tool_name}] {json.dumps(args, ensure_ascii=False)}"
-                        )
-                        tool_name = ""
-                        tool_input_buf = ""
-                    elif block_type == "thinking" and thinking_buf:
-                        await transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
-                        # thinking в shadow.memory не сохраняем (внутренний монолог)
-                        thinking_buf = ""
+                    if block_type == "text":
+                        text_stream_id = None
+                    elif block_type == "thinking":
                         thinking_stream_id = None
                     block_type = None
 
+            elif isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        await shadow.memory.add_turn({
+                            "role": "assistant",
+                            "content": block.text,
+                            "_uuid": message.uuid,
+                        })
+                    elif isinstance(block, ToolUseBlock):
+                        await transport.on_tool_call(block.name, block.input)
+                        tool_use_names[block.id] = block.name
+                        await shadow.memory.add_turn({
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": block.id,
+                                "type": "function",
+                                "function": {
+                                    "name": block.name,
+                                    "arguments": json.dumps(block.input, ensure_ascii=False),
+                                },
+                            }],
+                            "_uuid": message.uuid,
+                        })
+                    # ThinkingBlock — пропускаем, нет в OpenAI-формате
+
             elif isinstance(message, UserMessage):
-                tr_parts: list[str] = []
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
                         result = block.content or ""
                         await transport.on_tool_result(block.tool_use_id, result)
-                        tr_parts.append(f"[tool_result] {result}")
-                if tr_parts:
-                    await shadow.memory.add_turn({
-                        "role": "user",
-                        "content": "\n".join(tr_parts),
-                    })
-
-            elif isinstance(message, AssistantMessage):
-                if text_buf:
-                    await transport.send_message(text_buf, stream_id=text_stream_id)
-                    assistant_parts.append(text_buf)
-                    text_buf = ""
-                    text_stream_id = None
+                        await shadow.memory.add_turn({
+                            "role": "tool",
+                            "tool_call_id": block.tool_use_id,
+                            "name": tool_use_names.get(block.tool_use_id, ""),
+                            "content": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
+                            "_uuid": message.uuid,
+                        })
 
             elif isinstance(message, ResultMessage):
                 cost = f"${message.total_cost_usd:.4f}" if message.total_cost_usd else "n/a"
                 log.info("[claude_code] done: %d turns, %s", message.num_turns, cost)
                 await transport.send_message(f"✅ Готово ({message.num_turns} turns, {cost})")
-                if assistant_parts:
-                    await shadow.memory.add_turn({
-                        "role": "assistant",
-                        "content": "\n\n".join(assistant_parts),
-                    })
                 return
 
     @bypass("claude", "Запустить Claude Code", standalone=True)
@@ -313,7 +300,7 @@ class ClaudeCodeSkill(Skill):
         # Тащим скиллы транспорта (TelegramSkill etc) — обычно их собирает
         # agent.loop(), но shadow с run_loop=False. Чтобы клод мог отправлять
         # файлы/кнопки в TG — делаем это вручную после spawn.
-        shadow.add_transport_skills()
+        await shadow.add_transport_skills()
 
         url = await coding_transport.get_url('/')
         await self.agent.transport.send_message(

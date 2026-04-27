@@ -106,9 +106,12 @@ class TelegramSkill(Skill):
         self.transport = transport
         self._chat_title: str = ""
         self._is_private: bool = False
+        self.sandbox = None
         super().__init__()
 
     async def start(self):
+        from src.skills.sandbox import SandboxSkill
+        self.sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         t = self.transport
         try:
             chat = await t.bot.get_chat(t.chat_id)
@@ -129,15 +132,12 @@ class TelegramSkill(Skill):
         return f"Ты работаешь в группе «{self._chat_title}»."
 
     def _resolve_paths(self, paths: list[str]) -> list[str] | dict:
-        from src.skills.sandbox import SandboxSkill
-        sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         host_paths = []
         for p in paths:
             # С sandbox'ом — резолвим container-path в host. Без — принимаем
-            # host-абсолютный путь как есть (например, для Claude Code, который
-            # бегает по хосту, а не в контейнере).
-            if sandbox:
-                host_path = sandbox.resolve_path(p)
+            # host-абсолютный путь как есть (Claude Code бегает по хосту).
+            if self.sandbox:
+                host_path = self.sandbox.resolve_path(p)
                 if host_path is None:
                     return {"error": f"Доступ запрещён: {p}"}
             else:
@@ -193,23 +193,30 @@ class TelegramSkill(Skill):
         await self.transport._send(_markdown_to_html(text), parse_mode="HTML", reply_markup=kb)
         return {"status": "ok"}
 
-    @tool("Скачать файл, отправленный пользователем, в рабочую директорию.")
+    @tool(lambda self: (
+        "Скачать файл, отправленный пользователем. "
+        "dest_path — путь внутри контейнера (напр. /workspace/file.jpg)."
+        if self.sandbox
+        else "Скачать файл, отправленный пользователем. "
+        "dest_path — абсолютный путь на хост-машине."
+    ))
     async def download_file(
         self,
         tg_file_id: Annotated[str, "tg_file_id из метаданных прикреплённого файла."],
         dest_path: Annotated[str, "Путь назначения для сохранения файла."],
     ):
-        from src.skills.sandbox import SandboxSkill
-        sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
-        if sandbox:
-            host_dest = sandbox.resolve_path(dest_path)
+        if self.sandbox:
+            host_dest = self.sandbox.resolve_path(dest_path)
             if host_dest is None:
                 return {"error": f"Путь запрещён или недоступен: {dest_path}"}
         else:
             host_dest = os.path.abspath(dest_path)
 
+        dest_dir = os.path.dirname(host_dest)
+        if not os.path.isdir(dest_dir):
+            return {"error": f"Директория не существует: {dest_dir}"}
+
         tg_file = await self.transport.bot.get_file(tg_file_id)
-        os.makedirs(os.path.dirname(host_dest), exist_ok=True)
         await self.transport.bot.download_file(tg_file.file_path, host_dest)
         logging.info("[skill] download_file: %s → %s", tg_file_id, host_dest)
         return {"status": "ok", "saved_to": dest_path}
@@ -225,7 +232,6 @@ class TelegramTransport(BaseTransport):
         self.thread_name: str | None = None
         self.agent = None
         self._no_link_preview = LinkPreviewOptions(is_disabled=True)
-        self._skill = TelegramSkill(self)
         self.verbose = verbose
         self._tool_msg = None
         self._tool_call_text = ""
@@ -261,7 +267,7 @@ class TelegramTransport(BaseTransport):
                 self._typing_task = None
 
     def get_skills(self):
-        return [self._skill]
+        return [TelegramSkill(self)]
 
     def set_agent(self, agent):
         super().set_agent(agent)

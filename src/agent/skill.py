@@ -2,7 +2,8 @@ import inspect, json, logging
 from typing import Annotated, get_type_hints, get_args, get_origin
 
 
-def tool(description: str):
+def tool(description):
+    """description может быть str или callable(self) → str для динамических описаний."""
     def decorator(fn):
         fn._is_tool = True
         fn._tool_description = description
@@ -64,7 +65,7 @@ class Skill:
                 "type": "function",
                 "function": {
                     "name": tool_name,
-                    "description": fn._tool_description,
+                    "description": fn._tool_description,  # str | callable(self) → str
                     "parameters": {"type": "object", "properties": properties, "required": required},
                 },
             })
@@ -72,7 +73,13 @@ class Skill:
 
     def get_tools(self) -> list:
         """Возвращает список OpenAI-format tool dict для этого скилла. Переопределяй для динамических тулов."""
-        return self._tools
+        result = []
+        for t in self._tools:
+            desc = t["function"]["description"]
+            if callable(desc):
+                t = {**t, "function": {**t["function"], "description": desc(self)}}
+            result.append(t)
+        return result
 
     def get_bypass_commands(self, standalone_only: bool = False) -> dict[str, str]:
         """Возвращает {команда: описание} для bypass-обработчиков с описанием.
