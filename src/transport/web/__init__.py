@@ -19,7 +19,11 @@ async def start_tunnel(port: int, subdomain: str, sish_domain: str, sish_port: i
         sish_domain, sish_port, known_hosts=None, client_keys=[key], username="tunnel",
         keepalive_interval=15, keepalive_count_max=4,
     )
-    await conn.forward_remote_port(subdomain, 80, "localhost", port)
+    # Force IPv4 — passing "localhost" makes asyncssh try ::1 first; if
+    # uvicorn binds to 0.0.0.0 (v4 only), the v6 connect hangs for ~2s
+    # before falling back, which is the exact cold-start TTFB we kept
+    # papering over with HTTP-level keepalives.
+    await conn.forward_remote_port(subdomain, 80, "127.0.0.1", port)
     url = f"https://{subdomain}.{sish_domain}:8443"
     log.info("[tunnel] %s -> localhost:%d", url, port)
     return url, conn
@@ -224,25 +228,8 @@ class WebTransport(BaseTransport):
                     WebTransport._tunnel_url = url
                 except Exception as e:
                     log.warning("Tunnel failed: %s", e)
-                    return
                 finally:
                     WebTransport._tunnel_ready.set()
-
-                # The reverse-forwarded channel goes "cold" after ~10s of idle:
-                # the next request pays a ~2s TTFB while sish/asyncssh re-warm.
-                # SSH-level keepalive doesn't count as activity for sish's idle
-                # detector (verified: keepalive_interval=3 didn't help) — only
-                # HTTP traffic does. Keep the channel warm with periodic hits.
-                import urllib.request, ssl
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                while True:
-                    try:
-                        await asyncio.to_thread(urllib.request.urlopen, url, context=ctx, timeout=5)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(5)
             WebTransport._loop.call_soon_threadsafe(asyncio.create_task, _tunnel())
 
     def register_route(self, method, path, handler):
