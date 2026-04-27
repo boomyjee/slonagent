@@ -80,8 +80,8 @@ class DashboardTransport(WebTransport):
 
     _log_handler: _LogHandler | None = None
 
-    def __init__(self):
-        super().__init__(prefix="/dashboard")
+    def __init__(self, verbose: bool = True):
+        super().__init__(prefix="/dashboard", verbose=verbose)
         self._skill = DashboardSkill(self)
         self._proxy = SandboxProxy(self)
         self._files = FilesAPI(self)

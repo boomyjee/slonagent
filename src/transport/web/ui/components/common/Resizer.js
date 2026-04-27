@@ -5,7 +5,7 @@ const clResizer = css`
   &:hover { background: var(--accent); }
 `;
 
-export function Resizer({ side, persistKey }) {
+export function Resizer({ side, persistKey, className }) {
     function onMouseDown(e) {
         e.preventDefault();
         const el = side === 'left'
@@ -28,7 +28,7 @@ export function Resizer({ side, persistKey }) {
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
     }
-    return html`<div class=${clResizer} onMouseDown=${onMouseDown}
+    return html`<div class="${clResizer} ${className || ''}" onMouseDown=${onMouseDown}
         ref=${el => {
             if (!el || !persistKey) return;
             const w = persist.get(`resizer.${persistKey}`);

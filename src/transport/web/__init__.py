@@ -98,6 +98,7 @@ class WebTransport(BaseTransport):
         sish_port: int = 2222,
         sish_key: str = "",
         password_hash: str = "",
+        **_ignored,
     ):
         """Configure the shared uvicorn server. Call once from main.py before
         constructing any web transports. Can be invoked via any subclass."""

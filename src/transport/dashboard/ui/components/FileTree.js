@@ -28,8 +28,9 @@ function fileIcon(name) {
 
 // Tree state scoped by root: paths from /Users/me/projectA mean nothing
 // under /Users/me/projectB. setScope() rebinds expanded to the per-root
-// persistence slot.
-let _scope = '';
+// persistence slot. Initial value is `null` (uninitialised) so the first
+// call — even with the empty default-root key — runs the load.
+let _scope = null;
 const _expandedKey = () => `tree.expanded:${_scope}`;
 
 const tree = {

@@ -5,7 +5,7 @@ const cl = {};
 export class Chat extends Component {
     constructor(props) {
         super(props);
-        this.state = { messages: [], input: '', expanded: {} };
+        this.state = { messages: [], input: '', expanded: {}, processing: false };
         this._streams = {};
         // Sticky-bottom flag. Starts true so initial buffer replay (where
         // scrollTop=0 but scrollHeight is already huge) still snaps down.
@@ -62,10 +62,7 @@ export class Chat extends Component {
                 return {};
             });
         } else if (m === 'send_processing') {
-            this.setState(({ messages }) => {
-                if (ev.active) return { messages: [...messages, { kind: 'processing' }] };
-                return { messages: messages.filter(x => x.kind !== 'processing') };
-            });
+            this.setState({ processing: !!ev.active });
         } else if (m === 'send_system_prompt') {
             const preview = ev.text.split('\n')[0].slice(0, 80);
             this.setState(({ messages }) => ({
@@ -124,10 +121,13 @@ export class Chat extends Component {
         return String(result);
     }
 
-    render({ connected }, { messages, input, expanded }) {
+    render({ connected, className }, { messages, input, expanded, processing }) {
         return html`
-            <div class=${cl.chat}>
-                <div class=${cl.header}>Chat</div>
+            <div class="${cl.chat} ${className || ''}">
+                <div class=${cl.header}>
+                    <span>Chat</span>
+                    ${processing && html`<span class=${cl.spinner}></span>`}
+                </div>
                 <div class=${cl.messages} ref=${el => this._scroll = el} onScroll=${this._onScroll}>
                     ${messages.map((m, i) => {
                         if (m.kind === 'msg') return html`
@@ -157,7 +157,6 @@ export class Chat extends Component {
                                 </div>
                             `;
                         }
-                        if (m.kind === 'processing') return html`<div class=${cl.processing}>AI is thinking...</div>`;
                     })}
                 </div>
                 <div class=${cl.input}>
@@ -185,6 +184,7 @@ cl.chat = css`
 cl.header = css`
   padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px;
   color: var(--text-dim); text-transform: uppercase;
+  display: flex; align-items: center; gap: 10px;
 `;
 cl.messages = css`flex: 1; min-height: 0; overflow-y: auto; padding: 12px;`;
 cl.msg = css`
@@ -209,10 +209,11 @@ cl.tool = css`
               border-top: 1px solid var(--border); max-height: 400px; overflow-y: auto; word-break: break-word;
               background: var(--bg); }
 `;
-const pulse = keyframes`0%,100% { opacity: 0.4; } 50% { opacity: 1; }`;
-cl.processing = css`
-  padding: 8px 12px; font-size: 12px; color: var(--text-dim);
-  animation: ${pulse} 1.5s infinite;
+const spin = keyframes`to { transform: rotate(360deg); }`;
+cl.spinner = css`
+  display: inline-block; width: 12px; height: 12px;
+  border: 2px solid var(--surface3); border-top-color: var(--accent);
+  border-radius: 50%; animation: ${spin} 0.8s linear infinite;
 `;
 cl.input = css`
   display: flex; border-top: 1px solid var(--border);

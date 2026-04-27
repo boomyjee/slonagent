@@ -62,7 +62,7 @@ _LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 async def run_cli():
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
     DashboardTransport.set_server_config(**config.get("web", {}))
-    transport = MultiTransport([CliTransport(), DashboardTransport()])
+    transport = MultiTransport([CliTransport(), DashboardTransport(**config.get("web", {}).get("transport", {}))])
     agent = Agent.from_config(resolve(config["agent"]), id="main", agent_dir=os.getcwd(), transport=transport)
     await agent.start()
 
@@ -98,7 +98,7 @@ async def run_telegram():
             with open(config_path, encoding="utf-8") as f:
                 agent_cfg = json.load(f)["agent"]
 
-        transport = MultiTransport([transport, DashboardTransport()])
+        transport = MultiTransport([transport, DashboardTransport(**config.get("web", {}).get("transport", {}))])
         agent = Agent.from_config(resolve(agent_cfg), id=agent_id, agent_dir=agent_dir, transport=transport)
         if copy_memory_from:
             agent.memory.copy_from(copy_memory_from.agent.memory)

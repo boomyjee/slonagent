@@ -41,6 +41,9 @@ class App extends Component {
             activeTab: savedActive,
             logs: { agent: [], memory: [], transport: [] },
             gitRefreshKey: 0,
+            // CSS @media drives viewport-based layout; this state only
+            // says which pane is active when the viewport is mobile.
+            mobileView: persist.get('dashboard.mobileView', 'editor'),
         };
         this._chat = null;
         this._editor = null;
@@ -57,9 +60,14 @@ class App extends Component {
         });
     }
 
+    _setMobileView = (v) => {
+        persist.set('dashboard.mobileView', v);
+        this.setState({ mobileView: v });
+    };
+
     componentDidUpdate(_, prev) {
-        const key = this.state.rootKey;
-        if (key && (prev.tabs !== this.state.tabs || prev.activeTab !== this.state.activeTab)) {
+        if (prev.tabs !== this.state.tabs || prev.activeTab !== this.state.activeTab) {
+            const key = this.state.rootKey;  // '' is fine — saves under "tabs:" / "activeTab:"
             const tabs = this.state.tabs.filter(t => t.id !== 'logs').map(t => ({ id: t.id, label: t.label }));
             persist.set(`tabs:${key}`, tabs);
             persist.set(`activeTab:${key}`, this.state.activeTab);
@@ -131,6 +139,7 @@ class App extends Component {
                 : [...tabs, { id: path, label: name, closable: true }];
             return { tabs: next, activeTab: path };
         });
+        this._setMobileView('editor');
         if (line) this._editor?.revealLine(path, line);
     };
 
@@ -142,6 +151,7 @@ class App extends Component {
                 : [...tabs, { id, label: `⎇ ${name}`, closable: true }];
             return { tabs: next, activeTab: id };
         });
+        this._setMobileView('editor');
     };
 
     _openGitShow = (repo, ref, file, line) => {
@@ -153,6 +163,7 @@ class App extends Component {
                 : [...tabs, { id, label: `${name} @ ${ref.slice(0,7)}`, closable: true }];
             return { tabs: next, activeTab: id };
         });
+        this._setMobileView('editor');
         if (line) this._editor?.revealLine(id, line);
     };
 
@@ -164,6 +175,7 @@ class App extends Component {
                 : [...tabs, { id, label: `blame: ${name}`, closable: true }];
             return { tabs: next, activeTab: id };
         });
+        this._setMobileView('editor');
     };
 
     _closeTab = (id) => {
@@ -230,13 +242,13 @@ class App extends Component {
         }));
     };
 
-    render(_, { connected, root, rootKey, tabs, activeTab, logs, gitRefreshKey }) {
+    render(_, { connected, root, rootKey, tabs, activeTab, logs, gitRefreshKey, mobileView }) {
         const isLogs = activeTab === 'logs';
         const isGit = activeTab.startsWith('git:');
         const activeFile = !isLogs && !isGit ? activeTab : null;
         return html`
-            <div class=${cl.app}>
-                <div class=${cl.sidebar}>
+            <div class="${cl.app} mobile-${mobileView}">
+                <div class="${cl.sidebar} dash-sidebar">
                     <div class=${cl.sidebarHdr}>Explorer</div>
                     <div class=${cl.tree}>
                         <${FileTree} rootPath="/"
@@ -247,8 +259,8 @@ class App extends Component {
                                      onChangeRoot=${this._onChangeRoot} />
                     </div>
                 </div>
-                <${Resizer} side="left" persistKey="sidebar" />
-                <div class=${cl.main}>
+                <${Resizer} side="left" persistKey="sidebar" className="dash-resizer" />
+                <div class="${cl.main} dash-main">
                     <${Tabs} tabs=${tabs} active=${activeTab}
                              onSelect=${id => this.setState({ activeTab: id })}
                              onClose=${this._closeTab}
@@ -274,8 +286,14 @@ class App extends Component {
                         </div>
                     </div>
                 </div>
-                <${Resizer} side="right" persistKey="chat" />
-                <${Chat} ref=${c => this._chat = c} app=${this} connected=${connected} />
+                <${Resizer} side="right" persistKey="chat" className="dash-resizer" />
+                <${Chat} ref=${c => this._chat = c} app=${this} connected=${connected}
+                         className="dash-chat" />
+                <div class=${cl.bottomNav}>
+                    ${[['files', '▤ Files'], ['editor', '✎ Editor'], ['chat', '✉ Chat']].map(([k, label]) => html`
+                        <button class="${cl.navBtn}${mobileView === k ? ' active' : ''}"
+                                onClick=${() => this._setMobileView(k)}>${label}</button>`)}
+                </div>
             </div>
         `;
     }
@@ -283,7 +301,21 @@ class App extends Component {
 
 render(html`<${App} />`, document.body);
 
-cl.app = css`display: flex; height: 100vh; overflow: hidden;`;
+cl.app = css`
+  display: flex; height: 100dvh; overflow: hidden;
+  @media (max-width: 768px) {
+    flex-direction: column;
+    & .dash-resizer { display: none; }
+    & .dash-sidebar, & .dash-main, & .dash-chat {
+      flex: 1 1 auto !important; width: 100% !important;
+      min-width: 0; min-height: 0;
+    }
+    & .dash-sidebar, & .dash-main, & .dash-chat { display: none; }
+    &.mobile-files .dash-sidebar { display: flex; }
+    &.mobile-editor .dash-main { display: flex; }
+    &.mobile-chat .dash-chat { display: flex; }
+  }
+`;
 cl.sidebar = css`
   width: 220px; background: var(--surface); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
@@ -296,3 +328,19 @@ cl.tree = css`flex: 1; overflow-y: auto; padding: 4px 0;`;
 cl.main = css`flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0;`;
 cl.content = css`flex: 1; display: flex; min-height: 0; position: relative;`;
 cl.pane = css`flex: 1; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden;`;
+
+cl.bottomNav = css`
+  display: none;  /* hidden on desktop; the @media block below flips this */
+  @media (max-width: 768px) {
+    display: flex; order: -1;  /* put nav at the top — bottom edge has system UI on phones */
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+`;
+cl.navBtn = css`
+  flex: 1; padding: 10px 8px; background: transparent; border: none;
+  color: var(--text-dim); cursor: pointer; font-size: 13px;
+  border-bottom: 2px solid transparent;
+  &.active { color: var(--accent); border-bottom-color: var(--accent); }
+  &:hover { color: var(--text); }
+`;

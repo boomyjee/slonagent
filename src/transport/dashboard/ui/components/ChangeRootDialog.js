@@ -67,6 +67,7 @@ export function openChangeRootDialog({ initialPath, onConfirm }) {
 
 cl.dialog = css`
   width: 520px; height: 480px;
+  max-width: 100%; max-height: 100%;
   display: flex; flex-direction: column;
 `;
 cl.header = css`
