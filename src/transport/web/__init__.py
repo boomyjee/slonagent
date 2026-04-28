@@ -241,27 +241,38 @@ class WebTransport(BaseTransport):
             subdomain = "web-" + hashlib.sha1(key.encode()).hexdigest()[:6]
             WebTransport._tunnel_ready = asyncio.Event()
             async def _tunnel():
-                try:
-                    url, WebTransport._tunnel_conn = await start_tunnel(
-                        WebTransport._port, subdomain, WebTransport._sish_domain,
-                        WebTransport._sish_port, WebTransport._sish_key,
-                    )
-                    WebTransport._tunnel_url = url
-                except Exception as e:
-                    log.warning("Tunnel failed: %s", e)
+                # Ретраи только на стартовых ошибках. Успешный коннект
+                # (даже если сразу разорвался) сбрасывает счётчик, поэтому
+                # сетевые мерцания не выжирают бюджет, а реальная поломка
+                # (sish мёртв, auth не пускает) останавливается на 5-й
+                # подряд неудачной попытке.
+                fails, MAX_FAILS = 0, 5
+                while True:
+                    try:
+                        url, WebTransport._tunnel_conn = await start_tunnel(
+                            WebTransport._port, subdomain, WebTransport._sish_domain,
+                            WebTransport._sish_port, WebTransport._sish_key,
+                        )
+                        WebTransport._tunnel_url = url
+                        fails = 0
+                    except Exception as e:
+                        fails += 1
+                        log.warning("Tunnel start failed (%d/%d): %s", fails, MAX_FAILS, e)
+                        WebTransport._tunnel_ready.set()
+                        if fails >= MAX_FAILS:
+                            log.warning("Giving up on tunnel after %d consecutive failures", MAX_FAILS)
+                            return
+                        await asyncio.sleep(5)
+                        continue
                     WebTransport._tunnel_ready.set()
-                    return
-                WebTransport._tunnel_ready.set()
-                # Watch for the SSH conn dying so we don't silently keep
-                # serving a dead URL. wait_closed returns when asyncssh tears
-                # the conn down (keepalive timeout, server disconnect, etc).
-                try:
-                    await WebTransport._tunnel_conn.wait_closed()
-                except Exception as e:
-                    log.warning("Tunnel watcher error: %s", e)
-                log.warning("Tunnel closed: was %s", WebTransport._tunnel_url)
-                WebTransport._tunnel_url = None
-                WebTransport._tunnel_conn = None
+                    try:
+                        await WebTransport._tunnel_conn.wait_closed()
+                    except Exception as e:
+                        log.warning("Tunnel watcher error: %s", e)
+                    log.warning("Tunnel closed: was %s", WebTransport._tunnel_url)
+                    WebTransport._tunnel_url = None
+                    WebTransport._tunnel_conn = None
+                    await asyncio.sleep(5)
             WebTransport._loop.call_soon_threadsafe(asyncio.create_task, _tunnel())
 
     def register_route(self, method, path, handler):
