@@ -62,16 +62,18 @@ export class Chat extends Component {
                 if (ev.stream_id != null) this._streams[ev.stream_id] = next.length - 1;
                 return { messages: next };
             });
-        } else if (m === 'send_thinking') {
+        } else if (m === 'send_thinking' || m === 'send_memory_info') {
+            const kind = m === 'send_memory_info' ? 'memory' : 'thinking';
+            const streamKey = (kind === 'memory' ? 'm_' : 't_') + ev.stream_id;
             this.setState(({ messages }) => {
-                if (ev.stream_id != null && this._streams['t_' + ev.stream_id] != null) {
-                    const idx = this._streams['t_' + ev.stream_id];
+                if (ev.stream_id != null && this._streams[streamKey] != null) {
+                    const idx = this._streams[streamKey];
                     const next = [...messages];
                     next[idx] = { ...next[idx], text: ev.text, final: ev.final };
                     return { messages: next };
                 }
-                const next = [...messages, { kind: 'thinking', text: ev.text, stream_id: ev.stream_id, final: ev.final }];
-                if (ev.stream_id != null) this._streams['t_' + ev.stream_id] = next.length - 1;
+                const next = [...messages, { kind, text: ev.text, stream_id: ev.stream_id, final: ev.final }];
+                if (ev.stream_id != null) this._streams[streamKey] = next.length - 1;
                 return { messages: next };
             });
         } else if (m === 'on_tool_call') {
@@ -171,11 +173,11 @@ export class Chat extends Component {
                             <div class="${cl.msg} ${m.role}"
                                  dangerouslySetInnerHTML=${{__html: mdToHtml(m.text)}}></div>
                         `;
-                        if (m.kind === 'thinking') {
+                        if (m.kind === 'thinking' || m.kind === 'memory') {
                             const isCollapsed = !(expanded[i] ?? false) && m.final;
                             return html`
                                 <div
-                                    class="${cl.msg} thinking${isCollapsed ? ' collapsed' : ''}"
+                                    class="${cl.msg} thinking${m.kind === 'memory' ? ' memory' : ''}${isCollapsed ? ' collapsed' : ''}"
                                     onClick=${() => this.setState(({ expanded: e }) => ({ expanded: { ...e, [i]: isCollapsed } }))}
                                     dangerouslySetInnerHTML=${{__html: mdToHtml((m.text || '').trimEnd())}}></div>
                             `;
@@ -231,6 +233,7 @@ cl.msg = css`
   &.user, &.inject { background: var(--accent); color: #1e1e2e; margin-left: auto; }
   &.assistant { background: var(--surface2); }
   &.thinking { background: var(--surface2); font-size: 12px; color: var(--text-dim); font-style: italic; }
+  &.thinking.memory { color: var(--warn); }
   &.thinking.collapsed {
     /* line-height becomes the visual height of the box; line 2 starts
        AT the bottom edge so overflow has nothing to clip mid-glyph. */

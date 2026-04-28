@@ -160,10 +160,16 @@ class FactProvider(BaseProvider):
                 custom_instructions=self._custom_instructions,
             ))
 
-        if not items:
-            return
+        if not items:  return
+
+        async def on_done(summary: str):
+            self.agent.call_before_next_message(
+                self.agent.transport.send_memory_info(summary, final=True)
+            )
+
         retain(items, self._llm, self._model_name, self.storage,
-               with_observations=self._auto_consolidate)
+               with_observations=self._auto_consolidate,
+               done_cb=on_done)
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         """Автоматический recall по тексту пользователя → системный промпт."""

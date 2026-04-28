@@ -1256,6 +1256,7 @@ async def _retain_impl(
     model_name: str,
     storage,
     with_observations: bool = True,
+    done_cb=None,
 ) -> list[Fact]:
     """
     Полный retain pipeline: LLM → dedup → store → graph links → create_observations.
@@ -1263,10 +1264,12 @@ async def _retain_impl(
     log.info("[retain] started: %d items", len(items))
     facts, chunk_meta = await extract_facts(items, client, model_name)
     if not facts:
+        if done_cb: await done_cb("Фактов не извлечено")
         return []
 
     new_facts, vectors = store_facts(facts, storage, chunk_meta)
     if not new_facts:
+        if done_cb: await done_cb("Новых фактов нет (все дубликаты)")
         return []
 
     n_causal   = build_causal_links(new_facts, storage)
@@ -1281,15 +1284,23 @@ async def _retain_impl(
     if with_observations:
         await create_observations(storage, client, model_name)
 
+    if done_cb:
+        facts_list = "\n".join(f"  • {f.fact}" for f in new_facts)
+        await done_cb(
+            f"Извлёк {len(new_facts)} фактов:\n{facts_list}\n"
+            f"Связи: {n_causal} причинных, {n_temporal} временных, {n_semantic} смысловых"
+        )
+
     return new_facts
 
 # ── Background scheduling ───────────────────────────────────────────────────────
 _retain_lock = asyncio.Lock()
-def retain(items: list[RetainItem],client,model_name: str,storage,with_observations: bool = True) -> None:
+def retain(items: list[RetainItem], client, model_name: str, storage,
+           with_observations: bool = True, done_cb=None) -> None:
     async def _run() -> None:
         async with _retain_lock:
             try:
-                await _retain_impl(items, client, model_name, storage, with_observations)
+                await _retain_impl(items, client, model_name, storage, with_observations, done_cb)
             except Exception as e:
                 log.warning("[retain] background task failed: %s", e, exc_info=True)
     asyncio.get_event_loop().create_task(_run())

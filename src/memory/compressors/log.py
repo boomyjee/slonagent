@@ -645,6 +645,19 @@ class LogCompressor(Skill):
 
     # ── Public ────────────────────────────────────────────────────────────────
 
+    async def send_memory_info(self, delta: str = "", *, cont: bool = True, final: bool = False):
+        if not cont:
+            self._memo_lines = []
+            self._memo_stream_id = id(self._memo_lines)
+        if delta:
+            self._memo_lines.append(delta)
+        if delta or final:
+            await self.agent.transport.send_memory_info(
+                "\n".join(self._memo_lines),
+                stream_id=self._memo_stream_id,
+                final=final,
+            )
+
     async def compress(self, turns: list) -> list:
         if Memory.count_tokens(turns) < self._compress_after_tokens:
             return turns
@@ -664,12 +677,18 @@ class LogCompressor(Skill):
         if not to_observe:
             return turns
 
+        await self.send_memory_info("", cont=False)
+        await self.send_memory_info(f"Уплотняю память: наблюдаю за {len(to_observe)} сообщениями…")
         new_obs = await self._run_observer(to_observe, existing_observations)
         if not new_obs:
             log.warning("[LogCompressor] Observer returned empty")
+            await self.send_memory_info("Observer вернул пусто, пропускаю", final=True)
             return turns
 
         updated = (existing_observations + "\n\n" + new_obs).strip() if existing_observations else new_obs
+
+        new_obs_tokens = Memory.count_tokens([{"role": "user", "content": new_obs}])
+        await self.send_memory_info(f"+{new_obs_tokens} токенов наблюдений")
 
         obs_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
         if obs_tokens >= self._reflect_after_tokens:
@@ -685,27 +704,14 @@ class LogCompressor(Skill):
         new_om = {"role": "user", "content": obs_text, "_observation_message": True, "_raw_observations": updated}
         self._write_log(updated)  # debug only
         log.info("[LogCompressor] %d → 1 OM + %d recent turns", len(to_observe), len(recent))
+        final_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
+        await self.send_memory_info(
+            f"Свернул {len(to_observe)} сообщений в OM ({final_tokens} токенов), оставил {len(recent)} recent",
+            final=True,
+        )
         return [new_om] + recent
 
     # ── Internal ──────────────────────────────────────────────────────────────
-
-    async def start(self):
-        self._migrate_v1_log_file()
-
-    def _migrate_v1_log_file(self):
-        """v1 → v2: observations хранились в memory/log/LOG.md, теперь — в CONTEXT.json как _raw_observations."""
-        old_log = os.path.join(self.agent.memory.memory_dir, "log", "LOG.md")
-        if not os.path.exists(old_log):
-            return
-        for turn in self.agent.memory._turns:
-            if isinstance(turn, dict) and turn.get("_observation_message") and not turn.get("_raw_observations"):
-                with open(old_log, encoding="utf-8") as f:
-                    turn["_raw_observations"] = f.read()
-                self.agent.memory.save()
-                log.info("[LogCompressor] migrated LOG.md → _raw_observations")
-                break
-        import shutil
-        shutil.rmtree(os.path.dirname(old_log), ignore_errors=True)
 
     def _write_log(self, observations: str):
         path = os.path.join(self.agent.memory.memory_dir, "LOG.md")
@@ -774,6 +780,7 @@ class LogCompressor(Skill):
         return _parse_observations(response)
 
     async def _run_reflector(self, observations: str, compression_level: int = 0) -> str:
+        await self.send_memory_info(f"Сжимаю наблюдения (уровень {compression_level})…")
         user_prompt = (
             f"## OBSERVATIONS TO REFLECT ON\n\n{observations}\n\n---\n\n"
             "Please analyze these observations and produce a refined, condensed version "
@@ -789,12 +796,17 @@ class LogCompressor(Skill):
 
         if not reflected:
             log.warning("[LogCompressor] Reflector returned empty")
+            await self.send_memory_info("Reflector вернул пусто", final=True)
             return ""
 
         refl_tokens = Memory.count_tokens([{"role": "user", "content": reflected}])
         orig_tokens = Memory.count_tokens([{"role": "user", "content": observations}])
+        ratio = (1 - refl_tokens / max(orig_tokens, 1)) * 100
         log.info("[LogCompressor] Reflector level %d: %d → %d tokens (%.0f%%)",
-                 compression_level, orig_tokens, refl_tokens, (1 - refl_tokens / max(orig_tokens, 1)) * 100)
+                 compression_level, orig_tokens, refl_tokens, ratio)
+        await self.send_memory_info(
+            f"Уровень {compression_level}: {orig_tokens} → {refl_tokens} токенов (-{ratio:.0f}%)",
+        )
 
         if refl_tokens <= self._reflect_after_tokens or compression_level >= 4:
             return reflected

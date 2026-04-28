@@ -29,6 +29,9 @@ class BaseTransport:
 
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
         pass
+    
+    async def send_memory_info(self, text: str, stream_id=None, final: bool = False):
+        pass
 
     async def on_tool_call(self, name: str, args: dict):
         pass
