@@ -23,7 +23,7 @@ function mdToHtml(text) {
     // Bare URLs (not already inside an <a> tag)
     text = text.replace(/(?<!href="|">)(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
     // /commands at the start of a message
-    text = text.replace(/^(\/\w+)/gm, '<code class="slash-cmd">$1</code>');
+    text = text.replace(/^(\/\w+)/gm, '<span class="slash-cmd">$1</span>');
     const esc = c => c.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     inlines.forEach((c, i) => { text = text.replace(`\x00IC${i}\x00`, `<code>${esc(c)}</code>`); });
     blocks.forEach((c, i) => { text = text.replace(`\x00CB${i}\x00`, `<pre><code>${esc(c)}</code></pre>`); });
@@ -231,10 +231,9 @@ cl.msg = css`
   }
   &.thinking.collapsed:hover { opacity: 0.7; }
   & h1, & h2, & h3, & h4, & h5, & h6 { font-size: 14px; font-weight: 600; margin: 4px 0; }
-  & a { color: inherit; text-decoration: underline; }
+  & a, & .slash-cmd { color: inherit; text-decoration: underline; cursor: pointer; }
   & code { background: rgba(0,0,0,0.25); padding: 1px 4px; border-radius: 3px;
            font-family: monospace; font-size: 12px; }
-  & code.slash-cmd { color: var(--accent); font-weight: 600; }
   & pre { background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 4px;
           margin: 4px 0; overflow-x: auto; white-space: pre; }
   & pre code { background: transparent; padding: 0; }
