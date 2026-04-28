@@ -253,12 +253,16 @@ class ClaudeAgent(Agent):
             elif isinstance(message, UserMessage):
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        result = block.content or ""
-                        await self.transport.on_tool_result(block.tool_use_id, result)
+                        raw = block.content or ""
+                        if isinstance(raw, list):
+                            result = "\n".join(b.get("text", "") for b in raw if isinstance(b, dict) and b.get("type") == "text")
+                        else:
+                            result = raw
+                        await self.transport.on_tool_result(tool_use_names.get(block.tool_use_id, block.tool_use_id), result)
                         turns.append({
                             "role": "tool",
                             "tool_call_id": block.tool_use_id,
-                            "name": tool_use_names.get(block.tool_use_id, ""),
+                            "name": tool_use_names.get(block.tool_use_id, block.tool_use_id),
                             "content": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
                             "_uuid": message.uuid,
                         })

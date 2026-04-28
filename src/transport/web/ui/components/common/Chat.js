@@ -138,15 +138,14 @@ export class Chat extends Component {
 
     _formatArgs(args) {
         if (!args) return '';
-        return Object.entries(args).map(([k, v]) => `${k}: ${v}`).join('\n');
+        const fmt = v => typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
+        return Object.entries(args).map(([k, v]) => `${k}: ${fmt(v)}`).join('\n');
     }
 
     _formatResult(result) {
         if (result == null) return null;
-        if (typeof result === 'object') {
-            return Object.entries(result).map(([k, v]) => `[${k}]\n${v}`).join('\n');
-        }
-        return String(result);
+        if (typeof result === 'string') return result;
+        return JSON.stringify(result, null, 2);
     }
 
     render({ connected, className }, { messages, input, expanded, processing }) {
