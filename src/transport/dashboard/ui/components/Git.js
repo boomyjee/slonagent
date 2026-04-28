@@ -134,6 +134,10 @@ export class Git extends Component {
 
     _openMenu(name, e) {
         e.preventDefault(); e.stopPropagation();
+        if (this.state.menu?.name === name) {
+            this.setState({ menu: null });
+            return;
+        }
         const r = e.currentTarget.getBoundingClientRect();
         this.setState({ menu: { name, x: r.left, y: r.bottom + 2, right: r.right } });
     }
@@ -548,7 +552,7 @@ cl.hunk = css`
   & .row.del { background: rgba(243,139,168,0.05); }
 `;
 cl.menu = css`
-  position: fixed; z-index: 200; min-width: 180px; max-width: 480px;
+  position: fixed; z-index: 200; max-width: 480px;
   max-height: 400px; overflow-y: auto;
   background: var(--surface2); border: 1px solid var(--border);
   box-shadow: 0 4px 12px rgba(0,0,0,0.4); padding: 4px 0; font-size: 12px;
