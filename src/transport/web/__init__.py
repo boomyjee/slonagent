@@ -76,7 +76,8 @@ class WebTransport(BaseTransport):
     # to False to skip HTTP-route registration in set_agent.
     _mount: bool = True
 
-    _MIME = {"js": "application/javascript", "css": "text/css", "html": "text/html"}
+    _MIME = {"js": "application/javascript", "css": "text/css", "html": "text/html",
+             "json": "application/json", "svg": "image/svg+xml"}
     _STATIC_HEADERS = {
         "Cache-Control": "no-store",
         # Needed when a bookmarklet loads run.js cross-origin into a third-party page.
@@ -163,9 +164,12 @@ class WebTransport(BaseTransport):
                 return await call_next(request)
             if not WebTransport._password_hash:
                 return _NO_PASSWORD
-            # JS is always public — bookmarklets import scripts cross-origin
-            # and can't carry credentials. The actual gate is the WebSocket.
-            if request.url.path.endswith(".js"):
+            # Static assets that can't carry credentials are public:
+            # - .js: bookmarklets import scripts cross-origin (no cookie).
+            # - manifest.json / icons: <link rel="manifest"> fetches without
+            #   credentials by default, blocking PWA install behind auth.
+            # The actual gate for sensitive data is the WebSocket.
+            if request.url.path.endswith((".js", ".json", ".svg", ".png", ".ico")):
                 return await call_next(request)
             # Cookie from a previous successful auth.
             if request.cookies.get("auth") == WebTransport._password_hash:
