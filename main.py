@@ -57,22 +57,15 @@ def release_pid_lock():
     try: os.unlink(_PID_PATH)
     except FileNotFoundError: pass
 
-_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "slonagent.log")
-
-def _setup_logging():
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    fmt = logging.Formatter(_LOG_FORMAT)
-    sh = logging.StreamHandler()
-    sh.setFormatter(fmt)
-    root.addHandler(sh)
-    fh = logging.handlers.RotatingFileHandler(_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
+os.makedirs(_LOG_DIR := os.path.expanduser("~/.slonagent"), exist_ok=True)
+_LOG_FILE = os.path.join(_LOG_DIR, "slonagent.log")
+_log_fh = logging.handlers.RotatingFileHandler(_LOG_FILE, maxBytes=0, backupCount=3, encoding="utf-8")
+if os.path.exists(_LOG_FILE) and os.path.getsize(_LOG_FILE) > 0: _log_fh.doRollover()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[
+    logging.StreamHandler(), _log_fh,
+])
 
 async def run_cli():
-    _setup_logging()
     DashboardTransport.set_server_config(**config.get("web", {}))
     transport = MultiTransport([CliTransport(), DashboardTransport(**config.get("web", {}).get("transport", {}))])
     agent = Agent.from_config(resolve(config["agent"]), id="main", agent_dir=os.getcwd(), transport=transport)
@@ -86,7 +79,6 @@ async def run_cli():
             print()
 
 async def run_telegram():
-    _setup_logging()
     DashboardTransport.set_server_config(**config.get("web", {}))
 
     async def make_agent(agent_id, transport, force_create: bool, copy_memory_from=None):
