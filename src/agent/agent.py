@@ -96,10 +96,11 @@ class Agent:
 
         return agent
 
-    def __init__(self, id: str, model_name: str, api_key: str, base_url: str, agent_dir: str | None = None, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
+    def __init__(self, id: str, model_name: str, api_key: str = "", base_url: str = "", backend: str = "openai", backend_params: dict | None = None, agent_dir: str | None = None, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
         self.id = id
         self.model_name = model_name
         self.api_key = api_key
+        self.base_url = base_url
         self.transcription_model_name = transcription_model_name
         self.agent_dir = agent_dir
         if isinstance(memory_providers, dict):
@@ -113,12 +114,16 @@ class Agent:
         self.transport = transport or BaseTransport()
         self.transport.set_agent(self)
 
-        if base_url == "claude":
-            from src.agent.backends.claude import ClaudeBackend
-            self.backend = ClaudeBackend(self)
-        else:
+        self.backend = backend
+        self.backend_params = backend_params or {}
+        if backend == "openai":
             from src.agent.backends.openai import OpenAIBackend
-            self.backend = OpenAIBackend(self, base_url, api_key)
+            self.backend_impl = OpenAIBackend(self, base_url=base_url, api_key=api_key, **self.backend_params)
+        elif backend == "claude":
+            from src.agent.backends.claude import ClaudeBackend
+            self.backend_impl = ClaudeBackend(self, **self.backend_params)
+        else:
+            raise ValueError(f"Unknown backend: {backend!r}")
 
         self.transcription_client = Agent.OpenAI(transcription_api_key or api_key, transcription_base_url or base_url)
         self._message_queue: asyncio.Queue = asyncio.Queue()
@@ -160,7 +165,7 @@ class Agent:
         self._stop_event.set()
 
     async def close(self):
-        await self.backend.close()
+        await self.backend_impl.close()
 
     def strip_contents_private(self, turns: list, model_name: str = None) -> list:
         model = model_name or self.model_name
@@ -198,7 +203,7 @@ class Agent:
 
 
     async def llm(self, **kwargs):
-        return await self.backend.llm(**kwargs)
+        return await self.backend_impl.llm(**kwargs)
 
     def call_before_next_message(self, coro):
         self._message_queue.put_nowait(coro)

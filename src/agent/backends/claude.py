@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import uuid
 from contextlib import suppress
 
@@ -43,16 +44,28 @@ class ClaudeAgentSkill(Skill):
 
 
 class ClaudeBackend(BaseBackend):
-    def __init__(self, agent):
+    def __init__(self, agent, sdk_options: dict | None = None):
+        """sdk_options — словарь, который переопределяет дефолтные ключи
+        ClaudeAgentOptions перед запросом. Например, для голой модели:
+        {'system_prompt': None, 'setting_sources': None, 'tools': []}."""
         super().__init__(agent)
+        self._sdk_options = sdk_options or {}
         skill = ClaudeAgentSkill()
         skill.register(self)
         agent.skills.insert(0, skill)
-        self._cwd = os.path.join(agent.memory.memory_dir, "workspace")
-        os.makedirs(self._cwd, exist_ok=True)
+        # cwd живёт под memory_dir (там же claude-сессии и LOG.md). У эфемерного
+        # агента (memory_dir пустой) cwd нет — claude запустится в дефолтной
+        # директории, persistence нам всё равно не нужен.
+        if agent.memory.memory_dir:
+            self._cwd = os.path.join(agent.memory.memory_dir, "workspace")
+            os.makedirs(self._cwd, exist_ok=True)
+        else:
+            self._cwd = None
         self._client: ClaudeSDKClient | None = None
         self._client_append: str | None = None  # текст системки в живом клиенте
         self._mcp_server = None  # построится лениво из agent.skills
+        # Эфемерный агент: session_id живёт в памяти инстанса, на диск ничего не пишем.
+        self._memory_state: dict = {}
 
     def _build_mcp_server(self):
         """Оборачивает тулы своих скиллов в SDK MCP-сервер. Клод увидит как mcp__slon__*."""
@@ -86,6 +99,8 @@ class ClaudeBackend(BaseBackend):
     def _claude_session_jsonl(self, session_id: str) -> str | None:
         # claude CLI sanitizes cwd by replacing non-alphanumerics with dashes,
         # uses that as the project dir under ~/.claude/projects/.
+        if not self._cwd:
+            return None
         sanitized = re.sub(r'[^a-zA-Z0-9]', '-', self._cwd)
         path = os.path.join(os.path.expanduser("~"), ".claude", "projects", sanitized, f"{session_id}.jsonl")
         return path if os.path.isfile(path) else None
@@ -140,10 +155,14 @@ class ClaudeBackend(BaseBackend):
         return pruned
 
     @property
-    def _state_file(self):
+    def _state_file(self) -> str | None:
+        if not self.agent.memory.memory_dir:
+            return None
         return os.path.join(self.agent.memory.memory_dir, "claude_code.json")
 
     def _load_state(self) -> dict:
+        if self._state_file is None:
+            return dict(self._memory_state)
         try:
             with open(self._state_file) as f:
                 return json.load(f)
@@ -151,6 +170,9 @@ class ClaudeBackend(BaseBackend):
             return {}
 
     def _save_state(self, state: dict):
+        if self._state_file is None:
+            self._memory_state = dict(state)
+            return
         with open(self._state_file, "w") as f:
             json.dump(state, f)
 
@@ -216,10 +238,13 @@ class ClaudeBackend(BaseBackend):
             self._client_append = None
 
         if self._client is None:
-            append_path = os.path.join(agent.memory.memory_dir, "claude_append.md")
             extra_args = {}
             if append_text:
-                with open(append_path, "w", encoding="utf-8") as f:
+                # Временный файл — claude читает его только при старте процесса,
+                # после connect() он не нужен. Не зависит от agent.memory.memory_dir,
+                # поэтому работает и для эфемерных агентов.
+                fd, append_path = tempfile.mkstemp(suffix=".md", prefix="claude_append_")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(append_text)
                 extra_args["append-system-prompt-file"] = append_path
 
@@ -231,17 +256,21 @@ class ClaudeBackend(BaseBackend):
             if self._mcp_server is None:
                 self._mcp_server = self._build_mcp_server()
 
-            options_kwargs = dict(
-                permission_mode="bypassPermissions",
-                cwd=self._cwd,
-                model=agent.model_name,
-                include_partial_messages=True,
-                setting_sources=["user"],
-                system_prompt={"type": "preset", "preset": "claude_code"},
-                extra_args=extra_args,
-                mcp_servers={"slon": self._mcp_server} if self._mcp_server else {},
-                stderr=_on_stderr,
-            )
+            # sdk_options перекрывает дефолтные ключи (например, чтобы выключить
+            # claude_code preset для голой модели). dict(**a, **b) на пересечении
+            # ключей бросает TypeError, поэтому делаем явный update.
+            options_kwargs = {
+                "permission_mode": "bypassPermissions",
+                "cwd": self._cwd,
+                "model": agent.model_name,
+                "include_partial_messages": True,
+                "setting_sources": ["user"],
+                "system_prompt": {"type": "preset", "preset": "claude_code"},
+                "extra_args": extra_args,
+                "mcp_servers": {"slon": self._mcp_server} if self._mcp_server else {},
+                "stderr": _on_stderr,
+            }
+            options_kwargs.update(self._sdk_options)
 
             async def _connect(use_resume: bool):
                 opts = dict(options_kwargs)

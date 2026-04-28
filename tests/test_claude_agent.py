@@ -45,8 +45,7 @@ def make_agent(skills=None, model_name: str = "claude-test"):
     agent = Agent(
         id="test",
         model_name=model_name,
-        api_key="",
-        base_url="claude",
+        backend="claude",
         agent_dir=tempfile.mkdtemp(),
         memory_compressor=PassthroughCompressor(),
         skills=skills or [],
@@ -79,18 +78,18 @@ class TestStateFile:
 
     def test_load_empty_returns_dict(self):
         agent = make_agent()
-        assert agent.backend._load_state() == {}
+        assert agent.backend_impl._load_state() == {}
 
     def test_save_then_load(self):
         agent = make_agent()
-        agent.backend._save_state({"session_id": "abc", "created": True})
-        assert agent.backend._load_state() == {"session_id": "abc", "created": True}
+        agent.backend_impl._save_state({"session_id": "abc", "created": True})
+        assert agent.backend_impl._load_state() == {"session_id": "abc", "created": True}
 
     def test_load_invalid_json_returns_empty(self):
         agent = make_agent()
-        with open(agent.backend._state_file, "w") as f:
+        with open(agent.backend_impl._state_file, "w") as f:
             f.write("not json")
-        assert agent.backend._load_state() == {}
+        assert agent.backend_impl._load_state() == {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -108,12 +107,12 @@ class TestBuildMcpServer:
     def test_no_skills_returns_none(self):
         agent = make_agent(skills=[])
         # AgentSkill автоматически добавляется, но у него тулов нет — server должен быть None
-        assert agent.backend._build_mcp_server() is None
+        assert agent.backend_impl._build_mcp_server() is None
 
     def test_with_skill_returns_server(self):
         skill = _SkillWithTool()
         agent = make_agent(skills=[skill])
-        server = agent.backend._build_mcp_server()
+        server = agent.backend_impl._build_mcp_server()
         assert server is not None
         assert server["type"] == "sdk"
         assert server["name"] == "slon"
@@ -329,7 +328,7 @@ class TestSessionLifecycle:
         assert opts.resume is None
 
         # state-файл сохранён с created=True
-        state = agent.backend._load_state()
+        state = agent.backend_impl._load_state()
         assert state["created"] is True
         assert state["session_id"] == opts.session_id
 
@@ -338,7 +337,7 @@ class TestSessionLifecycle:
         cls, _ = mock_client_class
 
         agent = make_agent()
-        agent.backend._save_state({"session_id": "fixed-uuid", "created": True})
+        agent.backend_impl._save_state({"session_id": "fixed-uuid", "created": True})
         agent.memory._turns.append({"role": "user", "content": "hi"})
         await agent.llm()
 

@@ -626,7 +626,8 @@ class LogCompressor(Skill):
     OM_turn персистируется в истории через memory.py как обычный turn.
     """
 
-    def __init__(self, model_name: str, api_key: str, base_url: str,
+    def __init__(self, model_name: str, api_key: str = "", base_url: str = "",
+                 backend: str = "openai", backend_params: dict | None = None,
                  recent_tokens: int           = 15_000,
                  min_recent_turns: int        = 10,
                  max_recent_turns_tokens: int = 50_000,
@@ -641,6 +642,8 @@ class LogCompressor(Skill):
         self._model_name = model_name
         self._api_key = api_key
         self._base_url = base_url
+        self._backend = backend
+        self._backend_params = backend_params
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -753,10 +756,28 @@ class LogCompressor(Skill):
                 model_name=self._model_name,
                 api_key=self._api_key,
                 base_url=self._base_url,
+                backend=self._backend,
+                backend_params=self._backend_params,
             )
 
         self._llm_agent.memory.clear()
-        await self._llm_agent.memory.add_turn(*messages)
+        # Claude backend шлёт в claude.query() только последний user-turn (остальное
+        # хранит сама claude-сессия через resume). У нас compressor — one-shot, истории
+        # на стороне claude нет, поэтому склеиваем весь диалог в один текстовый запрос.
+        if self._backend == "claude":
+            lines = []
+            for m in messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and "text" in p
+                    )
+                lines.append(f"[{role}]: {content}")
+            await self._llm_agent.memory.add_turn({"role": "user", "content": "\n\n".join(lines)})
+        else:
+            await self._llm_agent.memory.add_turn(*messages)
 
         try:
             turn = await self._llm_agent.llm(
@@ -767,8 +788,12 @@ class LogCompressor(Skill):
         except Exception as e:
             log.error("[LogCompressor] %s LLM failed: %s", label, e, exc_info=True)
             return ""
+        # Claude-бекенд возвращает list[turn] (по блоку на запись), OpenAI — один dict.
         if isinstance(turn, list):
-            return ""
+            parts = [t.get("content") for t in turn
+                     if isinstance(t, dict) and t.get("role") == "assistant"
+                     and isinstance(t.get("content"), str)]
+            return "\n".join(parts).strip()
         return (turn.get("content", "") or "").strip()
 
     async def _run_observer(self, turns: list, existing_observations: str) -> str:

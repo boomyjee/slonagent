@@ -80,6 +80,9 @@ class SubAgentSkill(Skill):
                 sub = Agent(
                     model_name=self.agent.model_name,
                     api_key=self.agent.api_key,
+                    base_url=self.agent.base_url,
+                    backend=self.agent.backend,
+                    backend_params=self.agent.backend_params,
                     agent_dir=tmp_dir,
                     memory_compressor=PassthroughCompressor(),
                     transport=transport,

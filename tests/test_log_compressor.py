@@ -232,7 +232,14 @@ class TestLogCompressorCompress:
         return c
 
     def _mock_llm(self, c, response_text: str):
-        c._client.chat.completions.create = AsyncMock(return_value=_make_response(response_text))
+        # После рефакторинга LogCompressor строит inner Agent лениво в _generate.
+        # Подменяем его готовым моком до первого вызова compress().
+        fake = MagicMock()
+        fake.memory.clear = MagicMock()
+        fake.memory.add_turn = AsyncMock()
+        fake.llm = AsyncMock(return_value={"role": "assistant", "content": response_text})
+        c._llm_agent = fake
+        return fake
 
     @pytest.mark.asyncio
     async def test_returns_all_turns_below_threshold(self, tmp_path):
@@ -284,16 +291,6 @@ class TestLogCompressorCompress:
         om = next(t for t in result if isinstance(t, dict) and t.get("_observation_message"))
         assert "old obs" in om["_raw_observations"]
         assert "new obs" in om["_raw_observations"]
-
-
-def _make_response(text: str):
-    msg = MagicMock()
-    msg.content = text
-    choice = MagicMock()
-    choice.message = msg
-    resp = MagicMock()
-    resp.choices = [choice]
-    return resp
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -379,7 +376,12 @@ class TestLogCompressorEdgeCases:
         return c
 
     def _mock_llm(self, c, response_text: str):
-        c._client.chat.completions.create = AsyncMock(return_value=_make_response(response_text))
+        fake = MagicMock()
+        fake.memory.clear = MagicMock()
+        fake.memory.add_turn = AsyncMock()
+        fake.llm = AsyncMock(return_value={"role": "assistant", "content": response_text})
+        c._llm_agent = fake
+        return fake
 
     @pytest.mark.asyncio
     async def test_observer_empty_returns_original_turns(self, tmp_path):
@@ -407,9 +409,10 @@ class TestLogCompressorEdgeCases:
         async def side_effect(**kwargs):
             nonlocal call_count
             call_count += 1
-            return _make_response(big_obs if call_count == 1 else small_reflected)
+            return {"role": "assistant", "content": big_obs if call_count == 1 else small_reflected}
 
-        c._client.chat.completions.create = side_effect
+        fake = self._mock_llm(c, "")
+        fake.llm = AsyncMock(side_effect=side_effect)
         result = await c.compress(make_turns(10, chars=500))
 
         assert call_count == 2
@@ -431,9 +434,10 @@ class TestLogCompressorEdgeCases:
         async def side_effect(**kwargs):
             nonlocal call_count
             call_count += 1
-            return _make_response(obs_response)
+            return {"role": "assistant", "content": obs_response}
 
-        c._client.chat.completions.create = side_effect
+        fake = self._mock_llm(c, "")
+        fake.llm = AsyncMock(side_effect=side_effect)
         await c.compress(make_turns(10, chars=500))
 
         # 1 вызов observer + 5 вызовов reflector (уровни 0→1→2→3→4, на 4 останавливается)
@@ -453,3 +457,118 @@ class TestLogCompressorEdgeCases:
         turns = make_turns(4, chars=10)
         result = await c.compress(turns)
         assert result == turns
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Integration — реальный LLM (OpenAI-совместимый и Claude)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Реалистичный диалог с конкретными фактами — observer должен их извлечь.
+_REAL_DIALOG = [
+    {"role": "user", "content": "Привет! Меня зовут Иван, я работаю backend-разработчиком в Авито."},
+    {"role": "assistant", "content": "Привет, Иван! Чем могу помочь по backend-разработке?"},
+    {"role": "user", "content": "Я пишу на Go уже 5 лет, сейчас разбираюсь с Kafka."},
+    {"role": "assistant", "content": "Отличный стек. С Kafka бывает много нюансов — что именно изучаешь?"},
+    {"role": "user", "content": "Хочу понять как настроить exactly-once семантику для критичных платежей."},
+    {"role": "assistant", "content": "Для exactly-once в Kafka нужен идемпотентный producer + transactional API. Ключевые настройки: enable.idempotence=true, transactional.id, isolation.level=read_committed на consumer."},
+    {"role": "user", "content": "Понял, спасибо. А ещё у меня есть pet-project на Rust — пишу свой движок для key-value хранилища."},
+    {"role": "assistant", "content": "Круто! Rust для системного программирования — отличный выбор. Какие алгоритмы используешь для индексации?"},
+    {"role": "user", "content": "Пока думаю между LSM-tree и B+tree. Тяну в сторону LSM из-за write-heavy нагрузки."},
+    {"role": "assistant", "content": "LSM хорошо подходит для write-heavy. Посмотри на RocksDB — там много идей. Но bloom filters обязательно добавь, иначе чтение будет страдать."},
+]
+
+
+@pytest.mark.integration
+class TestLogCompressorIntegrationOpenAI:
+    """Прогоняем реальную компрессию через OpenAI-совместимый бекенд (Gemini Flash)."""
+
+    @pytest.mark.asyncio
+    async def test_compress_real_dialog(self, tmp_path):
+        api_key = os.environ.get("LLM_KEY")
+        if not api_key:
+            pytest.skip("LLM_KEY не задан")
+        base_url = os.environ.get("LLM_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+        model = os.environ.get("LLM_MODEL", "gemini-3-flash-preview")
+
+        c = LogCompressor(
+            model_name=model,
+            api_key=api_key,
+            base_url=base_url,
+            backend="openai",
+            recent_tokens=50,         # маленький бюджет — большая часть уйдёт в observe
+            min_recent_turns=2,
+            compress_after_tokens=1,  # любой диалог триггерит compress
+            reflect_after_tokens=999_999,
+        )
+        c.register(make_agent(tmp_path))
+
+        result = await c.compress(list(_REAL_DIALOG))
+
+        # OM-turn первый, остальное — recent
+        assert result, "compress вернул пустой список"
+        assert isinstance(result[0], dict) and result[0].get("_observation_message"), \
+            f"первый turn не OM: {result[0]}"
+        om = result[0]
+        assert "_raw_observations" in om and om["_raw_observations"].strip(), \
+            "OM должен содержать непустые _raw_observations"
+
+        # Observer должен извлечь конкретные факты из диалога — хоть один из ключевых терминов
+        raw = om["_raw_observations"].lower()
+        keywords = ["иван", "ivan", "go", "kafka", "rust", "lsm", "авито", "avito"]
+        assert any(k in raw for k in keywords), \
+            f"OM не содержит ни одного ключевого слова из {keywords}: {raw[:300]}"
+
+        # Recent — последние реплики, в исходном порядке, без OM
+        recent = result[1:]
+        assert recent, "не осталось recent-turns"
+        assert recent == _REAL_DIALOG[-len(recent):], \
+            "recent должен быть хвостом исходного диалога"
+
+
+@pytest.mark.integration
+class TestLogCompressorIntegrationClaude:
+    """Прогоняем реальную компрессию через Claude-бекенд (haiku) в bare-режиме."""
+
+    @pytest.mark.asyncio
+    async def test_compress_real_dialog_via_haiku(self, tmp_path):
+        # Для claude-бекенда не нужен LLM_KEY — он использует claude CLI напрямую.
+        model = os.environ.get("CLAUDE_HAIKU_MODEL", "haiku")
+
+        c = LogCompressor(
+            model_name=model,
+            backend="claude",
+            backend_params={"sdk_options": {
+                "system_prompt": None,    # без claude_code preset
+                "setting_sources": None,  # без user-settings
+                "tools": [],              # без встроенных тулов
+            }},
+            recent_tokens=50,
+            min_recent_turns=2,
+            compress_after_tokens=1,
+            reflect_after_tokens=999_999,
+        )
+        c.register(make_agent(tmp_path))
+
+        try:
+            result = await c.compress(list(_REAL_DIALOG))
+        finally:
+            # Останавливаем inner agent, если он успел подняться (закроет claude SDK).
+            if hasattr(c, "_llm_agent"):
+                await c._llm_agent.close()
+
+        assert result, "compress вернул пустой список"
+        assert isinstance(result[0], dict) and result[0].get("_observation_message"), \
+            f"первый turn не OM: {result[0]}"
+        om = result[0]
+        assert "_raw_observations" in om and om["_raw_observations"].strip(), \
+            "OM должен содержать непустые _raw_observations"
+
+        raw = om["_raw_observations"].lower()
+        keywords = ["иван", "ivan", "go", "kafka", "rust", "lsm", "авито", "avito"]
+        assert any(k in raw for k in keywords), \
+            f"OM не содержит ни одного ключевого слова из {keywords}: {raw[:300]}"
+
+        recent = result[1:]
+        assert recent, "не осталось recent-turns"
+        assert recent == _REAL_DIALOG[-len(recent):], \
+            "recent должен быть хвостом исходного диалога"
