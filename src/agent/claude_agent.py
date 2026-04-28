@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from contextlib import suppress
 
@@ -25,8 +26,7 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
 )
 
-from agent import Skill, bypass
-from src.agent.agent import Agent
+from src.agent.skill import Skill, bypass
 
 log = logging.getLogger(__name__)
 
@@ -41,22 +41,22 @@ class ClaudeAgentSkill(Skill):
         return f"📊 Контекст: {u['totalTokens']:,} / {u['maxTokens']:,} ({u['percentage']:.1f}%)"
 
 
-class ClaudeAgent(Agent):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class ClaudeBackend():
+    def __init__(self, agent):
+        self.agent = agent
         skill = ClaudeAgentSkill()
         skill.register(self)
-        self.skills.insert(0, skill)
-        self._cwd = os.path.join(self.memory.memory_dir, "workspace")
+        agent.skills.insert(0, skill)
+        self._cwd = os.path.join(agent.memory.memory_dir, "workspace")
         os.makedirs(self._cwd, exist_ok=True)
         self._client: ClaudeSDKClient | None = None
         self._client_append: str | None = None  # текст системки в живом клиенте
-        self._mcp_server = None  # построится лениво из self.skills
+        self._mcp_server = None  # построится лениво из agent.skills
 
     def _build_mcp_server(self):
         """Оборачивает тулы своих скиллов в SDK MCP-сервер. Клод увидит как mcp__slon__*."""
         sdk_tools: list[SdkMcpTool] = []
-        for skill in self.skills:
+        for skill in self.agent.skills:
             for decl in skill.get_tools():
                 fn = decl["function"]
                 name = fn["name"]
@@ -82,9 +82,65 @@ class ClaudeAgent(Agent):
             return None
         return create_sdk_mcp_server("slon", "1.0.0", sdk_tools)
 
+    def _claude_session_jsonl(self, session_id: str) -> str | None:
+        # claude CLI sanitizes cwd by replacing non-alphanumerics with dashes,
+        # uses that as the project dir under ~/.claude/projects/.
+        sanitized = re.sub(r'[^a-zA-Z0-9]', '-', self._cwd)
+        path = os.path.join(os.path.expanduser("~"), ".claude", "projects", sanitized, f"{session_id}.jsonl")
+        return path if os.path.isfile(path) else None
+
+    async def _sync_claude_session(self, session_id: str) -> int:
+        """Если у claude'а в jsonl сильно больше старых turn'ов чем у нас в памяти —
+        вычищаем лишние. Возвращает кол-во удалённых строк (0 если не трогали)."""
+        jsonl_path = self._claude_session_jsonl(session_id)
+        if not jsonl_path:
+            return 0
+
+        our_uuids = {t["_uuid"] for t in self.agent.memory._turns
+                     if isinstance(t, dict) and t.get("_uuid")}
+        if not our_uuids:
+            return 0
+        our_oldest = next(
+            (t["_uuid"] for t in self.agent.memory._turns
+             if isinstance(t, dict) and t.get("_uuid")), None,
+        )
+
+        with open(jsonl_path, encoding="utf-8") as f:
+            lines = f.readlines()
+
+        oldest_idx, pre_count = None, 0
+        for i, line in enumerate(lines):
+            try: entry = json.loads(line)
+            except json.JSONDecodeError: continue
+            if entry.get("uuid") == our_oldest:
+                oldest_idx = i
+                break
+            if entry.get("type") in ("user", "assistant"):
+                pre_count += 1
+
+        if oldest_idx is None or pre_count <= 20:
+            return 0
+
+        new_lines = []
+        for line in lines:
+            try: entry = json.loads(line)
+            except json.JSONDecodeError:
+                new_lines.append(line)
+                continue
+            uid = entry.get("uuid")
+            if uid is None or uid in our_uuids:
+                new_lines.append(line)
+
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        pruned = len(lines) - len(new_lines)
+        log.info("[claude_agent] sync: pruned %d → %d lines from %s",
+                 len(lines), len(new_lines), session_id)
+        return pruned
+
     @property
     def _state_file(self):
-        return os.path.join(self.memory.memory_dir, "claude_code.json")
+        return os.path.join(self.agent.memory.memory_dir, "claude_code.json")
 
     def _load_state(self) -> dict:
         try:
@@ -105,35 +161,48 @@ class ClaudeAgent(Agent):
                 await self._client.disconnect()
             self._client = None
             self._client_append = None
-        await super().close()
 
-    async def llm(self, tool_choice: str = None, parallel_tool_calls: bool = None):
+    async def llm(self, tool_choice: str = None, parallel_tool_calls: bool = None,
+                  temperature: float = 1.0, max_tokens: int | None = None,
+                  system_prompt: str | None = None):
         """Запускает claude (resume или fresh) с текущим OM_turn + skill-context'ами
         как append-system-prompt. Стримит ответ, на каждый content_block пишет turn
-        в self.memory с _uuid из claude jsonl. Возвращает финальный turn для loop().
-        """
-        # Извлекаем последний user-текст из current_content_parts (Agent.next_message)
-        user_text = " ".join(
-            p.get("text", "") for p in (self._current_content_parts or [])
-            if isinstance(p, dict) and "text" in p
-        ).strip()
+        в self.agent.memory с _uuid из claude jsonl. Возвращает финальный turn."""
+        agent = self.agent
+        user_text = agent.memory.last_user_query()
 
         state = self._load_state()
         session_id = state.get("session_id") or str(uuid.uuid4())
 
         # Триггер компрессии — обновит OM_turn в _turns
-        await self.memory.get_contents()
+        await agent.memory.get_contents()
+
+        # Если у claude'а в jsonl есть старые turn'ы которых уже нет в нашей
+        # памяти — вычищаем (наша компрессия должна резать клода тоже, иначе
+        # его собственный autocompact пробьётся и стирает почти всё).
+        pruned = await self._sync_claude_session(session_id) if state.get("created") else 0
+        if pruned:
+            if self._client:
+                with suppress(Exception, asyncio.CancelledError):
+                    await self._client.disconnect()
+                self._client = None
+                self._client_append = None
+            await agent.transport.send_memory_info(
+                f"Синхронизировал claude-сессию: вычистил {pruned} старых записей", final=True,
+            )
 
         # Динамический контекст: OM_turn + context_prompts всех скиллов
         parts = []
-        for t in self.memory._turns:
+        for t in agent.memory._turns:
             if isinstance(t, dict) and t.get("_observation_message"):
                 parts.append(t.get("content", ""))
                 break
-        for skill in self.skills:
+        for skill in agent.skills:
             ctx = await skill.get_context_prompt(user_text)
             if ctx:
                 parts.append(ctx)
+        if system_prompt:
+            parts.append(system_prompt)
         append_text = "\n\n".join(p for p in parts if p)
 
         # Переподнимаем клиент если системка изменилась (claude читает
@@ -146,7 +215,7 @@ class ClaudeAgent(Agent):
             self._client_append = None
 
         if self._client is None:
-            append_path = os.path.join(self.memory.memory_dir, "claude_append.md")
+            append_path = os.path.join(agent.memory.memory_dir, "claude_append.md")
             extra_args = {}
             if append_text:
                 with open(append_path, "w", encoding="utf-8") as f:
@@ -164,7 +233,7 @@ class ClaudeAgent(Agent):
             options_kwargs = dict(
                 permission_mode="bypassPermissions",
                 cwd=self._cwd,
-                model=self.model_name,
+                model=agent.model_name,
                 include_partial_messages=True,
                 setting_sources=["user"],
                 system_prompt={"type": "preset", "preset": "claude_code"},
@@ -226,16 +295,16 @@ class ClaudeAgent(Agent):
                     dtype = delta.get("type")
                     if dtype == "text_delta":
                         text_buf += delta.get("text", "")
-                        await self.transport.send_message(text_buf, stream_id=text_stream_id)
+                        await agent.transport.send_message(text_buf, stream_id=text_stream_id)
                     elif dtype == "thinking_delta":
                         thinking_buf += delta.get("thinking", "")
-                        await self.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
+                        await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
                 elif etype == "content_block_stop":
                     if block_type == "text":
-                        await self.transport.send_message(text_buf, stream_id=text_stream_id, final=True)
+                        await agent.transport.send_message(text_buf, stream_id=text_stream_id, final=True)
                         text_stream_id = None
                     elif block_type == "thinking":
-                        await self.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
+                        await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
                         thinking_stream_id = None
                     block_type = None
 
@@ -248,7 +317,7 @@ class ClaudeAgent(Agent):
                             "_uuid": message.uuid,
                         })
                     elif isinstance(block, ToolUseBlock):
-                        await self.transport.on_tool_call(block.name, block.input)
+                        await agent.transport.on_tool_call(block.name, block.input)
                         tool_use_names[block.id] = block.name
                         turns.append({
                             "role": "assistant",
@@ -272,7 +341,7 @@ class ClaudeAgent(Agent):
                             result = "\n".join(b.get("text", "") for b in raw if isinstance(b, dict) and b.get("type") == "text")
                         else:
                             result = raw
-                        await self.transport.on_tool_result(tool_use_names.get(block.tool_use_id, block.tool_use_id), result)
+                        await agent.transport.on_tool_result(tool_use_names.get(block.tool_use_id, block.tool_use_id), result)
                         turns.append({
                             "role": "tool",
                             "tool_call_id": block.tool_use_id,
@@ -284,7 +353,7 @@ class ClaudeAgent(Agent):
             elif isinstance(message, ResultMessage):
                 cost = f"${message.total_cost_usd:.4f}" if message.total_cost_usd else "n/a"
                 log.info("[claude_agent] done: %d turns, %s", message.num_turns, cost)
-                await self.transport.send_message(f"✅ Готово ({message.num_turns} turns, {cost})")
+                await agent.transport.send_message(f"✅ Готово ({message.num_turns} turns, {cost})")
                 return turns
 
         return turns

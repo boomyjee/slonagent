@@ -57,14 +57,6 @@ def release_pid_lock():
     try: os.unlink(_PID_PATH)
     except FileNotFoundError: pass
 
-os.makedirs(_LOG_DIR := os.path.expanduser("~/.slonagent"), exist_ok=True)
-_LOG_FILE = os.path.join(_LOG_DIR, "slonagent.log")
-_log_fh = logging.handlers.RotatingFileHandler(_LOG_FILE, maxBytes=0, backupCount=3, encoding="utf-8")
-if os.path.exists(_LOG_FILE) and os.path.getsize(_LOG_FILE) > 0: _log_fh.doRollover()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[
-    logging.StreamHandler(), _log_fh,
-])
-
 async def run_cli():
     DashboardTransport.set_server_config(**config.get("web", {}))
     transport = MultiTransport([CliTransport(), DashboardTransport(**config.get("web", {}).get("transport", {}))])
@@ -115,6 +107,14 @@ async def run_telegram():
     )
 
 acquire_pid_lock()
+os.makedirs(_LOG_DIR := os.path.expanduser("~/.slonagent"), exist_ok=True)
+_LOG_FILE = os.path.join(_LOG_DIR, "slonagent.log")
+_log_fh = logging.handlers.RotatingFileHandler(_LOG_FILE, maxBytes=0, backupCount=3, encoding="utf-8")
+if os.path.exists(_LOG_FILE) and os.path.getsize(_LOG_FILE) > 0: _log_fh.doRollover()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[
+    logging.StreamHandler(), _log_fh,
+])
+
 try:
     if "--cli" in sys.argv:
         asyncio.run(run_cli())

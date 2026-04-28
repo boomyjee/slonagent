@@ -31,6 +31,8 @@ HELP = (
 
 class ConfigSkill(Skill):
     async def start(self):
+        if self.agent.agent_dir is None:
+            raise RuntimeError("ConfigSkill requires agent_dir — can't be used on ephemeral agents")
         self.config_path = os.path.join(self.agent.agent_dir, ".config.json")
         if not os.path.exists(self.config_path):
             self._save({})

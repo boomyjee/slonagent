@@ -33,11 +33,21 @@ class ClaudeCodeSkill(Skill):
         if not sandbox:
             return {"error": "Требуется SandboxSkill с Docker-контейнером"}
 
+        parent_c = self.agent.memory.compressor
         sub = await self.agent.spawn_subagent(
             "claude_code",
-            __class__="src.agent.claude_agent.ClaudeAgent",
             skills=[],
             model_name=self._model,
+            base_url="claude",
+            memory_compressor={
+                "__class__": "src.memory.compressors.log.LogCompressor",
+                "api_key": parent_c._api_key,
+                "base_url": parent_c._base_url,
+                "model_name": parent_c._model_name,
+                "recent_tokens": 80_000,
+                "compress_after_tokens": 200_000,
+                "reflect_after_tokens": 300_000,
+            },
         )
 
         def find(t): return t if isinstance(t, DashboardTransport) else next((d for c in getattr(t, 'transports', []) if (d := find(c))), None)

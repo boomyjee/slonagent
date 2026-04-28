@@ -13,7 +13,6 @@ compress(turns) → [OM_turn] + [recent_turns]
 Хранение:
   memory/log/CONTEXT.json — observations (персистентно между сессиями)
 """
-import asyncio
 import logging
 import os
 import re
@@ -640,8 +639,8 @@ class LogCompressor(Skill):
         self._min_recent_turns      = min_recent_turns
         self._max_recent_turns_tokens     = max_recent_turns_tokens
         self._model_name = model_name
-
-        self._client = Agent.OpenAI(api_key, base_url)
+        self._api_key = api_key
+        self._base_url = base_url
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -748,23 +747,29 @@ class LogCompressor(Skill):
         return to_observe, recent
 
     async def _generate(self, label: str, system: str, messages: list, **kwargs) -> str:
-        max_retries, delay = 5, 0.5
-        for attempt in range(max_retries):
-            try:
-                response = await self._client.chat.completions.create(
-                    model=self._model_name,
-                    messages=[{"role": "system", "content": system}, *messages],
-                    **kwargs,
-                )
-                return (response.choices[0].message.content or "").strip()
-            except Exception as e:
-                messages = self.agent.apply_error_restriction(self._model_name, e, messages)
-                if attempt + 1 == max_retries:
-                    log.error("[LogCompressor] %s LLM failed: %s", label, e, exc_info=True)
-                    return ""
-                wait = delay * 2 ** attempt
-                log.warning("[LogCompressor] %s error, retry %d/%d in %ds: %s", label, attempt + 1, max_retries, wait, e)
-                await asyncio.sleep(wait)
+        if not hasattr(self, "_llm_agent"):
+            self._llm_agent = Agent(
+                id="",
+                model_name=self._model_name,
+                api_key=self._api_key,
+                base_url=self._base_url,
+            )
+
+        self._llm_agent.memory.clear()
+        await self._llm_agent.memory.add_turn(*messages)
+
+        try:
+            turn = await self._llm_agent.llm(
+                temperature=kwargs.get("temperature", 1.0),
+                max_tokens=kwargs.get("max_tokens"),
+                system_prompt=system,
+            )
+        except Exception as e:
+            log.error("[LogCompressor] %s LLM failed: %s", label, e, exc_info=True)
+            return ""
+        if isinstance(turn, list):
+            return ""
+        return (turn.get("content", "") or "").strip()
 
     async def _run_observer(self, turns: list, existing_observations: str) -> str:
         messages = []

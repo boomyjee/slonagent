@@ -194,7 +194,7 @@ async def _replay(raw_chunks: list[dict]) -> tuple[dict, _RecordingTransport]:
     async def fake_create(**kw):
         return _make_replay_stream(raw_chunks)
 
-    agent.client.chat.completions.create = fake_create
+    agent.backend.client.chat.completions.create = fake_create
     await agent.memory.add_turn({"role": "user", "content": "replay"})
     turn = await agent.llm()
     return turn, transport

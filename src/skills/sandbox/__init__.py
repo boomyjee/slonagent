@@ -22,6 +22,8 @@ class SandboxSkill(Skill):
         self._skill_script_map: dict[str, str] = {}
 
     async def start(self):
+        if self.agent.agent_dir is None:
+            raise RuntimeError("SandboxSkill requires agent_dir — can't be used on ephemeral agents")
         self.workspace_dir = self.workspace_dir or os.path.join(self.agent.memory.memory_dir, "workspace")
         os.makedirs(self.workspace_dir, exist_ok=True)
         sanitized = re.sub(r"[^a-z0-9]+", "_", self.agent.agent_dir.lower()).strip("_")

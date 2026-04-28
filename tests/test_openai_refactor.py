@@ -283,7 +283,7 @@ class TestAgentLoop:
             make_stream_chunk(text="Hello"),
             make_stream_chunk(text=" world"),
         ]
-        agent.client.chat.completions.create = AsyncMock(return_value=self._mock_stream(chunks))
+        agent.backend.client.chat.completions.create = AsyncMock(return_value=self._mock_stream(chunks))
 
         responses = []
         transport = self._mock_transport()
@@ -363,7 +363,7 @@ class TestAgentLoop:
                 return self._mock_stream([tc_chunk, end_chunk])
             return self._mock_stream([text_chunk, end_chunk2])
 
-        agent.client.chat.completions.create = AsyncMock(side_effect=make_stream)
+        agent.backend.client.chat.completions.create = AsyncMock(side_effect=make_stream)
 
         responses = []
         transport = self._mock_transport()

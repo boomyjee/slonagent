@@ -39,14 +39,14 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 
 def make_agent(skills=None, model_name: str = "claude-test"):
-    """Минимальный ClaudeAgent для тестов. По умолчанию модель — фейковая
-    (для unit-тестов с моками). Integration-тесты передают реальную."""
-    from src.agent.claude_agent import ClaudeAgent
-    agent = ClaudeAgent(
+    """Минимальный Agent с Claude-бекендом для тестов. По умолчанию модель —
+    фейковая (для unit-тестов с моками). Integration-тесты передают реальную."""
+    from src.agent.agent import Agent
+    agent = Agent(
         id="test",
         model_name=model_name,
         api_key="",
-        base_url="",
+        base_url="claude",
         agent_dir=tempfile.mkdtemp(),
         memory_compressor=PassthroughCompressor(),
         skills=skills or [],
@@ -79,18 +79,18 @@ class TestStateFile:
 
     def test_load_empty_returns_dict(self):
         agent = make_agent()
-        assert agent._load_state() == {}
+        assert agent.backend._load_state() == {}
 
     def test_save_then_load(self):
         agent = make_agent()
-        agent._save_state({"session_id": "abc", "created": True})
-        assert agent._load_state() == {"session_id": "abc", "created": True}
+        agent.backend._save_state({"session_id": "abc", "created": True})
+        assert agent.backend._load_state() == {"session_id": "abc", "created": True}
 
     def test_load_invalid_json_returns_empty(self):
         agent = make_agent()
-        with open(agent._state_file, "w") as f:
+        with open(agent.backend._state_file, "w") as f:
             f.write("not json")
-        assert agent._load_state() == {}
+        assert agent.backend._load_state() == {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -108,12 +108,12 @@ class TestBuildMcpServer:
     def test_no_skills_returns_none(self):
         agent = make_agent(skills=[])
         # AgentSkill автоматически добавляется, но у него тулов нет — server должен быть None
-        assert agent._build_mcp_server() is None
+        assert agent.backend._build_mcp_server() is None
 
     def test_with_skill_returns_server(self):
         skill = _SkillWithTool()
         agent = make_agent(skills=[skill])
-        server = agent._build_mcp_server()
+        server = agent.backend._build_mcp_server()
         assert server is not None
         assert server["type"] == "sdk"
         assert server["name"] == "slon"
@@ -154,7 +154,7 @@ class TestLlmBlockConversion:
         ])
 
         agent = make_agent()
-        agent._current_content_parts = [{"type": "text", "text": "hi"}]
+        agent.memory._turns.append({"role": "user", "content": "hi"})
         turns = await agent.llm()
 
         assert turns == [{
@@ -181,7 +181,7 @@ class TestLlmBlockConversion:
         ])
 
         agent = make_agent()
-        agent._current_content_parts = [{"type": "text", "text": "go"}]
+        agent.memory._turns.append({"role": "user", "content": "go"})
         turns = await agent.llm()
 
         assert len(turns) == 1
@@ -218,7 +218,7 @@ class TestLlmBlockConversion:
         ])
 
         agent = make_agent()
-        agent._current_content_parts = [{"type": "text", "text": "go"}]
+        agent.memory._turns.append({"role": "user", "content": "go"})
         turns = await agent.llm()
 
         assert len(turns) == 2
@@ -229,8 +229,10 @@ class TestLlmBlockConversion:
         assert result_turn["content"] == "found it"
         assert result_turn["_uuid"] == "u2"
 
-        # transport.on_tool_result вызывается с tool_use_id и content
-        agent.transport.on_tool_result.assert_called_once_with("t1", "found it")
+        # transport.on_tool_result вызывается с именем тула (НЕ tool_use_id) — UI
+        # матчит карточку on_tool_call → on_tool_result по имени, поэтому они должны
+        # совпадать. on_tool_call выше передал "search", здесь тоже "search".
+        agent.transport.on_tool_result.assert_called_once_with("search", "found it")
 
     @pytest.mark.asyncio
     async def test_stream_text_delta_accumulates(self, mock_client_class):
@@ -257,7 +259,7 @@ class TestLlmBlockConversion:
         ])
 
         agent = make_agent()
-        agent._current_content_parts = [{"type": "text", "text": "hi"}]
+        agent.memory._turns.append({"role": "user", "content": "hi"})
         await agent.llm()
 
         # Стрим-вызовы (с stream_id) — отдельно от финального "Готово ($cost)" без stream_id
@@ -283,7 +285,7 @@ class TestLlmBlockConversion:
         ])
 
         agent = make_agent()
-        agent._current_content_parts = [{"type": "text", "text": "hi"}]
+        agent.memory._turns.append({"role": "user", "content": "hi"})
         await agent.llm()
 
         sent_thinking = [c.args[0] for c in agent.transport.send_thinking.call_args_list]
@@ -318,7 +320,7 @@ class TestSessionLifecycle:
         cls, _ = mock_client_class
 
         agent = make_agent()
-        agent._current_content_parts = [{"type": "text", "text": "hi"}]
+        agent.memory._turns.append({"role": "user", "content": "hi"})
         await agent.llm()
 
         # ClaudeSDKClient был создан с options.session_id (не resume)
@@ -327,7 +329,7 @@ class TestSessionLifecycle:
         assert opts.resume is None
 
         # state-файл сохранён с created=True
-        state = agent._load_state()
+        state = agent.backend._load_state()
         assert state["created"] is True
         assert state["session_id"] == opts.session_id
 
@@ -336,8 +338,8 @@ class TestSessionLifecycle:
         cls, _ = mock_client_class
 
         agent = make_agent()
-        agent._save_state({"session_id": "fixed-uuid", "created": True})
-        agent._current_content_parts = [{"type": "text", "text": "hi"}]
+        agent.backend._save_state({"session_id": "fixed-uuid", "created": True})
+        agent.memory._turns.append({"role": "user", "content": "hi"})
         await agent.llm()
 
         opts = cls.call_args.kwargs["options"]
@@ -373,9 +375,9 @@ class TestClientReuse:
         cls, _ = mock_client_class
 
         agent = make_agent()
-        agent._current_content_parts = [{"type": "text", "text": "first"}]
+        agent.memory._turns.append({"role": "user", "content": "first"})
         await agent.llm()
-        agent._current_content_parts = [{"type": "text", "text": "second"}]
+        agent.memory._turns.append({"role": "user", "content": "second"})
         await agent.llm()
 
         # Клиент создан только один раз
@@ -422,7 +424,7 @@ class TestClaudeAgentIntegration:
     @pytest.mark.asyncio
     async def test_real_claude_says_pong(self):
         agent = make_agent(model_name=CLAUDE_MODEL)
-        agent._current_content_parts = [{"type": "text", "text": "Reply with exactly the word: pong"}]
+        agent.memory._turns.append({"role": "user", "content": "Reply with exactly the word: pong"})
 
         try:
             turns = await agent.llm()
@@ -440,7 +442,7 @@ class TestClaudeAgentIntegration:
         """Реальный claude стримит ответ — транспорт получает множество вызовов
         send_message, каждый с НАРАСТАЮЩИМ текстом одного stream_id."""
         agent = make_agent(model_name=CLAUDE_MODEL)
-        agent._current_content_parts = [{"type": "text", "text": "Перечисли 5 цветов радуги через запятую."}]
+        agent.memory._turns.append({"role": "user", "content": "Перечисли 5 цветов радуги через запятую."})
 
         try:
             await agent.llm()
@@ -462,10 +464,10 @@ class TestClaudeAgentIntegration:
         и мы получим tool_call/tool_result в transport + соответствующие turn'ы."""
         calc = _CalcSkill()
         agent = make_agent(skills=[calc], model_name=CLAUDE_MODEL)
-        agent._current_content_parts = [{
-            "type": "text",
-            "text": "Используй тулзу add чтобы сложить 17 и 25. Верни только результат.",
-        }]
+        agent.memory._turns.append({
+            "role": "user",
+            "content": "Используй тулзу add чтобы сложить 17 и 25. Верни только результат.",
+        })
 
         try:
             turns = await agent.llm()

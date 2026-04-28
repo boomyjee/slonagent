@@ -3,9 +3,9 @@ import numpy as np
 import soundfile as sf
 from datetime import datetime
 import httpx
-from openai.lib.streaming.chat import ChatCompletionStreamState
 from src.memory.memory import Memory
 from src.agent.agent_skill import AgentSkill
+from src.transport.base import BaseTransport
 
 
 class BadFinishReason(Exception):
@@ -74,6 +74,8 @@ class Agent:
                 self.skills.insert(0, skill)
 
     async def spawn_subagent(self, name: str, **cfg_overrides) -> "Agent":
+        if self.agent_dir is None:
+            raise RuntimeError("ephemeral agent (agent_dir=None) can't spawn subagents — nowhere to persist them")
         subagent_dir = os.path.join(self.agent_dir, "memory", "subagents", name)
         os.makedirs(subagent_dir, exist_ok=True)
         cfg_overrides.setdefault("transport", self.transport)
@@ -94,7 +96,7 @@ class Agent:
 
         return agent
 
-    def __init__(self, id: str, model_name: str, api_key: str, base_url: str, agent_dir: str, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
+    def __init__(self, id: str, model_name: str, api_key: str, base_url: str, agent_dir: str | None = None, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
         self.id = id
         self.model_name = model_name
         self.api_key = api_key
@@ -102,27 +104,32 @@ class Agent:
         self.agent_dir = agent_dir
         if isinstance(memory_providers, dict):
             memory_providers = list(memory_providers.values())
-        memory_dir = os.path.join(agent_dir, "memory")
+        memory_dir = os.path.join(agent_dir, "memory") if agent_dir else ""
         self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [], memory_dir=memory_dir)
         self.skills = ([memory_compressor] if memory_compressor else []) + self.memory.providers + (skills or []) + [AgentSkill()]
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)
-        self.transport = transport
-        if transport:
-            transport.set_agent(self)
+        self.transport = transport or BaseTransport()
+        self.transport.set_agent(self)
 
-        self.client = Agent.OpenAI(api_key, base_url)
+        if base_url == "claude":
+            from src.agent.claude_agent import ClaudeBackend
+            self.backend = ClaudeBackend(self)
+        else:
+            from src.agent.openai_agent import OpenAIBackend
+            self.backend = OpenAIBackend(self, base_url, api_key)
+
         self.transcription_client = Agent.OpenAI(transcription_api_key or api_key, transcription_base_url or base_url)
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
-        self._restrictions_file = os.path.join(memory_dir, ".restrictions.json")
+        self._restrictions_file = os.path.join(memory_dir, ".restrictions.json") if memory_dir else None
         self._restrictions: dict = self._load_restrictions()
-        self._current_content_parts: list = []
-        self._system_instruction: str | None = None
         self._stream_counter: int = 0
 
     def _load_restrictions(self) -> dict:
+        if not self._restrictions_file:
+            return {}
         try:
             with open(self._restrictions_file, encoding="utf-8") as f:
                 return json.load(f)
@@ -131,6 +138,8 @@ class Agent:
 
     def _save_restriction(self, key: str, value):
         self._restrictions[key] = value
+        if not self._restrictions_file:
+            return
         try:
             with open(self._restrictions_file, "w", encoding="utf-8") as f:
                 json.dump(self._restrictions, f, ensure_ascii=False, indent=2)
@@ -151,7 +160,7 @@ class Agent:
         self._stop_event.set()
 
     async def close(self):
-        pass
+        await self.backend.close()
 
     def strip_contents_private(self, turns: list, model_name: str = None) -> list:
         model = model_name or self.model_name
@@ -188,157 +197,8 @@ class Agent:
         return result
 
 
-    async def llm(self, tool_choice: str = None, parallel_tool_calls: bool = None):
-        if self._system_instruction is None:
-            user_query = " ".join(p.get("text", "") for p in self._current_content_parts if isinstance(p, dict) and "text" in p).strip()
-            system_parts = []
-            for skill in self.skills:
-                skill_context = await skill.get_context_prompt(user_query)
-                if skill_context:
-                    system_parts.append(skill_context)
-                    await self.transport.send_system_prompt(f"[{skill.__class__.__name__}]\n{skill_context}")
-            self._system_instruction = "\n\n".join(system_parts)
-            self._tools = []
-            for skill in self.skills:
-                for decl in skill.get_tools():
-                    fn = decl["function"]
-                    extra = await skill.get_tool_prompt(fn["name"])
-                    if extra:
-                        decl = {"type": "function", "function": {**fn, "description": fn["description"] + "\n\n---\n" + extra}}
-                    self._tools.append(decl)
-            if self._tools:
-                tool_lines = [f"{d['function']['name']}: {d['function']['description'].splitlines()[0][:100]}" for d in self._tools]
-                await self.transport.send_system_prompt("[Tools]\n" + "\n".join(tool_lines))
-        contents = self.strip_contents_private(await self.memory.get_contents())
-        tools = self._tools
-        messages = ([{"role": "system", "content": self._system_instruction}] if self._system_instruction else []) + contents
-        logging.info("[agent] → LLM %s", self.model_name)
-        max_retries, delay = 5, 0.5
-        for attempt in range(max_retries):
-            try:
-                kwargs: dict = {"model": self.model_name, "messages": messages, "stream": True, "temperature": 1.0}
-                if tools:
-                    kwargs["tools"] = tools
-                    if tool_choice in ("auto", "required"):
-                        kwargs["tool_choice"] = tool_choice
-                    elif tool_choice:
-                        kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
-                    if parallel_tool_calls is not None:
-                        kwargs["parallel_tool_calls"] = parallel_tool_calls
-                kwargs["extra_body"] = {"extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
-
-                stream = await self.client.chat.completions.create(**kwargs)
-
-                state = ChatCompletionStreamState()
-                display_text = ""
-                display_thinking = ""
-                thinking_id = self._stream_counter = self._stream_counter + 1
-                stream_id = self._stream_counter = self._stream_counter + 1
-                is_thought = False  # XML state machine: внутри <thought>...</thought>
-                tc_counter = 0
-                seen = {}
-
-                # Дамп всех чанков последнего тура — для отладки проблем
-                # с разделением мыслей и текста (см. fix(agent): split thoughts).
-                # Файл очищается в начале тура (handle_turn), здесь только дописываем.
-                chunk_dump_path = os.path.join(self.memory.memory_dir, "last_turn_chunks.log")
-                chunk_dump = open(chunk_dump_path, "a", encoding="utf-8")
-
-                async for chunk in stream:
-                    chunk_dump.write(chunk.model_dump_json(exclude_none=False) + "\n")
-                    chunk_dump.flush()
-                    # Gemini шлёт role="assistant" в каждом чанке — openai-аккумулятор
-                    # склеит в "assistantassistant…", оставляем только из первого.
-                    # thought=true приходит в каждом thinking-чанке; на финальной
-                    # message он не нужен — Gemini иначе трактует ответ как
-                    # внутреннее рассуждение и теряет его в истории.
-                    delta = chunk.choices[0].delta if chunk.choices else None
-                    if delta is not None:
-                        for tc in delta.tool_calls or ():
-                            if tc.index is None:
-                                tc.index = tc_counter
-                                tc_counter += 1
-                        if delta.role:
-                            if "role" in seen: delta.role = None
-                            seen["role"] = True
-                        google = ((delta.model_extra or {}).get("extra_content") or {}).get("google") or {}
-                        is_thought_chunk = bool(google.pop("thought", None))
-
-                    state.handle_chunk(chunk)
-                    if delta is None:
-                        continue
-
-                    delta_extra = getattr(delta, "model_extra", None) or {}
-                    thought_extra = delta_extra.get("reasoning_content") or delta_extra.get("reasoning")
-                    if thought_extra and isinstance(thought_extra, str):
-                        display_thinking += thought_extra
-                        await self.transport.send_thinking(display_thinking, thinking_id)
-
-                    # Gemini маркирует мысли двумя сигналами: google.thought=true
-                    # flag на чанке ИЛИ литералы <thought>...</thought> в content.
-                    # Pro-preview на тяжёлой истории может не ставить flag и не
-                    # закрывать </thought> — тогда state machine по XML удерживает
-                    # is_thought=True до конца стрима, мысли не утекают в text.
-                    # <thought> в content считаем маркером только если он стоит
-                    # в самом начале чанка и текст ещё не начался — иначе это
-                    # литерал в ответе модели.
-                    if content := delta.content or "":
-                        if is_thought_chunk or (content.startswith("<thought>") and not display_text):
-                            is_thought = True
-                        if is_thought:
-                            thought, *rest = content.removeprefix("<thought>").split("</thought>", 1)
-                            display_thinking += thought
-                            if rest:
-                                is_thought = False
-                                text = rest[0]
-                                if text:
-                                    display_text += text
-                            await self.transport.send_thinking(display_thinking, thinking_id, final=not is_thought)
-                            if not is_thought and display_text:
-                                await self.transport.send_message(display_text, stream_id, final=False)
-                        else:
-                            display_text += content
-                            await self.transport.send_message(display_text, stream_id, final=False)
-
-                try: chunk_dump.close()
-                except Exception: pass
-
-                if display_thinking and not display_text:
-                    await self.transport.send_thinking(display_thinking, thinking_id, final=True)
-                if display_text:
-                    await self.transport.send_message(display_text, stream_id, final=True)
-
-                final = state.get_final_completion()
-                finish_reason = final.choices[0].finish_reason if final.choices else None
-                if finish_reason and finish_reason not in ("stop", "tool_calls"):
-                    raise BadFinishReason(finish_reason)
-
-                turn = final.choices[0].message.model_dump(exclude_none=True)
-                # В content из stream попадают XML-теги <thought>...</thought> —
-                # заменяем на очищенный display_text, который мы собрали по флагу.
-                turn.pop("content", None)
-                if display_text.strip():
-                    turn["content"] = display_text.strip()
-
-                for tc in turn.get("tool_calls") or ():
-                    tc.pop("index", None)
-                    logging.info("[stream] function_call: %s", tc["function"]["name"])
-
-                if not turn.get("content") and not turn.get("tool_calls"):
-                    logging.warning("[agent] ← LLM %s returned no content (only thoughts?)", self.model_name)
-                    await self.transport.send_message("(модель не вернула ответ, только мысли)")
-
-                logging.info("[agent] ← LLM %s finish=%s", self.model_name, finish_reason)
-                return turn
-            except BadFinishReason:
-                raise
-            except Exception as e:
-                messages = self.apply_error_restriction(self.model_name, e, messages)
-                if attempt + 1 == max_retries:
-                    raise
-                wait = delay * 2 ** attempt
-                logging.warning("[agent] LLM %s error, retry %d/%d in %ds: %s", self.model_name, attempt + 1, max_retries, wait, e)
-                await asyncio.sleep(wait)
+    async def llm(self, **kwargs):
+        return await self.backend.llm(**kwargs)
 
     def call_before_next_message(self, coro):
         self._message_queue.put_nowait(coro)
@@ -359,8 +219,6 @@ class Agent:
         content_parts = [p for i, (parts, _, _) in enumerate(batch) for p in ([{"type": "text", "text": "\n"}] if i > 0 else []) + list(parts)]
         user_message_id = next((mid for _, mid, _ in batch if mid is not None), None)
         trigger_answer = any(t for _, _, t in batch)
-        self._current_content_parts = content_parts
-        self._system_instruction = None
         user_query = " ".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and "text" in p).strip()
         logging.info("[agent] incoming: %r", user_query)
         return content_parts, user_message_id, trigger_answer

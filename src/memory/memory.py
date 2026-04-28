@@ -176,7 +176,22 @@ class Memory:
                 total += (len(fn.get("name", "")) + len(fn.get("arguments", ""))) // 4
         return total
 
+    def last_user_query(self) -> str:
+        for turn in reversed(self._turns):
+            if not (isinstance(turn, dict) and turn.get("role") == "user"):
+                continue
+            c = turn.get("content")
+            if isinstance(c, str):
+                return c.strip()
+            if isinstance(c, list):
+                return " ".join(p.get("text", "") for p in c
+                                if isinstance(p, dict) and "text" in p).strip()
+            return ""
+        return ""
+
     async def get_contents(self) -> list:
+        if self.compressor is None:
+            return self._turns
         try:
             result = await self.compressor.compress(self._turns)
         except Exception as e:
