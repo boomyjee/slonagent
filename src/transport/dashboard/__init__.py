@@ -21,9 +21,10 @@ class _LogHandler(logging.Handler):
     _instances: dict[str, "DashboardTransport"] = {}
 
     def _category(self, name: str) -> str:
-        if name.startswith("src.memory") or name.startswith("memory"):
+        if name.startswith(("src.memory", "memory")):
             return "memory"
-        if name.startswith("aiogram") or name.startswith("src.transport") or name.startswith("httpx") or name.startswith("uvicorn") or name.startswith("google_genai") or name.startswith("sentence_transformers") or name.startswith("huggingface_hub"):
+        if name.startswith(("aiogram", "src.transport", "httpx", "uvicorn", "asyncssh",
+                            "google_genai", "sentence_transformers", "huggingface_hub")):
             return "transport"
         return "agent"
 
