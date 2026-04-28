@@ -128,7 +128,7 @@ class TestLlmBlockConversion:
     @pytest.fixture
     def mock_client_class(self):
         """Подменяет ClaudeSDKClient на mock с контролируемыми сообщениями."""
-        with patch("src.agent.claude_agent.ClaudeSDKClient") as cls:
+        with patch("src.agent.backends.claude.ClaudeSDKClient") as cls:
             instance = MagicMock()
             instance.connect = AsyncMock()
             instance.query = AsyncMock()
@@ -300,7 +300,7 @@ class TestSessionLifecycle:
 
     @pytest.fixture
     def mock_client_class(self):
-        with patch("src.agent.claude_agent.ClaudeSDKClient") as cls:
+        with patch("src.agent.backends.claude.ClaudeSDKClient") as cls:
             instance = MagicMock()
             instance.connect = AsyncMock()
             instance.query = AsyncMock()
@@ -355,7 +355,7 @@ class TestClientReuse:
 
     @pytest.fixture
     def mock_client_class(self):
-        with patch("src.agent.claude_agent.ClaudeSDKClient") as cls:
+        with patch("src.agent.backends.claude.ClaudeSDKClient") as cls:
             instance = MagicMock()
             instance.connect = AsyncMock()
             instance.query = AsyncMock()

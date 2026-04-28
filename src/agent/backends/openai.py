@@ -6,15 +6,13 @@ import os
 from openai.lib.streaming.chat import ChatCompletionStreamState
 
 from src.agent.agent import Agent, BadFinishReason
+from src.agent.backends.base import BaseBackend
 
 
-class OpenAIBackend:
+class OpenAIBackend(BaseBackend):
     def __init__(self, agent, base_url: str, api_key: str):
-        self.agent = agent
+        super().__init__(agent)
         self.client = Agent.OpenAI(api_key, base_url)
-
-    async def close(self):
-        pass
 
     async def llm(self, tool_choice: str = None, parallel_tool_calls: bool = None, temperature: float = 1.0, max_tokens: int | None = None, system_prompt: str | None = None):
         agent = self.agent

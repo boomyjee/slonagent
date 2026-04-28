@@ -27,6 +27,7 @@ from claude_agent_sdk import (
 )
 
 from src.agent.skill import Skill, bypass
+from src.agent.backends.base import BaseBackend
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +42,9 @@ class ClaudeAgentSkill(Skill):
         return f"📊 Контекст: {u['totalTokens']:,} / {u['maxTokens']:,} ({u['percentage']:.1f}%)"
 
 
-class ClaudeBackend():
+class ClaudeBackend(BaseBackend):
     def __init__(self, agent):
-        self.agent = agent
+        super().__init__(agent)
         skill = ClaudeAgentSkill()
         skill.register(self)
         agent.skills.insert(0, skill)

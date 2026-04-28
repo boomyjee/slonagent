@@ -114,10 +114,10 @@ class Agent:
         self.transport.set_agent(self)
 
         if base_url == "claude":
-            from src.agent.claude_agent import ClaudeBackend
+            from src.agent.backends.claude import ClaudeBackend
             self.backend = ClaudeBackend(self)
         else:
-            from src.agent.openai_agent import OpenAIBackend
+            from src.agent.backends.openai import OpenAIBackend
             self.backend = OpenAIBackend(self, base_url, api_key)
 
         self.transcription_client = Agent.OpenAI(transcription_api_key or api_key, transcription_base_url or base_url)
