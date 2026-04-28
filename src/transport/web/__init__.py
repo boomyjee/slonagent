@@ -150,50 +150,52 @@ class WebTransport(BaseTransport):
             raise RuntimeError("WebTransport._loop not set; call set_server_config() from the main loop first")
         WebTransport._app = FastAPI()
 
-        if WebTransport._password_hash:
-            _REALM = "SlonAgent"
-            _401 = Response(status_code=401, headers={"WWW-Authenticate": f'Basic realm="{_REALM}"'})
+        _REALM = "SlonAgent"
+        _401 = Response(status_code=401, headers={"WWW-Authenticate": f'Basic realm="{_REALM}"'})
+        _NO_PASSWORD = PlainTextResponse(
+            "No password configured. Set password_hash in config.", status_code=503,
+        )
 
-            @WebTransport._app.middleware("http")
-            async def auth_middleware(request: Request, call_next):
-                # Local access never needs auth (direct browser on the host).
-                if request.url.hostname in ("localhost", "127.0.0.1"):
-                    return await call_next(request)
-                # JS is always public — bookmarklets import scripts cross-origin
-                # and can't carry credentials. The actual gate is the WebSocket.
-                if request.url.path.endswith(".js"):
-                    return await call_next(request)
-                # Cookie from a previous successful auth.
-                if request.cookies.get("auth") == WebTransport._password_hash:
-                    return await call_next(request)
-                # Daily token in query string (for Telegram WebApp etc).
-                token = request.query_params.get("token", "")
-                if token and WebTransport.check_auth_token(token):
-                    response = await call_next(request)
-                    response.set_cookie(
-                        "auth", WebTransport._password_hash,
-                        max_age=30 * 24 * 3600,
-                        httponly=True, secure=True, samesite="none", path="/",
-                    )
-                    return response
-                auth = request.headers.get("authorization", "")
-                if auth.startswith("Basic "):
-                    try:
-                        decoded = base64.b64decode(auth[6:]).decode()
-                        password = decoded.split(":", 1)[1]
-                        if hashlib.sha256(password.encode()).hexdigest() == WebTransport._password_hash:
-                            response = await call_next(request)
-                            # SameSite=None + Secure so the cookie rides along
-                            # cross-origin WebSocket handshakes from bookmarklets.
-                            response.set_cookie(
-                                "auth", WebTransport._password_hash,
-                                max_age=30 * 24 * 3600,
-                                httponly=True, secure=True, samesite="none", path="/",
-                            )
-                            return response
-                    except Exception:
-                        pass
-                return _401
+        @WebTransport._app.middleware("http")
+        async def auth_middleware(request: Request, call_next):
+            # Local access never needs auth (direct browser on the host).
+            if request.url.hostname in ("localhost", "127.0.0.1"):
+                return await call_next(request)
+            if not WebTransport._password_hash:
+                return _NO_PASSWORD
+            # JS is always public — bookmarklets import scripts cross-origin
+            # and can't carry credentials. The actual gate is the WebSocket.
+            if request.url.path.endswith(".js"):
+                return await call_next(request)
+            # Cookie from a previous successful auth.
+            if request.cookies.get("auth") == WebTransport._password_hash:
+                return await call_next(request)
+            # Daily token in query string (for Telegram WebApp etc).
+            token = request.query_params.get("token", "")
+            if token and WebTransport.check_auth_token(token):
+                response = await call_next(request)
+                response.set_cookie(
+                    "auth", WebTransport._password_hash,
+                    max_age=30 * 24 * 3600,
+                    httponly=True, secure=True, samesite="none", path="/",
+                )
+                return response
+            auth = request.headers.get("authorization", "")
+            if auth.startswith("Basic "):
+                try:
+                    decoded = base64.b64decode(auth[6:]).decode()
+                    password = decoded.split(":", 1)[1]
+                    if hashlib.sha256(password.encode()).hexdigest() == WebTransport._password_hash:
+                        response = await call_next(request)
+                        response.set_cookie(
+                            "auth", WebTransport._password_hash,
+                            max_age=30 * 24 * 3600,
+                            httponly=True, secure=True, samesite="none", path="/",
+                        )
+                        return response
+                except Exception:
+                    pass
+            return _401
 
         @WebTransport._app.get("/")
         async def root():
@@ -329,9 +331,9 @@ class WebTransport(BaseTransport):
     
     async def _ws(self, ws: WebSocket):
         # HTTP middleware doesn't run on WebSocket handshakes — enforce auth here.
-        if WebTransport._password_hash:
-            host = ws.headers.get("host", "").split(":")[0]
-            if host not in ("localhost", "127.0.0.1") and \
+        host = ws.headers.get("host", "").split(":")[0]
+        if host not in ("localhost", "127.0.0.1"):
+            if not WebTransport._password_hash or \
                     ws.cookies.get("auth") != WebTransport._password_hash:
                 await ws.close(code=4401)
                 return
