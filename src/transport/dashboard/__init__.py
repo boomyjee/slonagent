@@ -1,4 +1,4 @@
-import asyncio, logging
+import asyncio, logging, os
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -87,11 +87,21 @@ class DashboardTransport(WebTransport):
         self._files = FilesAPI(self)
         self._git = GitAPI(self)
         self._watchers = WatcherPool(self._files)
+        self._default_root: str | None = None
 
     @property
     def _sandbox(self):
         from src.skills.sandbox import SandboxSkill
         return next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
+
+    @property
+    def default_root(self) -> str:
+        if self._default_root is None:
+            sandbox = self._sandbox
+            self._default_root = sandbox.workspace_dir if sandbox \
+                else os.path.join(self.agent.memory.memory_dir, "workspace")
+            os.makedirs(self._default_root, exist_ok=True)
+        return self._default_root
 
     def get_skills(self):
         return [self._skill]

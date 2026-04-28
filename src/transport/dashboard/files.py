@@ -23,10 +23,6 @@ class FilesAPI:
     def __init__(self, transport):
         self.transport = transport
 
-    @property
-    def _sandbox(self):
-        return self.transport._sandbox
-
     def register(self):
         t = self.transport
         t.register_route("get", "/api/files", self.list)
@@ -39,7 +35,7 @@ class FilesAPI:
         t.register_route("get", "/api/dirs", self.list_dirs)
 
     def default_root(self) -> str | None:
-        return self._sandbox.workspace_dir if self._sandbox else None
+        return self.transport.default_root
 
     def resolve(self, root: str | None, path: str) -> str | None:
         actual = root or self.default_root()

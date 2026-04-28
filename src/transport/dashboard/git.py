@@ -208,10 +208,6 @@ class GitAPI:
     def __init__(self, transport):
         self.transport = transport
 
-    @property
-    def _sandbox(self):
-        return self.transport._sandbox
-
     def register(self):
         t = self.transport
         t.register_route("get", "/api/git/status", self.status)
