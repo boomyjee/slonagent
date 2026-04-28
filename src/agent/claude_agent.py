@@ -25,14 +25,28 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
 )
 
+from agent import Skill, bypass
 from src.agent.agent import Agent
 
 log = logging.getLogger(__name__)
 
 
+class ClaudeAgentSkill(Skill):
+    @bypass("context", "Заполнение контекста claude'а", standalone=True)
+    async def context_command(self, args: str) -> str:
+        client = self.agent._client
+        if client is None:
+            return "Клод ещё не запускался в этой сессии."
+        u = await client.get_context_usage()
+        return f"📊 Контекст: {u['totalTokens']:,} / {u['maxTokens']:,} ({u['percentage']:.1f}%)"
+
+
 class ClaudeAgent(Agent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        skill = ClaudeAgentSkill()
+        skill.register(self)
+        self.skills.insert(0, skill)
         self._cwd = os.path.join(self.memory.memory_dir, "workspace")
         os.makedirs(self._cwd, exist_ok=True)
         self._client: ClaudeSDKClient | None = None
