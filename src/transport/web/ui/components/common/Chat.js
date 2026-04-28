@@ -144,7 +144,17 @@ export class Chat extends Component {
 
     _formatResult(result) {
         if (result == null) return null;
-        if (typeof result === 'string') return result;
+        if (typeof result === 'string') {
+            if (result.startsWith('{') || result.startsWith('[')) {
+                try { result = JSON.parse(result); } catch { return result; }
+            } else return result;
+        }
+        if (typeof result === 'object' && !Array.isArray(result)) {
+            return Object.entries(result)
+                .filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length))
+                .map(([k, v]) => `[${k}]\n${typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v)}`)
+                .join('\n') || '(empty)';
+        }
         return JSON.stringify(result, null, 2);
     }
 
