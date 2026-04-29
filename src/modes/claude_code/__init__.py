@@ -19,11 +19,10 @@ class ClaudeCodeSkill(Skill):
     async def launch_command(self, args: str):
         self.agent.call_before_next_message(self.launch(task=args))
 
-    @tool("Запустить Claude Code для работы с кодом в указанной папке")
+    @tool("Запустить Claude Code для работы с кодом")
     async def launch(
         self,
         task: Annotated[str, "Задача для Claude Code"] = "",
-        project_path: Annotated[str, "Путь к проекту"] = "",
     ) -> dict:
         from src.agent.agent import stoppable
         from src.skills.sandbox import SandboxSkill
@@ -33,11 +32,21 @@ class ClaudeCodeSkill(Skill):
         if not sandbox:
             return {"error": "Требуется SandboxSkill с Docker-контейнером"}
 
+        # Отбираем у клода ТОЛЬКО доступ к хост-ФС/шеллу — но оставляем Task
+        # (субагенты), TodoWrite, WebFetch, WebSearch, ExitPlanMode. Хост-тулы
+        # подменяются нашими MCP-обёртками над SandboxSkill: клод видит их
+        # как mcp__slon__exec / read / write / replace / grep / glob.
+        # Свой инстанс SandboxSkill для subagent'а (skill хранит ссылку на agent),
+        # своя песочница — паттерн как в coding mode.
         sub = await self.agent.spawn_subagent(
             "claude_code",
-            skills=[],
+            skills=[SandboxSkill(workspace_dir=sandbox.workspace_dir)],
             model_name=self._model,
             backend="claude",
+            backend_params={"sdk_options": {"disallowed_tools": [
+                "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit",
+                "Read", "Grep", "Glob", "KillShell",
+            ]}},
             memory_compressor={
                 "__class__": "src.memory.compressors.log.LogCompressor",
                 "model_name": "haiku",
