@@ -1,8 +1,6 @@
-import asyncio, base64, json, os, re, logging, subprocess, threading
+import ast, asyncio, base64, json, os, re, logging, subprocess, threading
 from typing import Annotated
 from agent import Skill, tool
-
-from src.skills.sandbox import junctions, script_tools
 
 
 class SandboxSkill(Skill):
@@ -22,9 +20,6 @@ class SandboxSkill(Skill):
         self.default_timeout = default_timeout
         self.runtime = runtime
         self._skill_script_map: dict[str, str] = {}
-        # Кеш: контейнер уже проверен, machine жива, mount-набор совпадает.
-        # Сбрасывается только если podman exec упадёт.
-        self._container_ready: bool = False
 
     async def start(self):
         if self.agent.agent_dir is None:
@@ -39,6 +34,8 @@ class SandboxSkill(Skill):
     def get_tools(self) -> list:
         return self._tools + self._scan_script_tools()
 
+    _AST_TYPES = {"str": "string", "int": "integer", "float": "number", "bool": "boolean"}
+
     def _scan_script_tools(self) -> list:
         self._skill_script_map = {}
         result = []
@@ -50,11 +47,97 @@ class SandboxSkill(Skill):
                 script_path = os.path.join(path, "__init__.py")
             else:
                 continue
-            for t in script_tools.introspect(script_path):
+            for t in self._introspect_ast(script_path):
                 t["function"]["name"] = "sandbox_" + t["function"]["name"]
                 self._skill_script_map[t["function"]["name"]] = script_path
                 result.append(t)
         return result
+
+    def _introspect_ast(self, path: str) -> list:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                tree = ast.parse(f.read())
+        except SyntaxError:
+            return []
+
+        tools = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if not any(
+                (isinstance(b, ast.Name) and b.id == "Skill") or
+                (isinstance(b, ast.Attribute) and b.attr == "Skill")
+                for b in node.bases
+            ):
+                continue
+            prefix = node.name.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider").lower()
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                desc = self._get_tool_desc(item)
+                if desc is None:
+                    continue
+                props, required = self._parse_params(item)
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": f"{prefix}_{item.name}",
+                        "description": desc,
+                        "parameters": {"type": "object", "properties": props, "required": required},
+                    }
+                })
+        return tools
+
+    @staticmethod
+    def _get_tool_desc(func: ast.FunctionDef) -> str | None:
+        for dec in func.decorator_list:
+            if isinstance(dec, ast.Call):
+                fn = dec.func
+                if (isinstance(fn, ast.Name) and fn.id == "tool") or \
+                   (isinstance(fn, ast.Attribute) and fn.attr == "tool"):
+                    if dec.args and isinstance(dec.args[0], ast.Constant):
+                        return dec.args[0].value
+        return None
+
+    def _parse_params(self, func: ast.FunctionDef) -> tuple[dict, list]:
+        props = {}
+        required = []
+        args = func.args
+        defaults_offset = len(args.args) - len(args.defaults)
+        for i, arg in enumerate(args.args):
+            if arg.arg == "self":
+                continue
+            annotation = arg.annotation
+            schema = self._annotation_to_schema(annotation)
+            props[arg.arg] = schema
+            if i < defaults_offset:
+                required.append(arg.arg)
+        return props, required
+
+    def _annotation_to_schema(self, node) -> dict:
+        if node is None:
+            return {"type": "string"}
+        # Annotated[type, "desc"]
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "Annotated":
+            elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            base = elts[0]
+            desc = elts[1].value if len(elts) > 1 and isinstance(elts[1], ast.Constant) else None
+            schema = self._base_type_schema(base)
+            if desc:
+                schema["description"] = desc
+            return schema
+        return self._base_type_schema(node)
+
+    def _base_type_schema(self, node) -> dict:
+        if isinstance(node, ast.Name):
+            return {"type": self._AST_TYPES.get(node.id, "string")}
+        # list[str] etc
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "list":
+            item_type = "string"
+            if isinstance(node.slice, ast.Name):
+                item_type = self._AST_TYPES.get(node.slice.id, "string")
+            return {"type": "array", "items": {"type": item_type}}
+        return {"type": "string"}
 
     def _lib_dir(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "container_lib")
@@ -153,30 +236,17 @@ class SandboxSkill(Skill):
 
         return result
 
-    def _pool_dirs(self) -> tuple[str, str]:
-        """(<memory_dir>/mnt/ro, <memory_dir>/mnt/rw) — host-side pool roots, в которых
-        живут junctions/binds. Контейнер видит их как /mnt/ro и /mnt/rw."""
-        base = os.path.join(self.agent.memory.memory_dir, "mnt")
-        return os.path.join(base, "ro"), os.path.join(base, "rw")
-
-    def _read_pool_config(self) -> tuple[list[str], list[str]]:
-        """Читает sandbox.ro / sandbox.rw из ConfigSkill, дедупит вложенные пути в каждом пуле."""
+    def _mounts(self) -> dict[str, str]:
         from src.skills.config import ConfigSkill
         config = next((s for s in self.agent.skills if isinstance(s, ConfigSkill)), None) if self.agent else None
-        if not config:
-            return [], []
-        return junctions.dedupe_nested(config.get("sandbox.ro") or []), \
-               junctions.dedupe_nested(config.get("sandbox.rw") or [])
-
-    def _expected_links(self) -> dict[str, tuple[str, str]]:
-        """{host_link_path → (target, pool_name)}. pool_name — 'ro' или 'rw' (для логов)."""
-        ro_paths, rw_paths = self._read_pool_config()
-        pool_ro, pool_rw = self._pool_dirs()
-        result: dict[str, tuple[str, str]] = {}
-        for paths, pool_dir, pool in [(ro_paths, pool_ro, "ro"), (rw_paths, pool_rw, "rw")]:
-            for p in paths:
-                link = os.path.join(pool_dir, junctions.container_subpath(p).replace("/", os.sep))
-                result[link] = (p, pool)
+        folders = config.get("sandbox.folders") or [] if config else []
+        result = {}
+        for f in folders:
+            if len(f) >= 2 and f[1] == ":":
+                drive, rest = f[0].lower(), f[2:].replace("\\", "/").lstrip("/")
+                result[f] = f"/mnt/{drive}/{rest}"
+            else:
+                result[f] = f.replace("\\", "/")
         return result
 
     def resolve_path(self, container_path: str) -> str | None:
@@ -184,10 +254,10 @@ class SandboxSkill(Skill):
             return self.workspace_dir
         if container_path.startswith("/workspace/"):
             return os.path.join(self.workspace_dir, container_path[len("/workspace/"):])
-        pool_ro, pool_rw = self._pool_dirs()
-        for prefix, base in (("/mnt/ro/", pool_ro), ("/mnt/rw/", pool_rw)):
+        for host, container in self._mounts().items():
+            prefix = container.rstrip("/") + "/"
             if container_path.startswith(prefix):
-                return os.path.join(base, container_path[len(prefix):].replace("/", os.sep))
+                return os.path.join(host, container_path[len(prefix):].replace("/", os.sep))
         return None
 
     async def get_context_prompt(self, user_text: str = "") -> str:
@@ -195,22 +265,16 @@ class SandboxSkill(Skill):
             "## Sandbox",
             "Изолированный Docker-контейнер с правами root.",
             "Персистентный — файлы, установленные пакеты и состояние сохраняются между вызовами.",
-            "Пути:",
-            "  /workspace — рабочая директория (чтение и запись).",
-            "  /mnt/ro/<drive>/<path> — папки хоста только для чтения.",
-            "  /mnt/rw/<drive>/<path> — папки хоста для чтения и записи.",
+            "Доступные пути: /workspace — рабочая директория (чтение и запись).",
         ]
-        ro_paths, rw_paths = self._read_pool_config()
-        if ro_paths or rw_paths:
-            lines.append("Доступные хост-папки:")
-            for p in ro_paths:
-                lines.append(f"  - [RO] {p}  →  /mnt/ro/{junctions.container_subpath(p)}")
-            for p in rw_paths:
-                lines.append(f"  - [RW] {p}  →  /mnt/rw/{junctions.container_subpath(p)}")
+        mounts = self._mounts()
+        if mounts:
+            lines.append("Примонтированные папки хост-машины (только чтение):")
+            for host, container in mounts.items():
+                lines.append(f"  - {host}  →  {container}")
         lines.append(
-            "Чтобы добавить папку с хост-машины, попроси пользователя написать в чат:\n"
-            "  /config write sandbox.ro[] <абсолютный путь>   # только для чтения\n"
-            "  /config write sandbox.rw[] <абсолютный путь>   # для чтения и записи"
+            "Чтобы примонтировать папку с хост-машины, попроси пользователя написать в чат команду (команда пойдет в обход тебя):\n"
+            "  /config write sandbox.folders[] <абсолютный путь к папке>"
         )
         lines.append(
             "Python-скрипты в /workspace/tools/ автоматически становятся инструментами.\n"
@@ -228,24 +292,16 @@ class SandboxSkill(Skill):
         logging.info("[exec] Контейнер %s остановлен", self.container_name)
 
     def _volume_args(self):
-        pool_ro, pool_rw = self._pool_dirs()
-        os.makedirs(pool_ro, exist_ok=True)
-        os.makedirs(pool_rw, exist_ok=True)
-        return [
-            "-v", f"{self.workspace_dir}:/workspace",
-            "-v", f"{self._lib_dir()}:/slonagent:ro",
-            "-v", f"{pool_ro}:/mnt/ro:ro",
-            "-v", f"{pool_rw}:/mnt/rw",
-        ]
+        lib_dir = self._lib_dir()
+        args = ["-v", f"{self.workspace_dir}:/workspace", "-v", f"{lib_dir}:/slonagent:ro"]
+        for host, container in self._mounts().items():
+            args += ["-v", f"{host}:{container}:ro"]
+        return args
 
     @staticmethod
     def _norm(path: str) -> str:
         """Normalize path for comparison: Windows→WSL mount format, lowercase."""
         p = path.replace("\\", "/").rstrip("/").lower()
-        # os.readlink на junction отдаёт `\\?\<target>` (Windows path namespace).
-        # Сравнения должны игнорировать этот префикс.
-        if p.startswith("//?/"):
-            p = p[4:]
         # Convert Windows drive path to WSL: e:/foo → /mnt/e/foo
         if len(p) >= 2 and p[1] == ":":
             p = f"/mnt/{p[0]}{p[2:]}"
@@ -261,23 +317,14 @@ class SandboxSkill(Skill):
             await self._run([self.runtime, "machine", "start"], check=True)
 
     async def _ensure_container(self):
-        # Junctions sync — лёгкий (просто scandir), делаем всегда: config мог
-        # поменяться без events, а sync обнаружит и поправит.
-        pool_ro, pool_rw = self._pool_dirs()
-        junctions.sync(pool_ro, pool_rw, self._expected_links())
-        # Тяжёлые проверки (podman machine info, podman inspect) — один раз
-        # за жизнь инстанса. Если контейнер потом сломается — exec вернёт
-        # ошибку, и пользователь увидит её прямо в чате.
-        if self._container_ready:
-            return
         await self._ensure_machine()
         volume_args = self._volume_args()
         desired_mounts = {
             (self._norm(self.workspace_dir), "/workspace"),
             (self._norm(self._lib_dir()), "/slonagent"),
-            (self._norm(pool_ro), "/mnt/ro"),
-            (self._norm(pool_rw), "/mnt/rw"),
         }
+        for host, container in self._mounts().items():
+            desired_mounts.add((self._norm(host), container))
         env_image = f"{self.container_name}_env"
 
         inspect = await self._run(
@@ -311,7 +358,6 @@ class SandboxSkill(Skill):
                 await self._run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
                 await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
                 logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
-        self._container_ready = True
 
     @tool(
         "Выполнить команду внутри Docker-контейнера. "
