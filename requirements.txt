@@ -22,4 +22,5 @@ numpy
 pyarrow
 langchain-text-splitters
 flashrank
-
+watchfiles
+claude-agent-sdk

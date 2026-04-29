@@ -8,6 +8,7 @@ subscriber of a watcher leaves, the watcher cancels — no idle daemons.
 Two clients on the same root share a watcher (cached by host path).
 """
 import asyncio
+from watchfiles import awatch, Change
 import json
 import logging
 from pathlib import Path
@@ -38,7 +39,6 @@ class _Watcher:
             self._on_empty(self.root)
 
     async def _run(self):
-        from watchfiles import awatch, Change
         host_base = Path(self.root)
         try:
             async for changes in awatch(self.root):
