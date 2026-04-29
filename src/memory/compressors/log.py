@@ -661,10 +661,6 @@ class LogCompressor(Skill):
             )
 
     async def compress(self, turns: list) -> list:
-        if Memory.count_tokens(turns) < self._compress_after_tokens:
-            return turns
-
-        # Разделяем: OM_turn (если есть) + остальные
         om_turn, rest = None, []
         for t in turns:
             if isinstance(t, dict) and t.get("_observation_message"):
@@ -673,10 +669,9 @@ class LogCompressor(Skill):
                 rest.append(t)
 
         existing_observations = om_turn.get("_raw_observations", "") if om_turn else ""
-
-        # Решаем что наблюдать: оставляем хвост recent_turns нетронутым
         to_observe, recent = self._split_recent(rest)
-        if not to_observe:
+
+        if Memory.count_tokens(to_observe) < self._compress_after_tokens:
             return turns
 
         await self.send_memory_info("", cont=False)

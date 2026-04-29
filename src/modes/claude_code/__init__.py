@@ -57,8 +57,10 @@ class ClaudeCodeSkill(Skill):
                     "tools": [],
                 }},
                 "recent_tokens": 80_000,
-                "compress_after_tokens": 200_000,
-                "reflect_after_tokens": 300_000,
+                "min_recent_turns": 100,
+                "max_recent_turns_tokens": 150_000,
+                "compress_after_tokens": 40_000,
+                "reflect_after_tokens": 50_000,
             },
         )
 
