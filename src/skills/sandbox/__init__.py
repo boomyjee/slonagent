@@ -1,6 +1,8 @@
-import ast, asyncio, base64, json, os, platform, re, logging, subprocess, threading
+import asyncio, base64, json, os, re, logging, subprocess, threading
 from typing import Annotated
 from agent import Skill, tool
+
+from src.skills.sandbox import junctions, script_tools
 
 
 class SandboxSkill(Skill):
@@ -37,8 +39,6 @@ class SandboxSkill(Skill):
     def get_tools(self) -> list:
         return self._tools + self._scan_script_tools()
 
-    _AST_TYPES = {"str": "string", "int": "integer", "float": "number", "bool": "boolean"}
-
     def _scan_script_tools(self) -> list:
         self._skill_script_map = {}
         result = []
@@ -50,97 +50,11 @@ class SandboxSkill(Skill):
                 script_path = os.path.join(path, "__init__.py")
             else:
                 continue
-            for t in self._introspect_ast(script_path):
+            for t in script_tools.introspect(script_path):
                 t["function"]["name"] = "sandbox_" + t["function"]["name"]
                 self._skill_script_map[t["function"]["name"]] = script_path
                 result.append(t)
         return result
-
-    def _introspect_ast(self, path: str) -> list:
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                tree = ast.parse(f.read())
-        except SyntaxError:
-            return []
-
-        tools = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            if not any(
-                (isinstance(b, ast.Name) and b.id == "Skill") or
-                (isinstance(b, ast.Attribute) and b.attr == "Skill")
-                for b in node.bases
-            ):
-                continue
-            prefix = node.name.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider").lower()
-            for item in node.body:
-                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                desc = self._get_tool_desc(item)
-                if desc is None:
-                    continue
-                props, required = self._parse_params(item)
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": f"{prefix}_{item.name}",
-                        "description": desc,
-                        "parameters": {"type": "object", "properties": props, "required": required},
-                    }
-                })
-        return tools
-
-    @staticmethod
-    def _get_tool_desc(func: ast.FunctionDef) -> str | None:
-        for dec in func.decorator_list:
-            if isinstance(dec, ast.Call):
-                fn = dec.func
-                if (isinstance(fn, ast.Name) and fn.id == "tool") or \
-                   (isinstance(fn, ast.Attribute) and fn.attr == "tool"):
-                    if dec.args and isinstance(dec.args[0], ast.Constant):
-                        return dec.args[0].value
-        return None
-
-    def _parse_params(self, func: ast.FunctionDef) -> tuple[dict, list]:
-        props = {}
-        required = []
-        args = func.args
-        defaults_offset = len(args.args) - len(args.defaults)
-        for i, arg in enumerate(args.args):
-            if arg.arg == "self":
-                continue
-            annotation = arg.annotation
-            schema = self._annotation_to_schema(annotation)
-            props[arg.arg] = schema
-            if i < defaults_offset:
-                required.append(arg.arg)
-        return props, required
-
-    def _annotation_to_schema(self, node) -> dict:
-        if node is None:
-            return {"type": "string"}
-        # Annotated[type, "desc"]
-        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "Annotated":
-            elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
-            base = elts[0]
-            desc = elts[1].value if len(elts) > 1 and isinstance(elts[1], ast.Constant) else None
-            schema = self._base_type_schema(base)
-            if desc:
-                schema["description"] = desc
-            return schema
-        return self._base_type_schema(node)
-
-    def _base_type_schema(self, node) -> dict:
-        if isinstance(node, ast.Name):
-            return {"type": self._AST_TYPES.get(node.id, "string")}
-        # list[str] etc
-        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "list":
-            item_type = "string"
-            if isinstance(node.slice, ast.Name):
-                item_type = self._AST_TYPES.get(node.slice.id, "string")
-            return {"type": "array", "items": {"type": item_type}}
-        return {"type": "string"}
 
     def _lib_dir(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "container_lib")
@@ -251,29 +165,8 @@ class SandboxSkill(Skill):
         config = next((s for s in self.agent.skills if isinstance(s, ConfigSkill)), None) if self.agent else None
         if not config:
             return [], []
-        return self._dedupe_nested(config.get("sandbox.ro") or []), \
-               self._dedupe_nested(config.get("sandbox.rw") or [])
-
-    @staticmethod
-    def _dedupe_nested(paths: list[str]) -> list[str]:
-        """Оставляет только верхнеуровневые пути (вложенные в уже выбранный родитель — отбрасываем)."""
-        norm = sorted({p.replace("\\", "/").rstrip("/").lower(): p for p in paths}.items())
-        kept_norms: list[str] = []
-        kept: list[str] = []
-        for n, orig in norm:
-            if any(n == k or n.startswith(k + "/") for k in kept_norms):
-                continue
-            kept_norms.append(n)
-            kept.append(orig)
-        return kept
-
-    @staticmethod
-    def _container_subpath(host_path: str) -> str:
-        """'C:\\bla\\foo' → 'c/bla/foo', '/home/user/x' → 'home/user/x'."""
-        p = host_path.replace("\\", "/").rstrip("/").lower()
-        if len(p) >= 2 and p[1] == ":":
-            return p[0] + "/" + p[2:].lstrip("/")
-        return p.lstrip("/")
+        return junctions.dedupe_nested(config.get("sandbox.ro") or []), \
+               junctions.dedupe_nested(config.get("sandbox.rw") or [])
 
     def _expected_links(self) -> dict[str, tuple[str, str]]:
         """{host_link_path → (target, pool_name)}. pool_name — 'ro' или 'rw' (для логов)."""
@@ -282,7 +175,7 @@ class SandboxSkill(Skill):
         result: dict[str, tuple[str, str]] = {}
         for paths, pool_dir, pool in [(ro_paths, pool_ro, "ro"), (rw_paths, pool_rw, "rw")]:
             for p in paths:
-                link = os.path.join(pool_dir, self._container_subpath(p).replace("/", os.sep))
+                link = os.path.join(pool_dir, junctions.container_subpath(p).replace("/", os.sep))
                 result[link] = (p, pool)
         return result
 
@@ -311,9 +204,9 @@ class SandboxSkill(Skill):
         if ro_paths or rw_paths:
             lines.append("Доступные хост-папки:")
             for p in ro_paths:
-                lines.append(f"  - [RO] {p}  →  /mnt/ro/{self._container_subpath(p)}")
+                lines.append(f"  - [RO] {p}  →  /mnt/ro/{junctions.container_subpath(p)}")
             for p in rw_paths:
-                lines.append(f"  - [RW] {p}  →  /mnt/rw/{self._container_subpath(p)}")
+                lines.append(f"  - [RW] {p}  →  /mnt/rw/{junctions.container_subpath(p)}")
         lines.append(
             "Чтобы добавить папку с хост-машины, попроси пользователя написать в чат:\n"
             "  /config write sandbox.ro[] <абсолютный путь>   # только для чтения\n"
@@ -367,124 +260,11 @@ class SandboxSkill(Skill):
             logging.info("[exec] Starting podman machine...")
             await self._run([self.runtime, "machine", "start"], check=True)
 
-    async def _sync_junctions(self):
-        """Приводит дерево host-папок <memory_dir>/mnt/{ro,rw} к виду из config:
-        каждый sandbox.ro/rw путь становится junction'ом (Win) или bind-mount'ом (Linux).
-        Контейнер вообще не трогаем — он видит изменения мгновенно через статический mount пула.
-
-        Walk вручную, не через os.walk: на Windows os.walk заходит внутрь junctions
-        (это не symlinks, а reparse points), а нам надо обращаться с junction'ами как
-        с терминалами. Реальные файлы (target junction'ов) НЕ удаляем — `os.rmdir`
-        на junction убирает только сам reparse point. Чужой regular файл или непустая
-        папка без managed контента — exception."""
-        pool_ro, pool_rw = self._pool_dirs()
-        os.makedirs(pool_ro, exist_ok=True)
-        os.makedirs(pool_rw, exist_ok=True)
-
-        expected = self._expected_links()
-
-        def cleanup(path: str):
-            with os.scandir(path) as it:
-                entries = list(it)
-            for entry in entries:
-                full = entry.path
-                if not entry.is_dir(follow_symlinks=False):
-                    raise RuntimeError(f"Sandbox: чужая запись (не папка): {full}")
-                if self._is_link(full):
-                    wanted = expected.get(full)
-                    if wanted and self._norm(self._link_target(full) or "") == self._norm(wanted[0]):
-                        continue
-                    logging.info("[sandbox] removing junction %s", full)
-                    self._remove_link(full)
-                    continue
-                # Regular dir — рекурсивно чистим внутри, потом решаем что с ней.
-                cleanup(full)
-                try:
-                    if not os.listdir(full):
-                        os.rmdir(full)
-                        continue
-                except OSError:
-                    pass
-                if not any(e.startswith(full + os.sep) for e in expected):
-                    raise RuntimeError(f"Sandbox: чужая папка с непонятным содержимым: {full}")
-
-        cleanup(pool_ro)
-        cleanup(pool_rw)
-
-        # Создаём недостающее.
-        for link, (target, pool) in expected.items():
-            if os.path.exists(link) and self._is_link(link) and \
-               self._norm(self._link_target(link) or "") == self._norm(target):
-                continue
-            os.makedirs(os.path.dirname(link), exist_ok=True)
-            logging.info("[sandbox] creating %s junction: %s → %s", pool, link, target)
-            self._create_link(link, target)
-
-    @staticmethod
-    def _is_link(path: str) -> bool:
-        """True если path — Windows junction или Linux bind-mount."""
-        if platform.system() == "Windows":
-            try:
-                import ctypes
-                attrs = ctypes.windll.kernel32.GetFileAttributesW(path)
-                return attrs != 0xFFFFFFFF and bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
-            except Exception:
-                return False
-        # Linux: bind-mount определяем через ismount() — да, regular dirs не вернут True,
-        # а bind-mount'ы вернут.
-        return os.path.ismount(path)
-
-    @staticmethod
-    def _link_target(path: str) -> str | None:
-        """Возвращает target junction (Win) или bind-source (Linux). None если не читается."""
-        if platform.system() == "Windows":
-            try:
-                return os.readlink(path)  # Python 3.8+ поддерживает junctions
-            except OSError:
-                return None
-        # Linux: ищем mount source в /proc/self/mountinfo. Поле 4 — точка монтирования,
-        # поле 3 — корень в исходной FS. Для bind-mount директории бывает достаточно поля 9
-        # (source device — но там dev-нода, а не путь). Лучше распарсить findmnt.
-        try:
-            r = subprocess.run(["findmnt", "-no", "SOURCE", path], capture_output=True, text=True)
-            return r.stdout.strip() or None
-        except FileNotFoundError:
-            return None
-
-    @staticmethod
-    def _create_link(link: str, target: str):
-        if not os.path.isdir(target):
-            raise RuntimeError(f"Sandbox: target папки не существует: {target}")
-        if platform.system() == "Windows":
-            r = subprocess.run(["cmd", "/c", "mklink", "/J", link, target], capture_output=True, text=True)
-            if r.returncode != 0:
-                raise RuntimeError(f"mklink /J failed: {(r.stderr or r.stdout).strip()}")
-        else:
-            os.makedirs(link, exist_ok=True)
-            r = subprocess.run(["sudo", "mount", "--bind", target, link], capture_output=True, text=True)
-            if r.returncode != 0:
-                raise RuntimeError(f"sudo mount --bind failed: {r.stderr.strip()}")
-
-    @staticmethod
-    def _remove_link(link: str):
-        if platform.system() == "Windows":
-            try:
-                os.rmdir(link)  # rmdir на junction удаляет junction, не target
-            except OSError as e:
-                logging.warning("rmdir junction %s failed: %s", link, e)
-        else:
-            r = subprocess.run(["sudo", "umount", link], capture_output=True, text=True)
-            if r.returncode != 0:
-                logging.warning("umount %s failed: %s", link, r.stderr.strip())
-            try:
-                os.rmdir(link)
-            except OSError as e:
-                logging.warning("rmdir %s failed: %s", link, e)
-
     async def _ensure_container(self):
         # Junctions sync — лёгкий (просто scandir), делаем всегда: config мог
         # поменяться без events, а sync обнаружит и поправит.
-        await self._sync_junctions()
+        pool_ro, pool_rw = self._pool_dirs()
+        junctions.sync(pool_ro, pool_rw, self._expected_links())
         # Тяжёлые проверки (podman machine info, podman inspect) — один раз
         # за жизнь инстанса. Если контейнер потом сломается — exec вернёт
         # ошибку, и пользователь увидит её прямо в чате.
@@ -492,7 +272,6 @@ class SandboxSkill(Skill):
             return
         await self._ensure_machine()
         volume_args = self._volume_args()
-        pool_ro, pool_rw = self._pool_dirs()
         desired_mounts = {
             (self._norm(self.workspace_dir), "/workspace"),
             (self._norm(self._lib_dir()), "/slonagent"),
