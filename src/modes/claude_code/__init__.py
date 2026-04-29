@@ -25,6 +25,7 @@ class ClaudeCodeSkill(Skill):
         task: Annotated[str, "Задача для Claude Code"] = "",
     ) -> dict:
         from src.agent.agent import stoppable
+        from src.skills.config import ConfigSkill
         from src.skills.sandbox import SandboxSkill
         from src.transport.dashboard import DashboardTransport
 
@@ -40,7 +41,7 @@ class ClaudeCodeSkill(Skill):
         # своя песочница — паттерн как в coding mode.
         sub = await self.agent.spawn_subagent(
             "claude_code",
-            skills=[SandboxSkill(workspace_dir=sandbox.workspace_dir)],
+            skills=[SandboxSkill(workspace_dir=sandbox.workspace_dir), ConfigSkill()],
             model_name=self._model,
             backend="claude",
             backend_params={"sdk_options": {"disallowed_tools": [
