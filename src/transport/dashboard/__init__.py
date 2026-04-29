@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
-from agent import Skill, bypass
+from agent import Skill
 from src.transport.web import WebTransport
 from src.transport.dashboard.files import FilesAPI
 from src.transport.dashboard.git import GitAPI
@@ -53,13 +53,13 @@ class _LogHandler(logging.Handler):
 
 
 class DashboardSkill(Skill):
+    """Dashboard-specific context: web hosting под /web/, /web-hook,
+    /sandbox/PORT/-проксирование. Скачивание файлов и /web bypass — на
+    общем WebTransportSkill, у Dashboard-only функционала тут не нужны."""
+
     def __init__(self, transport: "DashboardTransport"):
         self.transport = transport
         super().__init__()
-
-    @bypass("dashboard", "Ссылка на веб-дашборд", standalone=True)
-    async def dashboard_command(self, args: str) -> str:
-        return f"🖥 {await self.transport.get_url('/')}"
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         if not self.transport._sandbox:
@@ -105,7 +105,7 @@ class DashboardTransport(WebTransport):
         return self._default_root
 
     def get_skills(self):
-        return [self._skill]
+        return [*super().get_skills(), self._skill]
 
     def register_routes(self):
         self._files.register()

@@ -1,14 +1,71 @@
-import asyncio, base64, contextlib, hashlib, inspect, json, logging
+import asyncio, base64, contextlib, hashlib, inspect, json, logging, os, re, shutil, time, uuid
 from collections import deque
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
+from agent import Skill, bypass, tool
 from src.transport.base import BaseTransport
 
 log = logging.getLogger(__name__)
+
+
+_TEXT_EXT_RE = re.compile(r"\.(txt|md|py|js|ts|tsx|jsx|json|yaml|yml|xml|html|css|scss|sh|bash|sql|csv|log|toml|ini|conf|cfg|env)$", re.I)
+
+
+class WebTransportSkill(Skill):
+    """Скиллы общие для любого WebTransport: ссылка на веб-интерфейс и
+    скачивание файлов, пришедших от пользователя через чат."""
+
+    def __init__(self, transport: "WebTransport"):
+        self.transport = transport
+        self.sandbox = None
+        super().__init__()
+
+    async def start(self):
+        from src.skills.sandbox import SandboxSkill
+        self.sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
+
+    @bypass("web", "Ссылка на веб-интерфейс", standalone=True)
+    async def web_command(self, args: str) -> str:
+        return f"🖥 {await self.transport.get_url('/')}"
+
+    @tool(lambda self: (
+        "Скачать файл, прикреплённый пользователем в чате. "
+        "dest_path — путь внутри контейнера (напр. /workspace/file.jpg)."
+        if self.sandbox
+        else "Скачать файл, прикреплённый пользователем в чате. "
+        "dest_path — абсолютный путь на хост-машине."
+    ))
+    async def download_file(
+        self,
+        file_id: Annotated[str, "id из метаданных attached_file."],
+        dest_path: Annotated[str, "Путь назначения для сохранения файла."],
+    ):
+        uploads = self.transport.uploads_dir
+        # Файл сохранён как <uuid>.<ext> или просто <uuid> (если без расширения).
+        matches = [e.path for e in os.scandir(uploads)
+                   if e.is_file() and (e.name == file_id or e.name.startswith(file_id + "."))]
+        if not matches:
+            return {"error": f"Файл с id={file_id} не найден (возможно, удалён по TTL=24h)"}
+        src = matches[0]
+
+        if self.sandbox:
+            host_dest = self.sandbox.resolve_path(dest_path)
+            if host_dest is None:
+                return {"error": f"Путь запрещён или недоступен: {dest_path}"}
+        else:
+            host_dest = os.path.abspath(dest_path)
+        dest_dir = os.path.dirname(host_dest)
+        if not os.path.isdir(dest_dir):
+            return {"error": f"Директория не существует: {dest_dir}"}
+
+        await asyncio.to_thread(shutil.copy, src, host_dest)
+        log.info("[web] download_file: %s → %s", src, host_dest)
+        return {"status": "ok", "saved_to": dest_path}
 
 
 async def start_tunnel(port: int, subdomain: str, sish_domain: str, sish_port: int, sish_key: str):
@@ -98,6 +155,10 @@ class WebTransport(BaseTransport):
         # via {type:"replay", last_seen_id: X} on ws.open — that way a
         # mobile reconnect into a still-alive page doesn't redraw history.
         self._message_id_counter: int = 0
+        self._web_skill = WebTransportSkill(self)
+
+    def get_skills(self):
+        return [self._web_skill]
 
     @staticmethod
     def set_server_config(
@@ -386,15 +447,93 @@ class WebTransport(BaseTransport):
                     await ws.send_text(json.dumps(event, ensure_ascii=False))
             return
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
+            # Перерабатываем content_parts ДО echo'а в replay-буфер: сжимаем
+            # картинки, транскрибируем голос, сохраняем файлы на диск. Иначе
+            # сырой data-url или base64 файла осядут в long-term replay.
+            content_parts = list(msg.get("content_parts", []))
+            for i, p in enumerate(content_parts):
+                if not isinstance(p, dict):
+                    continue
+                t = p.get("type")
+                if t == "audio":
+                    try:
+                        data = base64.b64decode(p.get("data", ""))
+                        mime = p.get("mime") or "audio/webm"
+                        text = await self.agent.transcribe_audio(data, mime)
+                    except Exception as e:
+                        log.exception("voice transcription failed")
+                        text = f"⚠️ Не удалось распознать голосовое: {e}"
+                    content_parts[i] = {"type": "text", "text": text}
+                elif t == "file":
+                    content_parts[i] = await self._handle_file_upload(p)
+            msg = {**msg, "content_parts": content_parts}
+
             # Echo back through send() so it lands in the buffer and gets
             # replayed on reconnect. Chat.js no longer adds user messages
             # to local state — it renders them when this event comes in.
             await self.send(msg, replay=True)
             await self.process_message(
-                content_parts=msg.get("content_parts", []),
+                content_parts=content_parts,
                 user_message_id=msg.get("user_message_id"),
                 trigger_answer=msg.get("trigger_answer", True),
             )
+
+    @property
+    def uploads_dir(self) -> str:
+        """<memory_dir>/uploads/ — место хранения присланных юзером файлов.
+        Внутри memory/, а значит под .gitignore."""
+        d = os.path.join(self.agent.memory.memory_dir, "uploads")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    async def _handle_file_upload(self, part: dict) -> dict:
+        """Сохраняет {type:"file", data:base64, mime, name, size} как
+        <uploads_dir>/<uuid><ext>, возвращает text-part с метой:
+            <attached_file id="<uuid>" name="..." mime="..." size_bytes="..." />.
+        Для текстовых файлов <1MB дополнительно инлайнит <content>...</content>
+        — модель сразу видит текст, но при этом файл всё равно сохранён и
+        достаётся скиллом по id (так же независимо от инлайна, как у telegram).
+
+        Старые файлы (>24h по mtime) GC'аются на каждом сохранении."""
+        filename = part.get("name") or "file"
+        mime = part.get("mime") or "application/octet-stream"
+        size = part.get("size") or 0
+        try:
+            data = base64.b64decode(part.get("data", ""))
+        except Exception as e:
+            log.exception("file decode failed")
+            return {"type": "text", "text": f"⚠️ Не удалось декодировать файл {filename}: {e}"}
+
+        ext = os.path.splitext(filename)[1].lower()[:16]
+        file_id = uuid.uuid4().hex
+        out_path = os.path.join(self.uploads_dir, f"{file_id}{ext}")
+        try:
+            await asyncio.to_thread(self._save_with_gc, out_path, data)
+        except Exception as e:
+            log.exception("file save failed")
+            return {"type": "text", "text": f"⚠️ Не удалось сохранить файл {filename}: {e}"}
+
+        attrs = f'id="{file_id}" name="{filename}" mime="{mime}" size_bytes="{size}"'
+        is_text = mime.startswith("text/") or bool(_TEXT_EXT_RE.search(filename))
+        if is_text and size < 1_048_576:
+            try:
+                content = data.decode("utf-8", errors="replace")
+                return {"type": "text", "text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>"}
+            except Exception:
+                log.exception("text file inline failed")
+        return {"type": "text", "text": f"<attached_file {attrs} />"}
+
+    def _save_with_gc(self, out_path: str, data: bytes):
+        """Пишет файл и заодно сносит всё в uploads_dir старше 24h."""
+        with open(out_path, "wb") as f:
+            f.write(data)
+        cutoff = time.time() - 24 * 3600
+        for entry in os.scandir(os.path.dirname(out_path)):
+            try:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    os.remove(entry.path)
+            except OSError:
+                pass
 
     async def send(self, event: dict, replay=False):
         self._message_id_counter += 1

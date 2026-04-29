@@ -272,22 +272,28 @@ class TelegramTransport(BaseTransport):
     def set_agent(self, agent):
         super().set_agent(agent)
         async def update_commands():
-            # Skills get added by Agent.loop() (add_transport_skills) shortly
-            # after set_agent runs; sleep so /dashboard etc. land in the list.
-            await asyncio.sleep(1)
-            all_commands = {
-                cmd: desc
-                for skill in agent.skills
-                for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
-            }
-            if self.chat_id < 0:
-                all_commands = {k: v for k, v in all_commands.items() if k == "stop"}
-            commands = [BotCommand(command=cmd, description=desc) for cmd, desc in all_commands.items()]
-            try:
-                await self.bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=self.chat_id))
-            except Exception as e:
-                log.warning("[telegram] set_my_commands failed: %s", e)
-            log.info("[telegram] set %d commands for %s", len(commands), self.chat_id)
+            # Скиллы у агента могут добавляться/убираться в любой момент
+            last_hash = None
+            while True:
+                cmds = {
+                    cmd: desc
+                    for skill in agent.skills
+                    for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
+                }
+                if self.chat_id < 0:
+                    cmds = {k: v for k, v in cmds.items() if k == "stop"}
+                h = hash(tuple(sorted(cmds.items())))
+                if h != last_hash:
+                    last_hash = h
+                    try:
+                        await self.bot.set_my_commands(
+                            [BotCommand(command=k, description=v) for k, v in cmds.items()],
+                            scope=BotCommandScopeChat(chat_id=self.chat_id),
+                        )
+                        log.info("[telegram] set %d commands for %s", len(cmds), self.chat_id)
+                    except Exception as e:
+                        log.warning("[telegram] set_my_commands failed: %s", e)
+                await asyncio.sleep(1)
         asyncio.create_task(update_commands())
 
     async def _exec_item(self, item):

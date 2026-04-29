@@ -30,11 +30,97 @@ function mdToHtml(text) {
     return text;
 }
 
+// Read File → "data:..." dataURL (browser FileReader). Used for images and
+// recorded voice blobs.
+function readDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onloadend = () => resolve(fr.result);
+        fr.onerror = reject;
+        fr.readAsDataURL(blob);
+    });
+}
+
+// Сжимаем картинку до 1920×1920 max и всегда в JPEG q85: токенов меньше,
+// сетевой трафик меньше, server ничего не пережимает. Если входной JPEG уже
+// помещается — пропускаем без re-encode.
+async function compressImage(file, maxSide = 1920, quality = 0.85) {
+    const srcUrl = await readDataUrl(file);
+    const img = new Image();
+    img.src = srcUrl;
+    await img.decode();
+    const w = img.naturalWidth, h = img.naturalHeight;
+    if (Math.max(w, h) <= maxSide && file.type === 'image/jpeg') {
+        return { dataUrl: srcUrl, mime: 'image/jpeg', size: file.size };
+    }
+    const scale = Math.min(1, maxSide / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(w * scale);
+    canvas.height = Math.round(h * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', quality));
+    return { dataUrl: await readDataUrl(blob), mime: 'image/jpeg', size: blob.size };
+}
+
+// Browser MediaRecorder gives webm/opus on Chrome (ogg/opus on Firefox).
+// libsndfile reads ogg/opus but not webm — convert to PCM via AudioContext
+// and encode 16-bit WAV here so the server gets a format we know works.
+async function blobToWav(blob) {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const numCh = audioBuffer.numberOfChannels;
+    const sr = audioBuffer.sampleRate;
+    const samples = audioBuffer.length;
+    const out = new ArrayBuffer(44 + samples * numCh * 2);
+    const v = new DataView(out);
+    const wrStr = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+    wrStr(0, 'RIFF'); v.setUint32(4, out.byteLength - 8, true); wrStr(8, 'WAVE');
+    wrStr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, numCh, true);
+    v.setUint32(24, sr, true); v.setUint32(28, sr * numCh * 2, true);
+    v.setUint16(32, numCh * 2, true); v.setUint16(34, 16, true);
+    wrStr(36, 'data'); v.setUint32(40, samples * numCh * 2, true);
+    const channels = []; for (let c = 0; c < numCh; c++) channels.push(audioBuffer.getChannelData(c));
+    let off = 44;
+    for (let i = 0; i < samples; i++)
+        for (let c = 0; c < numCh; c++, off += 2) {
+            const s = Math.max(-1, Math.min(1, channels[c][i]));
+            v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        }
+    return new Blob([out], { type: 'audio/wav' });
+}
+
+
+// Иконки одноцветные (currentColor), чтоб подхватывать color кнопки и не светиться
+// эмодзи-палитрой. Lucide-style минимал.
+const ICON_PAPERCLIP = html`
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8L9.41 17.34a2 2 0 1 1-2.83-2.83l8.49-8.48"/>
+    </svg>`;
+const ICON_MIC = html`
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" x2="12" y1="19" y2="22"/>
+    </svg>`;
+const ICON_SEND = html`
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 19V5"/>
+        <path d="m5 12 7-7 7 7"/>
+    </svg>`;
+
 export class Chat extends Component {
     constructor(props) {
         super(props);
-        this.state = { messages: [], input: '', expanded: {}, processing: false };
+        this.state = {
+            messages: [], input: '', expanded: {}, processing: false,
+            attachments: [],     // [{kind: 'image'|'audio'|'file_text'|'file_meta', ...}]
+            recording: false,
+        };
         this._streams = {};
+        this._recorder = null;
         // Sticky-bottom flag. Starts true so initial buffer replay (where
         // scrollTop=0 but scrollHeight is already huge) still snaps down.
         // Flipped off when the user scrolls up, back on when they scroll
@@ -103,10 +189,17 @@ export class Chat extends Component {
                 messages: [...messages, { kind: 'msg', role: 'inject', text: ev.text }]
             }));
         } else if (m === 'process_message') {
-            const text = (ev.content_parts || []).filter(p => p.type === 'text').map(p => p.text).join('\n');
-            if (text) {
+            // Сохраняем структуру: текст + картинки рядом, чтобы при replay
+            // картинки тоже отрисовывались. audio к этому моменту уже заменён
+            // сервером на text-part с транскрипцией.
+            const items = [];
+            for (const p of (ev.content_parts || [])) {
+                if (p.type === 'text') items.push({ kind: 'text', text: p.text });
+                else if (p.type === 'image_url') items.push({ kind: 'image', url: (p.image_url || {}).url });
+            }
+            if (items.length) {
                 this.setState(({ messages }) => ({
-                    messages: [...messages, { kind: 'msg', role: 'user', text }]
+                    messages: [...messages, { kind: 'msg', role: 'user', items }],
                 }));
             }
         }
@@ -117,25 +210,96 @@ export class Chat extends Component {
         if (this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
     }
 
-    componentDidUpdate() {
-        // Honor the sticky flag — proximity is recomputed only on user
-        // scroll, not on every render, so in-flight updates that grow
-        // scrollHeight past the threshold don't disable autoscroll.
-        if (this._stick && this._scroll)
-            this._scroll.scrollTop = this._scroll.scrollHeight;
-    }
 
     _submit() {
         const text = this.state.input.trim();
-        if (!text) return;
+        const att = this.state.attachments;
+        if (!text && !att.length) return;
+        const parts = [];
+        for (const a of att) {
+            if (a.kind === 'image') {
+                parts.push({ type: 'image_url', image_url: { url: a.dataUrl } });
+            } else if (a.kind === 'audio') {
+                // Server transcribes via agent.transcribe_audio and replaces
+                // this part with text before echoing back.
+                parts.push({ type: 'audio', data: a.base64, mime: a.mime });
+            } else if (a.kind === 'file') {
+                // Сервер разберёт text vs binary, инлайнит или сохранит на диск.
+                parts.push({ type: 'file', data: a.base64, mime: a.mime, name: a.name, size: a.size });
+            }
+        }
+        if (text) parts.push({ type: 'text', text });
         this.props.app.send({
             type: 'transport', method: 'process_message',
-            content_parts: [{ type: 'text', text }],
+            content_parts: parts,
         });
         // Don't add to local state — the server echoes process_message back
         // through the event buffer, which renders via handleMessage. This
         // way the message survives page reloads (buffer replay).
-        this.setState({ input: '' });
+        this.setState({ input: '', attachments: [] });
+    }
+
+    async _onFiles(files) {
+        const additions = [];
+        for (const f of files) {
+            const isImage = (f.type || '').startsWith('image/');
+            try {
+                if (isImage) {
+                    const { dataUrl, mime, size } = await compressImage(f);
+                    additions.push({ kind: 'image', dataUrl, name: f.name, mime, size });
+                } else {
+                    // Текст vs бинарь решает сервер. Не пытаемся угадать по
+                    // расширению на клиенте — централизуем логику в одном месте.
+                    const dataUrl = await readDataUrl(f);
+                    additions.push({ kind: 'file', base64: dataUrl.split(',', 2)[1], name: f.name, mime: f.type || 'application/octet-stream', size: f.size });
+                }
+            } catch (e) {
+                console.error('attach failed:', e);
+            }
+        }
+        this.setState(({ attachments }) => ({ attachments: [...attachments, ...additions] }));
+    }
+
+    async _toggleRecording() {
+        if (this.state.recording) {
+            this._recorder?.stop();
+            return;
+        }
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const recorder = new MediaRecorder(stream);
+            const chunks = [];
+            recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+            recorder.onstop = async () => {
+                stream.getTracks().forEach(t => t.stop());
+                this._recorder = null;
+                this.setState({ recording: false });
+                try {
+                    const wav = await blobToWav(new Blob(chunks, { type: recorder.mimeType }));
+                    const dataUrl = await readDataUrl(wav);
+                    const base64 = dataUrl.split(',', 2)[1];
+                    const seconds = Math.max(1, Math.round((wav.size - 44) / 2 / 16000));  // rough estimate
+                    this.setState(({ attachments }) => ({
+                        attachments: [...attachments, { kind: 'audio', base64, mime: 'audio/wav', name: `voice_${seconds}s.wav` }],
+                    }));
+                } catch (e) {
+                    console.error('voice encode failed:', e);
+                    alert('Voice encoding failed: ' + e.message);
+                }
+            };
+            this._recorder = recorder;
+            recorder.start();
+            this.setState({ recording: true });
+        } catch (e) {
+            console.error('mic error:', e);
+            alert('Microphone error: ' + e.message);
+        }
+    }
+
+    _removeAttachment(idx) {
+        this.setState(({ attachments }) => ({
+            attachments: attachments.filter((_, i) => i !== idx),
+        }));
     }
 
     _formatArgs(args) {
@@ -169,10 +333,21 @@ export class Chat extends Component {
                 </div>
                 <div class=${cl.messages} ref=${el => this._scroll = el} onScroll=${this._onScroll}>
                     ${messages.map((m, i) => {
-                        if (m.kind === 'msg') return html`
-                            <div class="${cl.msg} ${m.role}"
-                                 dangerouslySetInnerHTML=${{__html: mdToHtml(m.text)}}></div>
-                        `;
+                        if (m.kind === 'msg') {
+                            // user-сообщения: items[] (text + image_url). assistant/inject:
+                            // одна text-строка от send_message stream.
+                            if (m.items) return html`
+                                <div class="${cl.msg} ${m.role}">
+                                    ${m.items.map(it => it.kind === 'image'
+                                        ? html`<img src=${it.url} class=${cl.thumb} />`
+                                        : html`<div dangerouslySetInnerHTML=${{__html: mdToHtml(it.text)}}></div>`)}
+                                </div>
+                            `;
+                            return html`
+                                <div class="${cl.msg} ${m.role}"
+                                     dangerouslySetInnerHTML=${{__html: mdToHtml(m.text)}}></div>
+                            `;
+                        }
                         if (m.kind === 'thinking' || m.kind === 'memory') {
                             const isCollapsed = !(expanded[i] ?? false) && m.final;
                             return html`
@@ -199,18 +374,49 @@ export class Chat extends Component {
                         }
                     })}
                 </div>
+                ${this.state.attachments.length > 0 && html`
+                    <div class=${cl.attachments}>
+                        ${this.state.attachments.map((a, i) => html`
+                            <div class=${cl.chip}>
+                                ${a.kind === 'image'
+                                    ? html`<img src=${a.dataUrl} class=${cl.chipThumb} />`
+                                    : html`<span class=${cl.chipIcon}>${a.kind === 'audio' ? ICON_MIC : ICON_PAPERCLIP}</span>`}
+                                <span class=${cl.chipName}>${a.name}</span>
+                                <button class=${cl.chipRemove} onClick=${() => this._removeAttachment(i)}>\u00D7</button>
+                            </div>
+                        `)}
+                    </div>
+                `}
                 <div class=${cl.input}>
+                    <input type="file" multiple ref=${el => this._fileInput = el}
+                           style="display:none"
+                           onChange=${e => { this._onFiles(e.target.files); e.target.value = ''; }} />
+                    <button class=${cl.iconBtn} title="Attach files"
+                            onClick=${() => this._fileInput?.click()}
+                            disabled=${!connected}>${ICON_PAPERCLIP}</button>
+                    <button class="${cl.iconBtn} ${this.state.recording ? cl.recording : ''}"
+                            title=${this.state.recording ? 'Stop recording' : 'Record voice'}
+                            onClick=${() => this._toggleRecording()}
+                            disabled=${!connected}>${ICON_MIC}</button>
                     <textarea
+                        rows="1"
                         value=${input}
                         onInput=${e => this.setState({ input: e.target.value })}
                         onKeyDown=${e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._submit(); } }}
                         placeholder="Write a message..."
                         disabled=${!connected}
                     ></textarea>
-                    <button onClick=${() => this._submit()} disabled=${!connected}>\u25B6</button>
+                    <button class=${cl.iconBtn} onClick=${() => this._submit()} disabled=${!connected}>${ICON_SEND}</button>
                 </div>
             </div>
         `;
+    }
+
+    componentDidUpdate() {
+        // Honor the sticky-bottom flag \u2014 proximity is recomputed only on user
+        // scroll, not on every render, so in-flight updates that grow
+        // scrollHeight past the threshold don't disable autoscroll.
+        if (this._stick && this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
     }
 }
 
@@ -270,10 +476,68 @@ cl.spinner = css`
   border-radius: 50%; animation: ${spin} 0.8s linear infinite;
 `;
 cl.input = css`
-  display: flex; border-top: 1px solid var(--border);
-  & textarea { flex: 1; background: var(--bg); color: var(--text); border: none; padding: 12px;
-               font-size: 13px; resize: none; height: 56px; font-family: inherit; outline: none; }
-  & button { background: var(--accent); color: #1e1e2e; border: none; padding: 0 16px; cursor: pointer; font-size: 14px; }
-  & button:hover { opacity: 0.85; }
-  & button:disabled { background: var(--border); cursor: default; opacity: 1; }
+  display: flex; align-items: flex-end; gap: 4px;
+  margin: 8px; padding: 4px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  transition: border-color 0.15s;
+  &:focus-within { border-color: var(--accent); }
+  & textarea {
+    flex: 1; min-width: 0;
+    background: transparent; color: var(--text);
+    border: none; outline: none; resize: none;
+    font-family: inherit; font-size: 13px; line-height: 1.5;
+    padding: 6px 4px;
+    /* CSS-нативный autosize. Поддерживается Chrome 123+ / Firefox 137+ /
+       Safari 18.4+. min-height: 1lh = ровно одна строка по line-height,
+       max-height: 5lh — пять. Без JS и без mount-flicker. */
+    field-sizing: content;
+    min-height: 1lh; max-height: 5lh;
+    overflow-y: auto;
+  }
+  & textarea:disabled { color: var(--text-dim); cursor: not-allowed; }
+`;
+cl.iconBtn = css`
+  flex: 0 0 auto;
+  background: transparent; color: var(--text-dim); border: none;
+  padding: 0; width: 32px; height: 32px; cursor: pointer;
+  border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background 0.1s, color 0.1s;
+  &:hover:not(:disabled) { background: var(--surface2); color: var(--text); }
+  &:disabled { opacity: 0.4; cursor: default; }
+  & svg { display: block; }
+`;
+const pulse = keyframes`
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+`;
+cl.recording = css`
+  color: var(--err, #e74c3c) !important;
+  animation: ${pulse} 0.8s infinite;
+`;
+cl.attachments = css`
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px 10px; border-top: 1px solid var(--border);
+  background: var(--surface);
+`;
+cl.chip = css`
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px 4px 4px; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 12px; max-width: 240px;
+`;
+cl.chipThumb = css`
+  width: 28px; height: 28px; object-fit: cover; border-radius: 3px;
+  display: block;
+`;
+cl.chipIcon = css`color: var(--text-dim); display: inline-flex; & svg { display: block; }`;
+cl.chipName = css`overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;`;
+cl.chipRemove = css`
+  background: none; border: none; color: var(--text-dim); cursor: pointer;
+  padding: 0 2px; font-size: 16px; line-height: 1;
+  &:hover { color: var(--text); }
+`;
+cl.thumb = css`
+  max-width: 240px; max-height: 240px; border-radius: 4px;
+  display: block; margin: 4px 0;
 `;
