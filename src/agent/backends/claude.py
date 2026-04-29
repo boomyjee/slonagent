@@ -17,6 +17,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     ResultMessage,
     SdkMcpTool,
     StreamEvent,
@@ -271,6 +272,16 @@ class ClaudeBackend(BaseBackend):
                 "stderr": _on_stderr,
             }
             options_kwargs.update(self._sdk_options)
+
+            # Слон управляет компрессией через LogCompressor — клодовский autocompact
+            # писал бы свой dumb-summary поверх нашего OM. Блокируем после user overrides
+            # и рядом с возможными user-хуками.
+            async def block_compact(*_): return {"decision": "block", "systemMessage": "Compaction handled by slon"}
+            existing_hooks = options_kwargs.get("hooks") or {}
+            options_kwargs["hooks"] = {
+                **existing_hooks,
+                "PreCompact": [*(existing_hooks.get("PreCompact") or []), HookMatcher(hooks=[block_compact])],
+            }
 
             async def _connect(use_resume: bool):
                 opts = dict(options_kwargs)
