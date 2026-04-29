@@ -220,12 +220,7 @@ class WebTransport(BaseTransport):
             log.info("WebTransport server: http://localhost:%d", WebTransport._port)
             await server.serve()
 
-        # asyncssh INFO is needed to see why the tunnel died, but it also
-        # logs every per-channel open/close (each HTTP request through the
-        # tunnel) — drop those, keep connection-level events.
-        ssh_log = logging.getLogger("asyncssh")
-        ssh_log.setLevel(logging.INFO)
-        ssh_log.addFilter(lambda r: "chan=" not in r.getMessage())
+        logging.getLogger("asyncssh").setLevel(logging.WARNING)
         logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
         def _spawn_server():
