@@ -73,6 +73,11 @@ class Git:
             args.append("HEAD")
         args += ["--", file]
         out, _, _ = await self.run(*args)
+        if out or staged:
+            return out
+        # Untracked files aren't visible to `git diff HEAD`; synthesize an
+        # all-added diff via --no-index against /dev/null.
+        out, _, _ = await self.run("diff", "--no-color", "--no-index", "--", "/dev/null", file)
         return out
 
     async def diff_between(self, file: str, sha1: str, sha2: str) -> str:
