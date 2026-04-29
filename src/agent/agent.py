@@ -333,7 +333,8 @@ class Agent:
                         if not trigger_answer: return
 
                         await self.transport.send_processing(True)
-                        open(os.path.join(self.memory.memory_dir, "last_turn_chunks.log"), "w").close()
+                        if self.memory.memory_dir:
+                            open(os.path.join(self.memory.memory_dir, "last_turn_chunks.log"), "w").close()
                         result = await self.llm()
                         if isinstance(result, list): # llm сам отработал тулы внутри
                             await self.memory.add_turn(*result)
