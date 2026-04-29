@@ -177,6 +177,38 @@ class ClaudeBackend(BaseBackend):
         with open(self._state_file, "w") as f:
             json.dump(state, f)
 
+    @staticmethod
+    async def _build_user_query(pending: list):
+        """Собирает pending user-турны (OpenAI-формат памяти) в один структурированный
+        SDK-сообщение в Anthropic-формате и отдаёт async-итератором — claude SDK
+        принимает только str или AsyncIterable[dict]. Поддерживает text +
+        image_url (`data:<media>;base64,...`)."""
+        blocks: list[dict] = []
+        for t in pending:
+            content = t.get("content")
+            if isinstance(content, str):
+                if content:
+                    blocks.append({"type": "text", "text": content})
+                continue
+            for b in content or ():
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text" and b.get("text"):
+                    blocks.append({"type": "text", "text": b["text"]})
+                elif b.get("type") == "image_url":
+                    url = (b.get("image_url") or {}).get("url", "")
+                    if url.startswith("data:") and "," in url:
+                        head, data = url.split(",", 1)
+                        media_type = head[5:].split(";")[0] or "image/png"
+                        blocks.append({"type": "image", "source": {
+                            "type": "base64", "media_type": media_type, "data": data,
+                        }})
+        yield {
+            "type": "user",
+            "message": {"role": "user", "content": blocks},
+            "parent_tool_use_id": None,
+        }
+
     async def close(self):
         # SDK на disconnect утекает CancelledError из своего anyio cancel_scope —
         # поглощаем локально.
@@ -304,8 +336,16 @@ class ClaudeBackend(BaseBackend):
         else:
             log.info("[claude_agent] reusing live claude")
 
-        log.info("[claude_agent] query: %r", user_text[:80])
-        await self._client.query(user_text, session_id=session_id)
+        pending = []
+        for t in reversed(agent.memory._turns):
+            if not isinstance(t, dict) or t.get("role") != "user" or t.get("_observation_message"): break
+            pending.insert(0, t)
+
+        if not pending:
+            raise RuntimeError("ClaudeBackend.llm(): нет user-турнов в хвосте памяти — нечего слать")
+
+        log.info("[claude_agent] query: %r (%d pending turns)", user_text[:80], len(pending))
+        await self._client.query(self._build_user_query(pending), session_id=session_id)
 
         # Стримим. StreamEvent → UI. AssistantMessage / UserMessage — собираем
         # turn'ы в list. agent.loop запишет всё в memory и решит по tool_calls
