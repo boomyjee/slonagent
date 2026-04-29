@@ -198,9 +198,15 @@ export class Chat extends Component {
                 else if (p.type === 'image_url') items.push({ kind: 'image', url: (p.image_url || {}).url });
             }
             if (items.length) {
-                this.setState(({ messages }) => ({
-                    messages: [...messages, { kind: 'msg', role: 'user', items }],
-                }));
+                this.setState(({ messages }) => {
+                    const pi = messages.findLastIndex(m => m.pending);
+                    if (pi !== -1) {
+                        const next = [...messages];
+                        next[pi] = { kind: 'msg', role: 'user', items };
+                        return { messages: next };
+                    }
+                    return { messages: [...messages, { kind: 'msg', role: 'user', items }] };
+                });
             }
         }
     }
@@ -223,10 +229,18 @@ export class Chat extends Component {
             type: 'transport', method: 'process_message',
             content_parts: parts,
         });
-        // Don't add to local state — the server echoes process_message back
-        // through the event buffer, which renders via handleMessage. This
-        // way the message survives page reloads (buffer replay).
-        this.setState({ input: '', attachments: [] });
+        // Show a temporary placeholder until the server echoes
+        // the real process_message back via the event buffer.
+        const preview = [];
+        for (const a of att) {
+            if ((a.mime || '').startsWith('image/')) preview.push({ kind: 'image', url: a.base64url || ('data:' + a.mime + ';base64,' + a.base64) });
+        }
+        if (text) preview.push({ kind: 'text', text });
+        else if (att.length) preview.push({ kind: 'text', text: '⏳ Отправка...' });
+        this.setState(({ messages }) => ({
+            input: '', attachments: [],
+            messages: [...messages, { kind: 'msg', role: 'user', items: preview, pending: true }],
+        }));
     }
 
     async _onFiles(files) {
@@ -335,7 +349,7 @@ export class Chat extends Component {
                             // user-сообщения: items[] (text + image_url). assistant/inject:
                             // одна text-строка от send_message stream.
                             if (m.items) return html`
-                                <div class="${cl.msg} ${m.role}">
+                                <div class="${cl.msg} ${m.role}${m.pending ? ' pending' : ''}">
                                     ${m.items.map(it => it.kind === 'image'
                                         ? html`<img src=${it.url} class=${cl.thumb} />`
                                         : html`<div dangerouslySetInnerHTML=${{__html: mdToHtml(it.text)}}></div>`)}
@@ -435,6 +449,7 @@ cl.msg = css`
   margin-bottom: 10px; font-size: 13px; line-height: 1.5; padding: 8px 12px;
   border-radius: 8px; max-width: 90%; white-space: pre-wrap; word-break: break-word;
   &.user, &.inject { background: var(--accent); color: #1e1e2e; margin-left: auto; }
+  &.pending { opacity: 0.5; }
   &.assistant { background: var(--surface2); }
   &.thinking { background: var(--surface2); font-size: 12px; color: var(--text-dim); font-style: italic; }
   &.thinking.memory { color: var(--warn); }
