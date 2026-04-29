@@ -15,21 +15,11 @@ dacite
 tiktoken
 dateparser
 
-# SemanticProvider / FactProvider
+# FactProvider
 lancedb
 sentence-transformers
 numpy
 pyarrow
 langchain-text-splitters
 flashrank
-
-# SimpleMemProvider (устаревший, используй SemanticProvider)
-# simplemem>=0.1.0
-
-# HindsightProvider (устаревший, используй FactProvider)
-# vendor/uvloop-stub
-# vendor/fcntl-stub
-# vendor/resource-stub
-# hindsight-all
-
 
