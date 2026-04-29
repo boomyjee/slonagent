@@ -577,14 +577,14 @@ class TelegramTransport(BaseTransport):
                     logging.exception("[transport] Не удалось распознать видео %s", attachment.file_id)
 
             attrs = " ".join(f'{k}="{v}"' for k, v in file_meta.items())
-            if content:
-                content_parts.append({
-                    "type": "text",
-                    "text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>",
-                    "_document_id": f"{attachment.file_unique_id}_{filename}",
-                })
-            else:
-                content_parts.append({"type": "text", "text": f"<attached_file {attrs} />"})
+            part = {
+                "type": "text",
+                "text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>"
+                        if content else f"<attached_file {attrs} />",
+            }
+            if content and field == "document":
+                part["_document_id"] = f"{attachment.file_unique_id}_{filename}"
+            content_parts.append(part)
 
         if not content_parts:
             return

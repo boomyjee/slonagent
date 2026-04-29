@@ -1,4 +1,4 @@
-import asyncio, base64, contextlib, hashlib, inspect, json, logging, os, re, shutil, time, uuid
+import asyncio, base64, contextlib, hashlib, inspect, json, logging, mimetypes, os, re, shutil, time, uuid
 from collections import deque
 from datetime import date, timedelta
 from pathlib import Path
@@ -447,26 +447,14 @@ class WebTransport(BaseTransport):
                     await ws.send_text(json.dumps(event, ensure_ascii=False))
             return
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
-            # Перерабатываем content_parts ДО echo'а в replay-буфер: сжимаем
-            # картинки, транскрибируем голос, сохраняем файлы на диск. Иначе
-            # сырой data-url или base64 файла осядут в long-term replay.
-            content_parts = list(msg.get("content_parts", []))
-            for i, p in enumerate(content_parts):
-                if not isinstance(p, dict):
-                    continue
-                t = p.get("type")
-                if t == "audio":
-                    try:
-                        data = base64.b64decode(p.get("data", ""))
-                        mime = p.get("mime") or "audio/webm"
-                        text = await self.agent.transcribe_audio(data, mime)
-                    except Exception as e:
-                        log.exception("voice transcription failed")
-                        text = f"⚠️ Не удалось распознать голосовое: {e}"
-                    content_parts[i] = {"type": "text", "text": text}
-                elif t == "file":
-                    content_parts[i] = await self._handle_file_upload(p)
-            msg = {**msg, "content_parts": content_parts}
+            new_parts = []
+            for p in msg.get("content_parts", []):
+                if isinstance(p, dict) and p.get("type") == "file":
+                    new_parts.extend(await self._process_file(p))
+                else:
+                    new_parts.append(p)
+            msg = {**msg, "content_parts": new_parts}
+            content_parts = new_parts
 
             # Echo back through send() so it lands in the buffer and gets
             # replayed on reconnect. Chat.js no longer adds user messages
@@ -486,42 +474,71 @@ class WebTransport(BaseTransport):
         os.makedirs(d, exist_ok=True)
         return d
 
-    async def _handle_file_upload(self, part: dict) -> dict:
-        """Сохраняет {type:"file", data:base64, mime, name, size} как
-        <uploads_dir>/<uuid><ext>, возвращает text-part с метой:
-            <attached_file id="<uuid>" name="..." mime="..." size_bytes="..." />.
-        Для текстовых файлов <1MB дополнительно инлайнит <content>...</content>
-        — модель сразу видит текст, но при этом файл всё равно сохранён и
-        достаётся скиллом по id (так же независимо от инлайна, как у telegram).
-
-        Старые файлы (>24h по mtime) GC'аются на каждом сохранении."""
-        filename = part.get("name") or "file"
-        mime = part.get("mime") or "application/octet-stream"
-        size = part.get("size") or 0
-        try:
-            data = base64.b64decode(part.get("data", ""))
-        except Exception as e:
-            log.exception("file decode failed")
-            return {"type": "text", "text": f"⚠️ Не удалось декодировать файл {filename}: {e}"}
-
-        ext = os.path.splitext(filename)[1].lower()[:16]
+    async def _save_upload(self, data: bytes, ext: str) -> str:
         file_id = uuid.uuid4().hex
         out_path = os.path.join(self.uploads_dir, f"{file_id}{ext}")
+        await asyncio.to_thread(self._save_with_gc, out_path, data)
+        return file_id
+
+    @staticmethod
+    def _attached_file_part(file_id: str, filename: str, field: str, mime: str, size: int,
+                            content: str | None) -> dict:
+        attrs = (f'file_id="{file_id}" filename="{filename}" type="{field}" '
+                 f'mime_type="{mime}" size_bytes="{size}"')
+        if content:
+            text = f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>"
+        else:
+            text = f"<attached_file {attrs} />"
+        part = {"type": "text", "text": text}
+        if content and field == "document":
+            part["_document_id"] = f"{file_id}_{filename}"
+        return part
+
+    async def _process_file(self, p: dict) -> list[dict]:
+        """Единственный диспатч аттача: сохраняет байты, возвращает 1+ content_part'ов
+        в зависимости от mime — image/* отдаёт также image_url для vision, voice/video
+        транскрибируются/описываются, текстовые инлайнятся в <content>, остальное —
+        self-closing мета."""
+        filename = p.get("name") or "file"
+        mime = p.get("mime") or "application/octet-stream"
+        size = p.get("size") or 0
         try:
-            await asyncio.to_thread(self._save_with_gc, out_path, data)
+            data = base64.b64decode(p.get("data", ""))
+        except Exception as e:
+            return [{"type": "text", "text": f"⚠️ Не удалось декодировать файл {filename}: {e}"}]
+        ext = os.path.splitext(filename)[1].lower()[:16] or (mimetypes.guess_extension(mime) or "")
+        try:
+            file_id = await self._save_upload(data, ext)
         except Exception as e:
             log.exception("file save failed")
-            return {"type": "text", "text": f"⚠️ Не удалось сохранить файл {filename}: {e}"}
+            return [{"type": "text", "text": f"⚠️ Не удалось сохранить файл {filename}: {e}"}]
 
-        attrs = f'id="{file_id}" name="{filename}" mime="{mime}" size_bytes="{size}"'
-        is_text = mime.startswith("text/") or bool(_TEXT_EXT_RE.search(filename))
-        if is_text and size < 1_048_576:
+        content = None
+        field = "document"
+        extra: list[dict] = []
+        if mime.startswith("image/"):
+            field = "photo"
+            extra.append({"type": "image_url",
+                          "image_url": {"url": f"data:{mime};base64,{p['data']}"}})
+        elif mime.startswith("video/"):
+            field = "video"
+            try:
+                content = await self.agent.describe_video(data, mime)
+            except Exception:
+                log.exception("video describe failed")
+        elif mime.startswith("audio/"):
+            field = "voice"
+            try:
+                content = await self.agent.transcribe_audio(data, mime)
+            except Exception as e:
+                log.exception("voice transcription failed")
+                content = f"⚠️ Не удалось распознать: {e}"
+        elif (mime.startswith("text/") or _TEXT_EXT_RE.search(filename)) and size < 1_048_576:
             try:
                 content = data.decode("utf-8", errors="replace")
-                return {"type": "text", "text": f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>"}
             except Exception:
                 log.exception("text file inline failed")
-        return {"type": "text", "text": f"<attached_file {attrs} />"}
+        return extra + [self._attached_file_part(file_id, filename, field, mime, size, content)]
 
     def _save_with_gc(self, out_path: str, data: bytes):
         """Пишет файл и заодно сносит всё в uploads_dir старше 24h."""

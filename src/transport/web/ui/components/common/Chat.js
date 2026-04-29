@@ -215,19 +215,9 @@ export class Chat extends Component {
         const text = this.state.input.trim();
         const att = this.state.attachments;
         if (!text && !att.length) return;
-        const parts = [];
-        for (const a of att) {
-            if (a.kind === 'image') {
-                parts.push({ type: 'image_url', image_url: { url: a.dataUrl } });
-            } else if (a.kind === 'audio') {
-                // Server transcribes via agent.transcribe_audio and replaces
-                // this part with text before echoing back.
-                parts.push({ type: 'audio', data: a.base64, mime: a.mime });
-            } else if (a.kind === 'file') {
-                // Сервер разберёт text vs binary, инлайнит или сохранит на диск.
-                parts.push({ type: 'file', data: a.base64, mime: a.mime, name: a.name, size: a.size });
-            }
-        }
+        const parts = att.map(a => ({
+            type: 'file', data: a.base64, mime: a.mime, name: a.name, size: a.size,
+        }));
         if (text) parts.push({ type: 'text', text });
         this.props.app.send({
             type: 'transport', method: 'process_message',
@@ -242,17 +232,22 @@ export class Chat extends Component {
     async _onFiles(files) {
         const additions = [];
         for (const f of files) {
-            const isImage = (f.type || '').startsWith('image/');
             try {
+                const isImage = (f.type || '').startsWith('image/');
+                let dataUrl, mime, size, name;
                 if (isImage) {
-                    const { dataUrl, mime, size } = await compressImage(f);
-                    additions.push({ kind: 'image', dataUrl, name: f.name, mime, size });
+                    ({ dataUrl, mime, size } = await compressImage(f));
+                    name = f.name.replace(/\.[^.]+$/, '') + '.jpg';
                 } else {
-                    // Текст vs бинарь решает сервер. Не пытаемся угадать по
-                    // расширению на клиенте — централизуем логику в одном месте.
-                    const dataUrl = await readDataUrl(f);
-                    additions.push({ kind: 'file', base64: dataUrl.split(',', 2)[1], name: f.name, mime: f.type || 'application/octet-stream', size: f.size });
+                    dataUrl = await readDataUrl(f);
+                    mime = f.type || 'application/octet-stream';
+                    size = f.size;
+                    name = f.name;
                 }
+                additions.push({
+                    base64: dataUrl.split(',', 2)[1],
+                    name, mime, size,
+                });
             } catch (e) {
                 console.error('attach failed:', e);
             }
@@ -280,7 +275,10 @@ export class Chat extends Component {
                     const base64 = dataUrl.split(',', 2)[1];
                     const seconds = Math.max(1, Math.round((wav.size - 44) / 2 / 16000));  // rough estimate
                     this.setState(({ attachments }) => ({
-                        attachments: [...attachments, { kind: 'audio', base64, mime: 'audio/wav', name: `voice_${seconds}s.wav` }],
+                        attachments: [...attachments, {
+                            base64, mime: 'audio/wav',
+                            name: `voice_${seconds}s.wav`, size: wav.size,
+                        }],
                     }));
                 } catch (e) {
                     console.error('voice encode failed:', e);
@@ -378,9 +376,9 @@ export class Chat extends Component {
                     <div class=${cl.attachments}>
                         ${this.state.attachments.map((a, i) => html`
                             <div class=${cl.chip}>
-                                ${a.kind === 'image'
-                                    ? html`<img src=${a.dataUrl} class=${cl.chipThumb} />`
-                                    : html`<span class=${cl.chipIcon}>${a.kind === 'audio' ? ICON_MIC : ICON_PAPERCLIP}</span>`}
+                                ${a.mime?.startsWith('image/')
+                                    ? html`<img src=${`data:${a.mime};base64,${a.base64}`} class=${cl.chipThumb} />`
+                                    : html`<span class=${cl.chipIcon}>${a.mime?.startsWith('audio/') ? ICON_MIC : ICON_PAPERCLIP}</span>`}
                                 <span class=${cl.chipName}>${a.name}</span>
                                 <button class=${cl.chipRemove} onClick=${() => this._removeAttachment(i)}>\u00D7</button>
                             </div>
