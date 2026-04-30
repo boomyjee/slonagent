@@ -441,8 +441,24 @@ class ClaudeBackend(BaseBackend):
                     await agent.transport.send_message(f"✅ Готово ({message.num_turns} turns, {cost})")
                     return turns
         except asyncio.CancelledError:
+            asyncio.current_task().uncancel()
             with suppress(Exception):
-                await asyncio.shield(self._client.interrupt())
-            raise
+                await self._client.interrupt()
+            # Pair any dangling tool_calls with synthetic results — иначе
+            # turns несбалансированы: assistant.tool_calls без matching
+            # role=tool ломает компрессию и openai-style вызовы.
+            seen = {t.get("tool_call_id") for t in turns if t.get("role") == "tool"}
+            for t in list(turns):
+                for tc in t.get("tool_calls") or ():
+                    if tc["id"] not in seen:
+                        turns.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": tc["function"]["name"],
+                            "content": "[прервано пользователем]",
+                        })
+                        seen.add(tc["id"])
+            turns.append({"role": "assistant", "content": "[ответ прерван пользователем]"})
+            return turns
 
         return turns
