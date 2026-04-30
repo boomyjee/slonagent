@@ -305,14 +305,14 @@ class TelegramTransport(BaseTransport):
                 link_preview_options=self._no_link_preview,
                 **item["kwargs"],
             )
-            self._last_edit_texts[result.message_id] = item["text"]
+            self._last_edit_texts[result.message_id] = result.html_text
             return result
         elif kind == "edit":
             msg, text = item["msg"], item["text"]
             if self._last_edit_texts.get(msg.message_id) == text:
                 return msg
             result = await msg.edit_text(text, link_preview_options=self._no_link_preview, **item["kwargs"])
-            self._last_edit_texts[msg.message_id] = text
+            self._last_edit_texts[msg.message_id] = result.html_text
             return result
 
     async def _queue_worker(self):
