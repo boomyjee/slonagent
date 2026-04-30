@@ -2,6 +2,17 @@ import asyncio, json, os, sys
 from src.agent.skill import Skill, bypass
 
 
+class SubagentSkill(Skill):
+    def __init__(self):
+        super().__init__()
+        self.exit_event = asyncio.Event()
+
+    @bypass("exit", "Остановить текущий цикл", standalone=True)
+    def exit_command(self, args: str) -> str:
+        self.exit_event.set()
+        return "⚠️ Цикл прерван пользователем."
+
+
 class AgentSkill(Skill):
     """Встроенный скилл агента: базовые управляющие команды."""
 
@@ -14,7 +25,7 @@ class AgentSkill(Skill):
     def stop_command(self, args: str) -> str:
         if self.agent:
             self.agent.stop()
-        return "⚠️ Прервано пользователем."
+        return "⚠️ Ответ прерван пользователем."
     
     @bypass("tool", "Вызвать тул")
     async def tool_command(self, args: str):

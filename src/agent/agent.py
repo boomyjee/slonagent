@@ -4,7 +4,7 @@ import soundfile as sf
 from datetime import datetime
 import httpx
 from src.memory.memory import Memory
-from src.agent.agent_skill import AgentSkill
+from src.agent.agent_skill import AgentSkill, SubagentSkill
 from src.transport.base import BaseTransport
 
 
@@ -14,20 +14,21 @@ class BadFinishReason(Exception):
         super().__init__(f"LLM finished with: {reason}")
 
 
-async def stoppable(coro, stop_event: asyncio.Event):
+async def stoppable(coro, *stop_events: asyncio.Event):
     task = asyncio.create_task(coro)
-    stop_task = asyncio.create_task(stop_event.wait())
+    stop_tasks = [asyncio.create_task(e.wait()) for e in stop_events]
     try:
-        await asyncio.wait({task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({task, *stop_tasks}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        stop_task.cancel()
+        for st in stop_tasks:
+            st.cancel()
         if not task.done():
             task.cancel()
             try:
                 await task
             except BaseException:
                 pass
-    if task.cancelled() or stop_task.done() and not stop_task.cancelled():
+    if task.cancelled() or any(st.done() and not st.cancelled() for st in stop_tasks):
         return None
     return task.result()
 
@@ -80,20 +81,24 @@ class Agent:
         os.makedirs(subagent_dir, exist_ok=True)
         cfg_overrides.setdefault("transport", self.transport)
         agent = Agent.from_config(self._config, id=f"{self.id}:{name}", agent_dir=subagent_dir, **cfg_overrides)
+
+        sub_skill = SubagentSkill()
+        agent.skills.insert(0,sub_skill)
+        sub_skill.register(agent)
+
         await agent.start(run_loop=False)
 
-        # Propagate subagent's stop → parent's stop.
+        # Propagate subagent's exit → parent's stop.
         # Closure captures only Events (not agent) so weakref.finalize
         # can cancel the task when agent is GC'd — no "Task was destroyed but pending" warnings.
-        sub_stop = agent._stop_event
+        sub_exit = sub_skill.exit_event
         parent_stop = self._stop_event
 
         async def _propagate_stop():
-            await sub_stop.wait()
+            await sub_exit.wait()
             parent_stop.set()
         task = asyncio.create_task(_propagate_stop())
         weakref.finalize(agent, task.cancel)
-
         return agent
 
     def __init__(self, id: str, model_name: str, api_key: str = "", base_url: str = "", backend: str = "openai", backend_params: dict | None = None, agent_dir: str | None = None, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):

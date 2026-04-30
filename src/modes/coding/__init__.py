@@ -49,8 +49,8 @@ class CodingModeSkill(Skill):
         dashboard = find(self.agent.transport)
         url = await dashboard.get_url('/') if dashboard else ""
         await self.agent.transport.send_message(
-            f"\U0001f4bb Coding mode: {url}\nДля выхода: /stop" if url
-            else "\U0001f4bb Coding mode\nДля выхода: /stop"
+            f"\U0001f4bb Coding mode: {url}\nДля выхода: /exit" if url
+            else "\U0001f4bb Coding mode\nДля выхода: /exit"
         )
 
         await stoppable(sub.loop(), coding_skill.done)

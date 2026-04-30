@@ -359,85 +359,90 @@ class ClaudeBackend(BaseBackend):
         block_type = None
         turns: list[dict] = []
 
-        async for message in self._client.receive_response():
-            if isinstance(message, StreamEvent):
-                event = message.event
-                etype = event.get("type", "")
-                if etype == "content_block_start":
-                    block_type = event.get("content_block", {}).get("type")
-                    if block_type == "text":
-                        text_buf = ""
-                        text_stream_id = id(event)
-                    elif block_type == "thinking":
-                        thinking_buf = ""
-                        thinking_stream_id = id(event)
-                elif etype == "content_block_delta":
-                    delta = event.get("delta", {})
-                    dtype = delta.get("type")
-                    if dtype == "text_delta":
-                        text_buf += delta.get("text", "")
-                        await agent.transport.send_message(text_buf, stream_id=text_stream_id)
-                    elif dtype == "thinking_delta":
-                        chunk = delta.get("thinking", "")
-                        if chunk:
-                            thinking_buf += chunk
-                            await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
-                elif etype == "content_block_stop":
-                    if block_type == "text":
-                        await agent.transport.send_message(text_buf, stream_id=text_stream_id, final=True)
-                        text_stream_id = None
-                    elif block_type == "thinking":
-                        if thinking_buf:
-                            await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
-                        thinking_stream_id = None
-                    block_type = None
+        try:
+            async for message in self._client.receive_response():
+                if isinstance(message, StreamEvent):
+                    event = message.event
+                    etype = event.get("type", "")
+                    if etype == "content_block_start":
+                        block_type = event.get("content_block", {}).get("type")
+                        if block_type == "text":
+                            text_buf = ""
+                            text_stream_id = id(event)
+                        elif block_type == "thinking":
+                            thinking_buf = ""
+                            thinking_stream_id = id(event)
+                    elif etype == "content_block_delta":
+                        delta = event.get("delta", {})
+                        dtype = delta.get("type")
+                        if dtype == "text_delta":
+                            text_buf += delta.get("text", "")
+                            await agent.transport.send_message(text_buf, stream_id=text_stream_id)
+                        elif dtype == "thinking_delta":
+                            chunk = delta.get("thinking", "")
+                            if chunk:
+                                thinking_buf += chunk
+                                await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
+                    elif etype == "content_block_stop":
+                        if block_type == "text":
+                            await agent.transport.send_message(text_buf, stream_id=text_stream_id, final=True)
+                            text_stream_id = None
+                        elif block_type == "thinking":
+                            if thinking_buf:
+                                await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
+                            thinking_stream_id = None
+                        block_type = None
 
-            elif isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        turns.append({
-                            "role": "assistant",
-                            "content": block.text,
-                            "_uuid": message.uuid,
-                        })
-                    elif isinstance(block, ToolUseBlock):
-                        await agent.transport.on_tool_call(block.name, block.input)
-                        tool_use_names[block.id] = block.name
-                        turns.append({
-                            "role": "assistant",
-                            "tool_calls": [{
-                                "id": block.id,
-                                "type": "function",
-                                "function": {
-                                    "name": block.name,
-                                    "arguments": json.dumps(block.input, ensure_ascii=False),
-                                },
-                            }],
-                            "_uuid": message.uuid,
-                        })
-                    # ThinkingBlock — пропускаем
+                elif isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            turns.append({
+                                "role": "assistant",
+                                "content": block.text,
+                                "_uuid": message.uuid,
+                            })
+                        elif isinstance(block, ToolUseBlock):
+                            await agent.transport.on_tool_call(block.name, block.input)
+                            tool_use_names[block.id] = block.name
+                            turns.append({
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "id": block.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": block.name,
+                                        "arguments": json.dumps(block.input, ensure_ascii=False),
+                                    },
+                                }],
+                                "_uuid": message.uuid,
+                            })
+                        # ThinkingBlock — пропускаем
 
-            elif isinstance(message, UserMessage):
-                for block in message.content:
-                    if isinstance(block, ToolResultBlock):
-                        raw = block.content or ""
-                        if isinstance(raw, list):
-                            result = "\n".join(b.get("text", "") for b in raw if isinstance(b, dict) and b.get("type") == "text")
-                        else:
-                            result = raw
-                        await agent.transport.on_tool_result(tool_use_names.get(block.tool_use_id, block.tool_use_id), result)
-                        turns.append({
-                            "role": "tool",
-                            "tool_call_id": block.tool_use_id,
-                            "name": tool_use_names.get(block.tool_use_id, block.tool_use_id),
-                            "content": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
-                            "_uuid": message.uuid,
-                        })
+                elif isinstance(message, UserMessage):
+                    for block in message.content:
+                        if isinstance(block, ToolResultBlock):
+                            raw = block.content or ""
+                            if isinstance(raw, list):
+                                result = "\n".join(b.get("text", "") for b in raw if isinstance(b, dict) and b.get("type") == "text")
+                            else:
+                                result = raw
+                            await agent.transport.on_tool_result(tool_use_names.get(block.tool_use_id, block.tool_use_id), result)
+                            turns.append({
+                                "role": "tool",
+                                "tool_call_id": block.tool_use_id,
+                                "name": tool_use_names.get(block.tool_use_id, block.tool_use_id),
+                                "content": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
+                                "_uuid": message.uuid,
+                            })
 
-            elif isinstance(message, ResultMessage):
-                cost = f"${message.total_cost_usd:.4f}" if message.total_cost_usd else "n/a"
-                log.info("[claude_agent] done: %d turns, %s", message.num_turns, cost)
-                await agent.transport.send_message(f"✅ Готово ({message.num_turns} turns, {cost})")
-                return turns
+                elif isinstance(message, ResultMessage):
+                    cost = f"${message.total_cost_usd:.4f}" if message.total_cost_usd else "n/a"
+                    log.info("[claude_agent] done: %d turns, %s", message.num_turns, cost)
+                    await agent.transport.send_message(f"✅ Готово ({message.num_turns} turns, {cost})")
+                    return turns
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await asyncio.shield(self._client.interrupt())
+            raise
 
         return turns

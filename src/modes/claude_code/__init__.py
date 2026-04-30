@@ -24,7 +24,6 @@ class ClaudeCodeSkill(Skill):
         self,
         task: Annotated[str, "Задача для Claude Code"] = "",
     ) -> dict:
-        from src.agent.agent import stoppable
         from src.skills.config import ConfigSkill
         from src.skills.sandbox import SandboxSkill
         from src.transport.dashboard import DashboardTransport
@@ -69,13 +68,13 @@ class ClaudeCodeSkill(Skill):
         dashboard = find(self.agent.transport)
         url = await dashboard.get_url('/') if dashboard else ""
         await self.agent.transport.send_message(
-            f"\U0001f4bb Claude Code: {url}\nДля выхода: /stop" if url
-            else "\U0001f4bb Claude Code\nДля выхода: /stop"
+            f"\U0001f4bb Claude Code: {url}\nДля выхода: /exit" if url
+            else "\U0001f4bb Claude Code\nДля выхода: /exit"
         )
 
         if task:
             await sub.process_message([{"type": "text", "text": task}])
 
-        await stoppable(sub.loop(), sub._stop_event)
+        await sub.loop()
 
         return {"status": "finished"}
