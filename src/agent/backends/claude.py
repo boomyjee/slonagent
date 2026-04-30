@@ -378,14 +378,17 @@ class ClaudeBackend(BaseBackend):
                         text_buf += delta.get("text", "")
                         await agent.transport.send_message(text_buf, stream_id=text_stream_id)
                     elif dtype == "thinking_delta":
-                        thinking_buf += delta.get("thinking", "")
-                        await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
+                        chunk = delta.get("thinking", "")
+                        if chunk:
+                            thinking_buf += chunk
+                            await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id)
                 elif etype == "content_block_stop":
                     if block_type == "text":
                         await agent.transport.send_message(text_buf, stream_id=text_stream_id, final=True)
                         text_stream_id = None
                     elif block_type == "thinking":
-                        await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
+                        if thinking_buf:
+                            await agent.transport.send_thinking(thinking_buf, stream_id=thinking_stream_id, final=True)
                         thinking_stream_id = None
                     block_type = None
 
