@@ -56,3 +56,21 @@ CREATE VIRTUAL TABLE facts_fts USING fts5(fact, content='facts', content_rowid='
 Индекс не хранит копию текста, при выдаче результатов достаёт его из `facts` по `rowid`. Экономия ~30-40% места. Миграция требует drop + recreate таблицы и триггеров. Не срочно — пока память небольшая, дублирование некритично.
 
 Подсмотрено в prism-mcp (`lib/prism-mcp`), у них так сделано изначально.
+
+## Объединить host↔container коммуникацию через один канал sandbox-proxy
+
+Сейчас в SandboxSkill **два параллельных механизма** общения хоста с контейнером:
+
+1. **Skill-скрипты** ([src/skills/sandbox/__init__.py](../src/skills/sandbox/__init__.py) `_dispatch_skill_script`): на каждый вызов `podman exec python /slonagent/runner.py <script>` — новый процесс, RPC через stdin/stdout (`container_lib/rpc.py` Channel). Богатый API host-объектов (transport, memory, agent), но cold-start ~150мс на каждый вызов.
+
+2. **Sandbox-proxy** ([src/skills/sandbox/container_lib/sandbox_proxy.py](../src/skills/sandbox/container_lib/sandbox_proxy.py)): один долгоживущий процесс, WebSocket-тоннель, custom JSON frames (`http`, `ws_open`, `cgi`). Быстрый, но без RPC — только forwarding.
+
+**Идея:** сделать sandbox-proxy единственным каналом. Добавить в его протокол `kind: "exec_script"` и поверх тоннеля прокинуть RPC (Channel в `rpc.py` уже принимает `readline/writeline` — адаптируется под frame-транспорт). Тогда:
+
+- `_dispatch_skill_script` перестаёт спавнить процессы — шлёт frame в существующий тоннель, получает результат. ~150мс → ~15мс на вызов.
+- CGI-скрипты (`/web/*.py`) бесплатно получают тот же rich `agent.<...>()` API, что и skill-скрипты, без отдельного shim.
+- Один протокол, легче отлаживать; multiplexing по `id` уже есть.
+
+**Цена:** sandbox_proxy.py распухает в ~3 раза (RPC-сервер + диспатч), нужно правильно мультиплексировать concurrent script-calls в одном тоннеле, риск тонких багов на разрыве тоннеля / падении скрипта.
+
+Поэтапно: сначала добавить RPC-возможность как новый `kind` (CGI получает сразу), `_dispatch_skill_script` оставить как есть. Если стабильно работает — мигрировать skill-script на тот же тоннель, удалять старый код.
