@@ -10,13 +10,15 @@ host -> worker:
     {id, kind:"ws_open",  port, path,   headers}
     {id, kind:"ws_c2s",   data_b64, binary}
     {id, kind:"ws_close"}
+    {id, kind:"cgi",      path, method, query, headers, cookies, body_b64}
 worker -> host:
     {id, kind:"resp",      status, headers, body_b64}
     {id, kind:"ws_opened"} | {id, kind:"ws_fail", reason}
     {id, kind:"ws_s2c",    data_b64, binary}
     {id, kind:"ws_closed"}
+    {id, kind:"cgi_resp",  status, headers, body_b64}
 """
-import argparse, asyncio, base64, json, logging, subprocess, sys, http.client
+import argparse, asyncio, base64, contextlib, io, json, logging, subprocess, sys, traceback, types, http.client
 
 try:
     import websockets
@@ -25,6 +27,57 @@ except ImportError:
     import websockets
 
 log = logging.getLogger("sandbox_proxy")
+
+
+CGI_WEB_DIR = "/workspace/web"
+
+
+async def handle_cgi(tunnel, frame):
+    """Exec /workspace/web/<path>.py с подменённым stdout. Скрипт top-to-bottom
+    исполняется в изолированных globals, печатаемое уходит в body, заголовки
+    набираются через header(name, value)."""
+    id_ = frame["id"]
+    rel = (frame.get("path") or "").lstrip("/")
+    fpath = f"{CGI_WEB_DIR}/{rel}"
+
+    request = types.SimpleNamespace(
+        method=frame.get("method", "GET"),
+        path="/" + rel,
+        query=frame.get("query") or {},
+        headers=frame.get("headers") or {},
+        cookies=frame.get("cookies") or {},
+        body=base64.b64decode(frame.get("body_b64") or ""),
+    )
+    headers: dict = {}
+    def header(name, value):
+        headers[str(name)] = str(value)
+
+    buf = io.StringIO()
+    g = {
+        "__name__": "__cgi__", "__file__": fpath,
+        "request": request, "header": header,
+    }
+
+    try:
+        with open(fpath, encoding="utf-8") as f:
+            code = compile(f.read(), fpath, "exec")
+        with contextlib.redirect_stdout(buf):
+            exec(code, g)
+        body = buf.getvalue().encode("utf-8")
+        status = 200
+        headers.setdefault("Content-Type", "text/html; charset=utf-8")
+    except FileNotFoundError:
+        status, headers, body = 404, {"Content-Type": "text/plain"}, b"Not found"
+    except Exception:
+        status = 500
+        body = (buf.getvalue() + "\n" + traceback.format_exc()).encode("utf-8")
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+    await tunnel.send(json.dumps({
+        "id": id_, "kind": "cgi_resp",
+        "status": status, "headers": headers,
+        "body_b64": base64.b64encode(body).decode(),
+    }))
 
 
 async def handle_http(tunnel, frame):
@@ -105,6 +158,8 @@ async def run_once(url):
                 kind, id_ = frame["kind"], frame["id"]
                 if kind == "http":
                     asyncio.create_task(handle_http(tunnel, frame))
+                elif kind == "cgi":
+                    asyncio.create_task(handle_cgi(tunnel, frame))
                 elif kind == "ws_open":
                     sess = WSSession(tunnel, id_)
                     sessions[id_] = sess

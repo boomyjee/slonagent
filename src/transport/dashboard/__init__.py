@@ -67,6 +67,9 @@ class DashboardSkill(Skill):
         url = await self.transport.get_url("")
         return (
             f"У тебя есть веб-хостинг: файлы в /workspace/web/ доступны по URL {url}/web/. "
+            "Файлы с расширением .py исполняются как CGI-скрипты в песочнице — "
+            "доступны globals `request` (.method/.path/.query/.headers/.cookies/.body), "
+            "`header(name, value)` для ответных заголовков, всё что попадает в `print()` уходит в body. "
             f"Там же есть вебхук {url}/web-hook — POST-запрос на него придёт тебе как сообщение. "
             "Используй это для создания интерактивных веб-приложений. "
             f"Если запустишь внутри сандбокса свой сервер на 127.0.0.1:PORT "
@@ -110,7 +113,10 @@ class DashboardTransport(WebTransport):
     def register_routes(self):
         self._files.register()
         self._git.register()
-        self.register_route("get", "/web/{filepath:path}", self._serve_web)
+        # Все методы — для CGI (.py) скриптов могут понадобиться POST/PUT/etc.
+        # Не-.py файлы вне GET отвечают 405 внутри хендлера.
+        for m in ("get", "post", "put", "patch", "delete", "options", "head"):
+            self.register_route(m, "/web/{filepath:path}", self._serve_web)
         self.register_route("post", "/web-hook", self._web_hook)
         # Reverse-tunnel proxy for ports bound inside the sandbox container.
         # Tunnel endpoint must be registered before the generic /sandbox/{port}
@@ -129,7 +135,7 @@ class DashboardTransport(WebTransport):
     def on_ws_close(self, ws):
         self._watchers.on_ws_close(ws)
 
-    async def _serve_web(self, filepath: str):
+    async def _serve_web(self, filepath: str, request: Request):
         sandbox = self._sandbox
         if not sandbox:
             return Response("No sandbox", status_code=404)
@@ -137,6 +143,10 @@ class DashboardTransport(WebTransport):
         path = (web_dir / filepath).resolve()
         if not path.is_file() or not path.is_relative_to(web_dir.resolve()):
             return Response("Not found", status_code=404)
+        if path.suffix == ".py":
+            return await self._proxy.handle_cgi(filepath, request)
+        if request.method != "GET":
+            return Response("Method not allowed", status_code=405)
         mime = self._MIME.get(path.suffix.lstrip("."), "text/plain")
         headers = {"Cache-Control": "no-store"} if path.suffix.lstrip(".") in self._MIME else {}
         return Response(path.read_bytes(), media_type=mime, headers=headers)

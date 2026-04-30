@@ -62,7 +62,7 @@ class SandboxProxy:
 
     def _route_from_worker(self, frame):
         kind, id_ = frame["kind"], frame["id"]
-        if kind == "resp":
+        if kind in ("resp", "cgi_resp"):
             fut = self._pending_http.pop(id_, None)
             if fut and not fut.done():
                 fut.set_result(frame)
@@ -70,6 +70,40 @@ class SandboxProxy:
             q = self._ws_sessions.get(id_)
             if q:
                 q.put_nowait(frame)
+
+    async def handle_cgi(self, filepath: str, request: Request):
+        """Прогнать /workspace/web/<filepath> как Python-скрипт через worker
+        в контейнере. Экономия cold-start'а — exec идёт в долгоживущем
+        процессе sandbox_proxy.py, не через `podman exec`."""
+        if not await self._ensure_tunnel():
+            return Response("sandbox proxy unavailable", status_code=502)
+        id_ = next(self._ids)
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_http[id_] = fut
+        body = await request.body()
+        headers = {k.decode(): v.decode() for k, v in request.headers.raw if k.lower() != b"host"}
+        await self._send({
+            "id": id_, "kind": "cgi", "path": filepath,
+            "method": request.method,
+            "query": dict(request.query_params),
+            "headers": headers,
+            "cookies": dict(request.cookies),
+            "body_b64": base64.b64encode(body).decode(),
+        })
+        try:
+            frame = await asyncio.wait_for(fut, timeout=self.HTTP_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._pending_http.pop(id_, None)
+            return Response("cgi timeout", status_code=504)
+        except Exception as e:
+            return Response(f"cgi error: {e}", status_code=502)
+        skip = {"transfer-encoding", "content-encoding", "content-length", "connection"}
+        resp_headers = {k: v for k, v in (frame.get("headers") or {}).items() if k.lower() not in skip}
+        return Response(
+            content=base64.b64decode(frame.get("body_b64") or ""),
+            status_code=frame.get("status", 502),
+            headers=resp_headers,
+        )
 
     async def handle_http(self, port: int, filepath: str, request: Request):
         if not await self._ensure_tunnel():
