@@ -431,7 +431,7 @@ class TelegramTransport(BaseTransport):
         await self._answer((text or "").strip() or "[…]", messages=messages, final=final)
 
     async def inject_message(self, text: str):
-        sent = await self._send("[→]" + text)
+        await self._answer("[→]" + text, final=True)
 
     async def send_app_url(self, url: str, text: str, button: str = ""):
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo

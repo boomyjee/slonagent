@@ -470,11 +470,14 @@ class WebTransport(BaseTransport):
             # replayed on reconnect. Chat.js no longer adds user messages
             # to local state — it renders them when this event comes in.
             await self.send(msg, replay=True)
-            await self.process_message(
-                content_parts=content_parts,
-                user_message_id=msg.get("user_message_id"),
-                trigger_answer=msg.get("trigger_answer", True),
-            )
+            try:
+                await self.process_message(
+                    content_parts=content_parts,
+                    user_message_id=msg.get("user_message_id"),
+                    trigger_answer=msg.get("trigger_answer", True),
+                )
+            except Exception:
+                log.exception("[ws] process_message FAILED")
 
     @property
     def uploads_dir(self) -> str:

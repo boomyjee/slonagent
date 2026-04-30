@@ -1,5 +1,8 @@
 """Transport that fans out events to multiple transports."""
+import logging
 from src.transport.base import BaseTransport
+
+log = logging.getLogger(__name__)
 
 
 class MultiTransport(BaseTransport):
@@ -20,7 +23,10 @@ class MultiTransport(BaseTransport):
         if text:
             for t in self.transports:
                 if t is not source:
-                    await t.inject_message(text)
+                    try:
+                        await t.inject_message(text)
+                    except Exception:
+                        log.warning("inject_message to %s failed", type(t).__name__, exc_info=True)
         await self.process_message(content_parts, user_message_id, trigger_answer=trigger_answer)
 
     async def send_message(self, text, stream_id=None, final=True):
