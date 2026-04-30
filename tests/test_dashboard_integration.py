@@ -264,3 +264,29 @@ class TestPortForward:
         # Несуществующий порт внутри контейнера → proxy worker возвращает 502.
         r = await http_client.get(f"{dash['base']}/sandbox/19999/whatever")
         assert r.status_code == 502
+
+
+# ─── _worker_url: subagent inheritance regression ─────────────────────────────
+
+class TestWorkerURL:
+
+    async def test_uses_mount_id_not_agent_id(self, dash):
+        """Subagent шарит parent's transport. transport.agent на subagent,
+        но routes остались зарегистрированы на parent'е (по _mount_id).
+        worker URL обязан использовать _mount_id, иначе WebSocket-роут не
+        совпадёт и тоннель отвергнут с 403."""
+        transport = dash["transport"]
+        original_id = transport.agent.id
+        original_agent = transport.agent
+        # Эмулируем подменённый agent (как при set_agent от subagent),
+        # сохраняем skills чтобы _host_address мог найти SandboxSkill.
+        class _FakeAgent:
+            id = "main:claude_code"
+            skills = original_agent.skills
+        transport.agent = _FakeAgent()
+        try:
+            url = await transport._proxy._worker_url()
+            assert f"/{original_id}/dashboard/sandbox-tunnel" in url
+            assert "main:claude_code" not in url
+        finally:
+            transport.agent = original_agent

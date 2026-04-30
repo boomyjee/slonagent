@@ -238,9 +238,14 @@ class SandboxProxy:
         return True
 
     async def _worker_url(self) -> str:
+        # _mount_id — id агента, под которым реально зарегистрированы routes
+        # (в WebTransport.set_agent на первом set_agent). Subagent шарит
+        # transport с родителем, set_agent перенаправляет self.agent на
+        # subagent, но routes остаются на parent'е. Если взять agent.id, URL
+        # уйдёт на /main:claude_code/... которого нет в роутере → 403.
         from src.transport.web import WebTransport
         return (f"ws://{await self._host_address()}:{WebTransport._port}"
-                f"/{self.transport.agent.id}/dashboard/sandbox-tunnel")
+                f"/{self.transport._mount_id}/dashboard/sandbox-tunnel")
 
     async def _host_address(self) -> str:
         """Hostname/IP the container can use to reach the host's uvicorn.
