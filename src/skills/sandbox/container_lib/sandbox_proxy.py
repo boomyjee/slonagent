@@ -148,10 +148,11 @@ class WSSession:
             except Exception: pass
 
 
-async def run_once(url):
+async def run_once(url, on_open=None):
     sessions: dict = {}
     async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=None) as tunnel:
         log.info("tunnel open")
+        if on_open: on_open()
         try:
             async for raw in tunnel:
                 frame = json.loads(raw)
@@ -177,13 +178,27 @@ async def run_once(url):
                 asyncio.create_task(s.close())
 
 
-async def main(url):
+async def main(url, max_consecutive_failures: int = 10):
+    """Кладём worker если 10 подряд неудачных попыток (~20 сек): host умер,
+    или URL битый, или маршрут отвалился. Бюджет тратится только на cold-start
+    failures — успешный коннект сбрасывает счётчик, поэтому сетевые мерцания
+    не убивают воркера. Host's _ensure_tunnel тайм-аут 30 сек, дольше ждать
+    бессмысленно. На следующее обращение к sandbox-фиче host через
+    `_start_worker` поднимет свежий."""
     log.info("connecting to %s", url)
+    consecutive_failures = 0
+    def _reset():
+        nonlocal consecutive_failures
+        consecutive_failures = 0
     while True:
         try:
-            await run_once(url)
+            await run_once(url, on_open=_reset)
         except Exception as e:
             log.warning("tunnel error: %s", e)
+        consecutive_failures += 1
+        if consecutive_failures >= max_consecutive_failures:
+            log.error("giving up after %d consecutive failures", consecutive_failures)
+            return
         await asyncio.sleep(2)
 
 

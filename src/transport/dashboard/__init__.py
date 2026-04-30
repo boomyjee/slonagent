@@ -5,7 +5,9 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
-from agent import Skill
+from typing import Annotated
+
+from agent import Skill, tool
 from src.transport.web import WebTransport
 from src.transport.dashboard.files import FilesAPI
 from src.transport.dashboard.git import GitAPI
@@ -78,6 +80,26 @@ class DashboardSkill(Skill):
             "через обратный туннель автоматически."
         )
 
+    @tool(
+        "Открыть вкладку в дашборде у пользователя. Если такая уже есть — "
+        "переключиться на неё и обновить содержимое. URI-схема:\n"
+        "  /<path>                       — файл (Editor)\n"
+        "  git:<path>                    — git-панель (diff, log, status)\n"
+        "  git-show:<repo>:<ref>:<file>  — файл на конкретном коммите\n"
+        "  git-blame:<path>              — blame\n"
+        "  url:<full url>                — встраиваемая страница (iframe)\n"
+        "  logs                          — лог-панель"
+    )
+    async def open_tab(
+        self,
+        uri: Annotated[str, "URI вкладки по схеме выше."],
+    ) -> str:
+        try:
+            await self.transport.send_targeted({"type": "open_tab", "uri": uri})
+        except RuntimeError as e:
+            return f"Не получилось: {e}"
+        return f"Открыта вкладка {uri}"
+
 
 class DashboardTransport(WebTransport):
     """Full agent dashboard: chat + logs tab, mounted at /{agent_id}/dashboard/."""
@@ -135,13 +157,26 @@ class DashboardTransport(WebTransport):
     def on_ws_close(self, ws):
         self._watchers.on_ws_close(ws)
 
+    _WEB_INDEX_NAMES = ("index.html", "index.htm", "index.py")
+
     async def _serve_web(self, filepath: str, request: Request):
         sandbox = self._sandbox
         if not sandbox:
             return Response("No sandbox", status_code=404)
         web_dir = Path(sandbox.workspace_dir) / "web"
         path = (web_dir / filepath).resolve()
-        if not path.is_file() or not path.is_relative_to(web_dir.resolve()):
+        if not path.is_relative_to(web_dir.resolve()):
+            return Response("Not found", status_code=404)
+        if path.is_dir():
+            for name in self._WEB_INDEX_NAMES:
+                cand = path / name
+                if cand.is_file():
+                    path = cand
+                    filepath = (filepath.rstrip("/") + "/" + name).lstrip("/")
+                    break
+            else:
+                return Response("Not found", status_code=404)
+        if not path.is_file():
             return Response("Not found", status_code=404)
         if path.suffix == ".py":
             return await self._proxy.handle_cgi(filepath, request)

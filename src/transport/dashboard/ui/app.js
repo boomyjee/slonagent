@@ -7,6 +7,7 @@ import { Editor } from './components/Editor.js';
 import { Tabs } from './components/Tabs.js';
 import { Logs } from './components/Logs.js';
 import { Git } from './components/Git.js';
+import { WebView } from './components/WebView.js';
 import { currentRoot, setCurrentRoot } from './components/api.js';
 
 const cl = {};
@@ -58,6 +59,18 @@ class App extends Component {
                 const id = this.state.activeTab;
                 if (id !== 'logs' && !id.startsWith('git:')) this._editor?.save(id);
             }
+        });
+        // Перехват кликов по http(s)-ссылкам по всему дашборду — открываем
+        // во встроенной вкладке. Ctrl/Cmd/Shift/middle = дефолт браузера
+        // (новое окно). Не-http схемы (mailto:, tg:, ...) пропускаем как есть.
+        document.addEventListener('click', e => {
+            if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) return;
+            const a = e.target.closest?.('a');
+            if (!a) return;
+            const href = a.getAttribute('href');
+            if (!href || !/^https?:/i.test(href)) return;
+            e.preventDefault();
+            this._openUrl(href);
         });
     }
 
@@ -132,6 +145,8 @@ class App extends Component {
             this._editor?.handleFilesChanged(ev.paths);
             if (ev.tree) refreshTree(ev.paths);
             this.setState(({ gitRefreshKey }) => ({ gitRefreshKey: gitRefreshKey + 1 }));
+        } else if (ev.type === 'open_tab') {
+            this._openUri(ev.uri);
         }
     }
 
@@ -179,6 +194,54 @@ class App extends Component {
             return { tabs: next, activeTab: id };
         });
         this._setMobileView('editor');
+    };
+
+    _openUrl = (url) => {
+        const id = `url:${url}`;
+        let host;
+        try { host = new URL(url).host; } catch { host = url; }
+        this.setState(({ tabs }) => {
+            const next = tabs.some(t => t.id === id)
+                ? tabs
+                : [...tabs, { id, label: host, tooltip: url, closable: true }];
+            return { tabs: next, activeTab: id };
+        });
+        this._setMobileView('editor');
+        // Уже открытая вкладка — рефреш через ref WebView'а.
+        this._webViews?.[id]?.refresh();
+    };
+
+    _onWebViewTitle = (id, title) => {
+        this.setState(({ tabs }) => ({
+            tabs: tabs.map(t => t.id === id ? { ...t, label: title } : t),
+        }));
+    };
+
+    /**
+     * Универсальный «открой что угодно по URI». LLM/чат вызывают это.
+     * Поддерживаемые схемы повторяют tab id'ы:
+     *   /<path>                       — файл
+     *   git:<path>                    — git-панель
+     *   git-show:<repo>:<ref>:<file>  — файл на коммите
+     *   git-blame:<path>              — blame
+     *   url:<full url>                — iframe
+     *   logs                          — лог-панель
+     */
+    _openUri = (uri) => {
+        if (uri === 'logs') return this.setState({ activeTab: 'logs' });
+        if (uri.startsWith('url:')) return this._openUrl(uri.slice(4));
+        if (uri.startsWith('git:')) return this._openGit(uri.slice(4), uri.slice(4).split(/[\/\\]/).pop());
+        // git-show:/git-blame: и просто пути уходят в Editor — там уже есть
+        // диспатч по префиксу. Открытие = добавить таб + revealLine не делаем.
+        const name = uri.split(/[\/\\:]/).pop();
+        this.setState(({ tabs }) => {
+            const next = tabs.some(t => t.id === uri)
+                ? tabs
+                : [...tabs, { id: uri, label: name, closable: true }];
+            return { tabs: next, activeTab: uri };
+        });
+        this._setMobileView('editor');
+        this._editor?.reload?.(uri);
     };
 
     _closeTab = (id) => {
@@ -248,7 +311,9 @@ class App extends Component {
     render(_, { connected, root, rootKey, tabs, activeTab, logs, gitRefreshKey, mobileView }) {
         const isLogs = activeTab === 'logs';
         const isGit = activeTab.startsWith('git:');
-        const activeFile = !isLogs && !isGit ? activeTab : null;
+        const isUrl = activeTab.startsWith('url:');
+        const activeFile = !isLogs && !isGit && !isUrl ? activeTab : null;
+        this._webViews = this._webViews || {};
         return html`
             <div class="${cl.app} mobile-${mobileView}">
                 <div class="${cl.sidebar} dash-sidebar">
@@ -259,6 +324,7 @@ class App extends Component {
                                      onOpen=${this._openFile}
                                      onOpenGit=${this._openGit}
                                      onOpenGitBlame=${this._openGitBlame}
+                                     onOpenUrl=${this._openUrl}
                                      onChangeRoot=${this._onChangeRoot} />
                     </div>
                 </div>
@@ -281,6 +347,13 @@ class App extends Component {
                                         refreshKey=${gitRefreshKey}
                                         onOpenFile=${this._openFile}
                                         onOpenGitShow=${this._openGitShow} />
+                            </div>`)}
+                        ${tabs.filter(t => t.id.startsWith('url:')).map(t => html`
+                            <div key=${t.id} class=${cl.pane}
+                                 style=${{display: activeTab === t.id ? 'flex' : 'none'}}>
+                                <${WebView} url=${t.id.slice(4)}
+                                            ref=${c => { this._webViews[t.id] = c; }}
+                                            onTitle=${title => this._onWebViewTitle(t.id, title)} />
                             </div>`)}
                         <div class=${cl.pane} style=${{display: activeFile ? 'flex' : 'none'}}>
                             <${Editor} ref=${c => this._editor = c}

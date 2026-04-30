@@ -228,6 +228,22 @@ class TestCGI:
         assert "ValueError" in r.text
         assert "nope" in r.text
 
+    async def test_directory_index_html(self, dash, http_client):
+        os.makedirs(os.path.join(dash["web_dir"], "subdir_html"), exist_ok=True)
+        with open(os.path.join(dash["web_dir"], "subdir_html", "index.html"), "w", encoding="utf-8") as f:
+            f.write("<h1>html-index</h1>")
+        r = await http_client.get(f"{dash['base']}/web/subdir_html")
+        assert r.status_code == 200
+        assert "html-index" in r.text
+
+    async def test_directory_index_py(self, dash, http_client):
+        os.makedirs(os.path.join(dash["web_dir"], "subdir_py"), exist_ok=True)
+        with open(os.path.join(dash["web_dir"], "subdir_py", "index.py"), "w", encoding="utf-8") as f:
+            f.write("print('py-index')\n")
+        r = await http_client.get(f"{dash['base']}/web/subdir_py")
+        assert r.status_code == 200
+        assert "py-index" in r.text
+
 
 # ─── /sandbox/{port}/... port forwarding ──────────────────────────────────────
 

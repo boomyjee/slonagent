@@ -146,6 +146,10 @@ class WebTransport(BaseTransport):
         self._prefix = prefix
         self.verbose = verbose
         self._clients: set[WebSocket] = set()
+        # Последний WS, через который пришло user-message. Команды-уведомления
+        # (open_tab) уходят именно туда, чтобы не открывать вкладку у юзера
+        # который сейчас не «активен».
+        self._last_active_ws: WebSocket | None = None
         self._replay_transport: deque = deque(maxlen=100)
         self._replay_other: deque = deque(maxlen=400)
         self._routes: list = []
@@ -431,6 +435,8 @@ class WebTransport(BaseTransport):
             pass
         finally:
             self._clients.discard(ws)
+            if self._last_active_ws is ws:
+                self._last_active_ws = None
             self.on_ws_close(ws)
 
     def on_ws_close(self, ws):
@@ -447,6 +453,10 @@ class WebTransport(BaseTransport):
                     await ws.send_text(json.dumps(event, ensure_ascii=False))
             return
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
+            # Запоминаем клиента который последним прислал user message — туда
+            # уйдут адресные команды от агента (например, dashboard.open_tab).
+            if ws is not None:
+                self._last_active_ws = ws
             new_parts = []
             for p in msg.get("content_parts", []):
                 if isinstance(p, dict) and p.get("type") == "file":
@@ -567,6 +577,22 @@ class WebTransport(BaseTransport):
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    async def send_targeted(self, event: dict):
+        """Шлёт только клиенту, который последним прислал user-message.
+        Если такого нет (никто не подключён или disconnected) — кидает,
+        чтобы вызывающий tool вернул ошибку в ллм."""
+        target = self._last_active_ws
+        if target is None or target not in self._clients:
+            raise RuntimeError("no active dashboard client")
+        self._message_id_counter += 1
+        event = {**event, "id": self._message_id_counter}
+        try:
+            await target.send_text(json.dumps(event, ensure_ascii=False))
+        except Exception as e:
+            self._clients.discard(target)
+            self._last_active_ws = None
+            raise RuntimeError(f"target client send failed: {e}")
 
     # --- BaseTransport interface ---
 
