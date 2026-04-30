@@ -363,7 +363,16 @@ class WebTransport(BaseTransport):
 
     def register_routes(self):
         self.register_route("websocket", "/ws", self._ws)
+        self.register_route("get", "/api/commands", self._api_commands)
         self.register_route("get", "/{filename:path}", self._static)
+
+    async def _api_commands(self):
+        cmds = {
+            cmd: desc
+            for skill in self.agent.skills
+            for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
+        }
+        return JSONResponse(cmds)
 
     def remove_routes(self):
         for r in self._routes:

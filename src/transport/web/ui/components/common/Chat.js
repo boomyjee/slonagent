@@ -118,6 +118,7 @@ export class Chat extends Component {
             messages: [], input: '', expanded: {}, processing: false,
             attachments: [],     // [{kind: 'image'|'audio'|'file_text'|'file_meta', ...}]
             recording: false,
+            palette: null,       // {items: [{cmd, desc}], selected: int} when /-popup visible
         };
         this._streams = {};
         this._recorder = null;
@@ -132,6 +133,83 @@ export class Chat extends Component {
         const el = this._scroll;
         if (!el) return;
         this._stick = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    };
+
+    _onInput = (e) => {
+        const v = e.target.value;
+        this.setState({ input: v });
+        if (!v.startsWith('/')) {
+            this._allCmds = null;
+            this._paletteDismissed = false;
+            if (this.state.palette) this.setState({ palette: null });
+            return;
+        }
+        if (this._paletteDismissed) return;
+        if (this._allCmds) this._filterPalette(v);
+        else this._fetchCommands(v);
+    };
+
+    async _fetchCommands(input) {
+        try {
+            const r = await fetch('api/commands');
+            if (!r.ok) return;
+            const cmds = await r.json();
+            this._allCmds = Object.entries(cmds).map(([cmd, desc]) => ({ cmd, desc }));
+            this._filterPalette(input);
+        } catch (e) {
+            console.error('commands fetch:', e);
+        }
+    }
+
+    _filterPalette(input) {
+        const q = input.slice(1).toLowerCase().split(/\s+/)[0];
+        const items = (this._allCmds || []).filter(({ cmd, desc }) =>
+            cmd.toLowerCase().includes(q) || (desc || '').toLowerCase().includes(q)
+        );
+        this.setState({ palette: items.length ? { items, selected: -1 } : null });
+    }
+
+    _onKeyDown = (e) => {
+        const { palette } = this.state;
+        if (palette && palette.items.length) {
+            const n = palette.items.length;
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                const next = palette.selected < 0 ? 0 : (palette.selected + 1) % n;
+                this.setState({ palette: { ...palette, selected: next } });
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                const next = palette.selected < 0 ? n - 1 : (palette.selected - 1 + n) % n;
+                this.setState({ palette: { ...palette, selected: next } });
+                return;
+            }
+            if (e.key === 'Tab' && palette.selected >= 0) {
+                e.preventDefault();
+                const item = palette.items[palette.selected];
+                this._allCmds = null;
+                this.setState({ input: '/' + item.cmd + ' ', palette: null });
+                return;
+            }
+            if (e.key === 'Enter' && !e.shiftKey && palette.selected >= 0) {
+                e.preventDefault();
+                const item = palette.items[palette.selected];
+                this.setState({ input: '/' + item.cmd }, () => this._submit());
+                return;
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                this._paletteDismissed = true;
+                this._allCmds = null;
+                this.setState({ palette: null });
+                return;
+            }
+        }
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            this._submit();
+        }
     };
 
     handleMessage(ev) {
@@ -237,8 +315,10 @@ export class Chat extends Component {
         }
         if (text) preview.push({ kind: 'text', text });
         else if (att.length) preview.push({ kind: 'text', text: '⏳ Отправка...' });
+        this._allCmds = null;
+        this._paletteDismissed = false;
         this.setState(({ messages }) => ({
-            input: '', attachments: [],
+            input: '', attachments: [], palette: null,
             messages: [...messages, { kind: 'msg', role: 'user', items: preview, pending: true }],
         }));
     }
@@ -400,6 +480,19 @@ export class Chat extends Component {
                     </div>
                 `}
                 <div class=${cl.input}>
+                    ${this.state.palette && html`
+                        <div class=${cl.palette}>
+                            ${this.state.palette.items.map((item, i) => html`
+                                <div class="${cl.paletteItem} ${i === this.state.palette.selected ? 'sel' : ''}"
+                                     onMouseDown=${e => {
+                                         e.preventDefault();
+                                         this._allCmds = null;
+                                         this.setState({ input: '/' + item.cmd + ' ', palette: null });
+                                     }}>
+                                    <span class="cmd">/${item.cmd}</span>
+                                    <span class="desc">${item.desc}</span>
+                                </div>`)}
+                        </div>`}
                     <input type="file" multiple ref=${el => this._fileInput = el}
                            style="display:none"
                            onChange=${e => { this._onFiles(e.target.files); e.target.value = ''; }} />
@@ -413,8 +506,8 @@ export class Chat extends Component {
                     <textarea
                         rows="1"
                         value=${input}
-                        onInput=${e => this.setState({ input: e.target.value })}
-                        onKeyDown=${e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._submit(); } }}
+                        onInput=${this._onInput}
+                        onKeyDown=${this._onKeyDown}
                         placeholder="Write a message..."
                         disabled=${!connected}
                     ></textarea>
@@ -493,6 +586,7 @@ cl.input = css`
   margin: 8px; padding: 4px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
   transition: border-color 0.15s;
+  position: relative;
   &:focus-within { border-color: var(--accent); }
   & textarea {
     flex: 1; min-width: 0;
@@ -553,4 +647,19 @@ cl.chipRemove = css`
 cl.thumb = css`
   max-width: 240px; max-height: 240px; border-radius: 4px;
   display: block; margin: 4px 0;
+`;
+cl.palette = css`
+  position: absolute; bottom: calc(100% + 4px); left: 0; right: 0;
+  max-height: 240px; overflow-y: auto;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 10;
+`;
+cl.paletteItem = css`
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 6px 10px; cursor: pointer; font-size: 13px;
+  & .cmd { font-family: monospace; color: var(--accent); flex-shrink: 0; }
+  & .desc { color: var(--text-dim); font-size: 12px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  &:hover, &.sel { background: var(--surface3, var(--bg)); }
 `;
