@@ -67,3 +67,19 @@ class MultiTransport(BaseTransport):
     async def send_app_url(self, url, text, button=""):
         for t in self.transports:
             await t.send_app_url(url, text, button)
+
+    async def send_images(self, paths):
+        for t in self.transports:
+            await t.send_images(paths)
+
+    async def send_files(self, paths):
+        for t in self.transports:
+            await t.send_files(paths)
+
+    async def send_voice(self, audio_path):
+        for t in self.transports:
+            await t.send_voice(audio_path)
+
+    async def send_suggestions(self, text, options):
+        for t in self.transports:
+            await t.send_suggestions(text, options)

@@ -53,3 +53,23 @@ class BaseTransport:
 
     async def send_app_url(self, url: str, text: str, button: str = ""):
         await self.send_message(f"{text}: {url}")
+
+    async def send_images(self, paths: list[str]):
+        """Default: fallback to send_files."""
+        await self.send_files(paths)
+
+    async def send_files(self, paths: list[str]):
+        """Default: список путей текстом."""
+        body = "\n".join(f"📎 {p}" for p in paths)
+        await self.send_message(body)
+
+    async def send_voice(self, audio_path: str):
+        """Default: отправить как файл. Телеграм переопределяет на send_voice note."""
+        await self.send_files([audio_path])
+
+    async def send_suggestions(self, text: str, options: list[str]):
+        """Default: text + нумерованный список. Юзер ответит цифрой или текстом."""
+        body = "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
+        await self.send_message(f"{text}\n\n{body}" if text else body)
+
+

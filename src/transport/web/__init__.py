@@ -364,7 +364,19 @@ class WebTransport(BaseTransport):
     def register_routes(self):
         self.register_route("websocket", "/ws", self._ws)
         self.register_route("get", "/api/commands", self._api_commands)
+        self.register_route("get", "/uploads/{filename:path}", self._serve_upload)
         self.register_route("get", "/{filename:path}", self._static)
+
+    async def _serve_upload(self, filename: str):
+        from fastapi.responses import FileResponse
+        path = os.path.join(self.uploads_dir, filename)
+        # Path traversal guard
+        if not os.path.realpath(path).startswith(os.path.realpath(self.uploads_dir)):
+            return PlainTextResponse("Not found", status_code=404)
+        if not os.path.isfile(path):
+            return PlainTextResponse("Not found", status_code=404)
+        mime, _ = mimetypes.guess_type(path)
+        return FileResponse(path, media_type=mime or "application/octet-stream")
 
     async def _api_commands(self):
         cmds = {
@@ -563,16 +575,11 @@ class WebTransport(BaseTransport):
         return extra + [self._attached_file_part(file_id, filename, field, mime, size, content)]
 
     def _save_with_gc(self, out_path: str, data: bytes):
-        """Пишет файл и заодно сносит всё в uploads_dir старше 24h."""
+        """Пишет файл и заодно прогоняет GC через _gc_uploads — replay-aware,
+        не удалит outbound-файлы на которые ещё есть ссылки в буфере событий."""
         with open(out_path, "wb") as f:
             f.write(data)
-        cutoff = time.time() - 24 * 3600
-        for entry in os.scandir(os.path.dirname(out_path)):
-            try:
-                if entry.is_file() and entry.stat().st_mtime < cutoff:
-                    os.remove(entry.path)
-            except OSError:
-                pass
+        self._gc_uploads()
 
     async def send(self, event: dict, replay=False):
         self._message_id_counter += 1
@@ -635,3 +642,94 @@ class WebTransport(BaseTransport):
 
     async def inject_message(self, text: str):
         await self._transport_event("inject_message", text=text)
+
+    # ─── Outbound media — копируем файл в uploads_dir, фронт получает URL ────
+
+    def _publish_file(self, host_path: str, compress_image: bool = False) -> dict:
+        """Копирует файл в uploads_dir с уникальным именем, возвращает dict
+        с метаданными для WS-события. URL относительный — сам сервер где
+        смонтирован, такой и будет работать (./uploads/...).
+
+        compress_image=True жмёт картинку до 1920×1920 JPEG q85. Симметрично
+        компрессии на инбаунде (Chat.js compressImage)."""
+        import shutil
+        token = uuid.uuid4().hex
+        if compress_image:
+            try:
+                from PIL import Image
+                img = Image.open(host_path)
+                img.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                out_name = f"{token}.jpg"
+                out_path = os.path.join(self.uploads_dir, out_name)
+                img.save(out_path, format="JPEG", quality=85, optimize=True)
+                display_name = os.path.splitext(os.path.basename(host_path))[0] + ".jpg"
+                mime = "image/jpeg"
+            except Exception as e:
+                log.warning("[publish] image compress failed for %s: %s — sending as-is", host_path, e)
+                compress_image = False
+        if not compress_image:
+            ext = os.path.splitext(host_path)[1]
+            out_name = f"{token}{ext}"
+            out_path = os.path.join(self.uploads_dir, out_name)
+            shutil.copyfile(host_path, out_path)
+            display_name = os.path.basename(host_path)
+            mime, _ = mimetypes.guess_type(host_path)
+            mime = mime or "application/octet-stream"
+        result = {
+            "url": f"./uploads/{out_name}",
+            "name": display_name,
+            "size": os.path.getsize(out_path),
+            "mime": mime,
+        }
+        self._gc_uploads()
+        return result
+
+    def _gc_uploads(self):
+        """Удаляет файлы старше суток, на которые нет ссылок в replay-буфере.
+        Если событие с URL ещё в буфере — реконнектящийся клиент получит его
+        и попробует загрузить, поэтому файл нужен."""
+        cutoff = time.time() - 24 * 3600
+        referenced = set()
+        for buf in (self._replay_transport, self._replay_other):
+            for ev in buf:
+                self._collect_upload_names(ev, referenced)
+        for entry in os.scandir(self.uploads_dir):
+            try:
+                if not entry.is_file(): continue
+                if entry.stat().st_mtime >= cutoff: continue
+                if entry.name in referenced: continue
+                os.remove(entry.path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _collect_upload_names(obj, out: set):
+        """Рекурсивно собирает basename'ы файлов uploads из URL'ов вида './uploads/<name>'."""
+        if isinstance(obj, dict):
+            url = obj.get("url")
+            if isinstance(url, str) and "/uploads/" in url:
+                out.add(url.rsplit("/uploads/", 1)[1].split("?", 1)[0].split("#", 1)[0])
+            for v in obj.values():
+                WebTransport._collect_upload_names(v, out)
+        elif isinstance(obj, list):
+            for v in obj:
+                WebTransport._collect_upload_names(v, out)
+
+    async def send_images(self, paths: list[str]):
+        # Картинки сжимаются до 1920×1920 JPEG. Если нужно сохранить качество —
+        # отправляй через send_files.
+        items = [self._publish_file(p, compress_image=True) for p in paths]
+        await self._transport_event("send_images", items=items)
+
+    async def send_files(self, paths: list[str]):
+        items = [self._publish_file(p) for p in paths]
+        await self._transport_event("send_files", items=items)
+
+    async def send_voice(self, audio_path: str):
+        item = self._publish_file(audio_path)
+        await self._transport_event("send_voice", item=item)
+
+    async def send_suggestions(self, text: str, options: list[str]):
+        await self._transport_event("send_suggestions", text=text, options=options)

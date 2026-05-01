@@ -1,4 +1,5 @@
 import { html, Component, css, keyframes } from '../../lib.js';
+import { Lightbox } from './Lightbox.js';
 
 const cl = {};
 
@@ -28,6 +29,13 @@ function mdToHtml(text) {
     inlines.forEach((c, i) => { text = text.replace(`\x00IC${i}\x00`, `<code>${esc(c)}</code>`); });
     blocks.forEach((c, i) => { text = text.replace(`\x00CB${i}\x00`, `<pre><code>${esc(c)}</code></pre>`); });
     return text;
+}
+
+function formatBytes(n) {
+    if (n == null) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
 // Read File → "data:..." dataURL (browser FileReader). Used for images and
@@ -266,6 +274,22 @@ export class Chat extends Component {
             this.setState(({ messages }) => ({
                 messages: [...messages, { kind: 'msg', role: 'inject', text: ev.text }]
             }));
+        } else if (m === 'send_images') {
+            this.setState(({ messages }) => ({
+                messages: [...messages, { kind: 'media', media: 'images', items: ev.items || [] }]
+            }));
+        } else if (m === 'send_files') {
+            this.setState(({ messages }) => ({
+                messages: [...messages, { kind: 'media', media: 'files', items: ev.items || [] }]
+            }));
+        } else if (m === 'send_voice') {
+            this.setState(({ messages }) => ({
+                messages: [...messages, { kind: 'media', media: 'voice', items: [ev.item] }]
+            }));
+        } else if (m === 'send_suggestions') {
+            this.setState(({ messages }) => ({
+                messages: [...messages, { kind: 'suggestions', text: ev.text || '', options: ev.options || [] }]
+            }));
         } else if (m === 'process_message') {
             // Сохраняем структуру: текст + картинки рядом, чтобы при replay
             // картинки тоже отрисовывались. audio к этому моменту уже заменён
@@ -294,6 +318,14 @@ export class Chat extends Component {
         if (this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
     }
 
+
+    _sendOption(opt) {
+        // Юзер кликнул кнопку suggestion — отправляем её текст как обычное сообщение.
+        this.props.app.send({
+            type: 'transport', method: 'process_message',
+            content_parts: [{type: 'text', text: opt}],
+        });
+    }
 
     _submit() {
         const text = this.state.input.trim();
@@ -463,6 +495,47 @@ export class Chat extends Component {
                                     ${open && resultText && html`<div class="result">${resultText}</div>`}
                                 </div>
                             `;
+                        }
+                        if (m.kind === 'media') {
+                            if (m.media === 'images') {
+                                const group = `chat-${i}`;
+                                return html`
+                                    <div class="${cl.msg} assistant ${cl.album}">
+                                        ${m.items.map(it => html`
+                                            <img src=${it.url} alt=${it.name}
+                                                 data-lightbox=${group}
+                                                 class=${cl.albumThumb}
+                                                 onClick=${e => Lightbox.open(e.currentTarget)} />`)}
+                                    </div>`;
+                            }
+                            if (m.media === 'voice') {
+                                const it = m.items[0] || {};
+                                return html`
+                                    <div class="${cl.msg} assistant">
+                                        <audio controls src=${it.url} style="display:block; max-width:100%;"></audio>
+                                    </div>`;
+                            }
+                            // files
+                            return html`
+                                <div class="${cl.msg} assistant">
+                                    ${m.items.map(it => html`
+                                        <a href=${it.url} download=${it.name} class=${cl.fileChip}>
+                                            <span class=${cl.fileChipIcon}>\uD83D\uDCCE</span>
+                                            <span class=${cl.fileChipName}>${it.name}</span>
+                                            <span class=${cl.fileChipSize}>${formatBytes(it.size)}</span>
+                                        </a>`)}
+                                </div>`;
+                        }
+                        if (m.kind === 'suggestions') {
+                            return html`
+                                <div class="${cl.msg} assistant">
+                                    ${m.text && html`<div dangerouslySetInnerHTML=${{__html: mdToHtml(m.text)}}></div>`}
+                                    <div class=${cl.suggestions}>
+                                        ${m.options.map(opt => html`
+                                            <button class=${cl.suggestionBtn}
+                                                    onClick=${() => this._sendOption(opt)}>${opt}</button>`)}
+                                    </div>
+                                </div>`;
                         }
                     })}
                 </div>
@@ -662,4 +735,34 @@ cl.paletteItem = css`
   & .desc { color: var(--text-dim); font-size: 12px;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   &:hover, &.sel { background: var(--surface3, var(--bg)); }
+`;
+cl.album = css`
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 4px;
+`;
+cl.albumThumb = css`
+  height: 120px; width: auto; max-width: 100%;
+  border-radius: 4px;
+  cursor: zoom-in; display: block;
+  &:hover { opacity: 0.85; }
+`;
+cl.fileChip = css`
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; margin: 4px 0;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  text-decoration: none; color: var(--text); font-size: 12px;
+  max-width: 320px;
+  &:hover { background: var(--surface3, var(--surface2)); }
+`;
+cl.fileChipIcon = css`flex-shrink: 0;`;
+cl.fileChipName = css`flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;`;
+cl.fileChipSize = css`color: var(--text-dim); flex-shrink: 0;`;
+cl.suggestions = css`
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
+`;
+cl.suggestionBtn = css`
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 16px;
+  padding: 6px 14px; font-size: 12px; cursor: pointer;
+  &:hover { background: var(--accent); color: #1e1e2e; border-color: var(--accent); }
 `;

@@ -131,68 +131,6 @@ class TelegramSkill(Skill):
             return f"Ты работаешь в группе «{self._chat_title}», топик «{topic}»."
         return f"Ты работаешь в группе «{self._chat_title}»."
 
-    def _resolve_paths(self, paths: list[str]) -> list[str] | dict:
-        host_paths = []
-        for p in paths:
-            # С sandbox'ом — резолвим container-path в host. Без — принимаем
-            # host-абсолютный путь как есть (Claude Code бегает по хосту).
-            if self.sandbox:
-                host_path = self.sandbox.resolve_path(p)
-                if host_path is None:
-                    return {"error": f"Доступ запрещён: {p}"}
-            else:
-                host_path = os.path.abspath(p)
-            if not os.path.exists(host_path):
-                return {"error": f"Файл не найден: {host_path}"}
-            host_paths.append(host_path)
-        return host_paths
-
-    @tool("Отправить один или несколько файлов как группу. Один вызов = одна группа. Для нескольких групп — вызови несколько раз.")
-    async def send_files(self, paths: Annotated[list[str], "Список путей к файлам."]):
-        host_paths = self._resolve_paths(paths)
-        if isinstance(host_paths, dict):
-            return host_paths
-        logging.info("[skill] send_files: %s", host_paths)
-        if len(host_paths) == 1:
-            await self.transport.bot.send_document(self.transport.chat_id, FSInputFile(host_paths[0]), message_thread_id=self.transport.thread_id)
-        else:
-            media = [InputMediaDocument(media=FSInputFile(p)) for p in host_paths]
-            await self.transport.bot.send_media_group(self.transport.chat_id, media, message_thread_id=self.transport.thread_id)
-        return {"status": "ok"}
-
-    @tool("Отправить одно или несколько изображений как альбом (до 10). Один вызов = один альбом. Для нескольких альбомов — вызови несколько раз.")
-    async def send_images(self, paths: Annotated[list[str], "Список путей к изображениям."]):
-        host_paths = self._resolve_paths(paths)
-        if isinstance(host_paths, dict):
-            return host_paths
-        logging.info("[skill] send_images: %s", host_paths)
-        if len(host_paths) == 1:
-            await self.transport.bot.send_photo(self.transport.chat_id, FSInputFile(host_paths[0]), message_thread_id=self.transport.thread_id)
-        else:
-            media = [InputMediaPhoto(media=FSInputFile(p)) for p in host_paths]
-            await self.transport.bot.send_media_group(self.transport.chat_id, media, message_thread_id=self.transport.thread_id)
-        return {"status": "ok"}
-
-    @tool(
-        "Предложить пользователю варианты ответа в виде кнопок под сообщением. "
-        "Пользователь нажимает — его выбор приходит как обычное сообщение. "
-        "ВАЖНО: текст каждой кнопки не должен превышать 57 байт в UTF-8 "
-        "(~28 кириллических символов или ~57 латинских). Если вариант длиннее — сократи его."
-    )
-    async def suggest_user_answers(
-        self,
-        text: Annotated[str, "Текст сообщения перед кнопками"],
-        options: Annotated[list[str], "Варианты ответа. Каждый не длиннее 57 байт в UTF-8"],
-    ):
-        too_long = [opt for opt in options if len(f"answer:{opt}".encode()) > 64]
-        if too_long:
-            return {"error": f"Слишком длинные варианты (>57 байт): {too_long}. Сократи их и вызови снова."}
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=opt, callback_data=f"answer:{opt}") for opt in options]
-        ])
-        await self.transport._send(_markdown_to_html(text), parse_mode="HTML", reply_markup=kb)
-        return {"status": "ok"}
-
     @tool(lambda self: (
         "Скачать файл, отправленный пользователем. "
         "dest_path — путь внутри контейнера (напр. /workspace/file.jpg)."
@@ -242,6 +180,7 @@ class TelegramTransport(BaseTransport):
         self._queue_task: asyncio.Task | None = None
         self._last_edit_texts: dict[int, str] = {}  # msg_id → last sent text
         self._stream_messages: dict[int, list] = {}  # stream_id → list of Message
+        self._suggestion_options: dict[int, list[str]] = {}  # msg_id → options для длинных кнопок
 
     async def send_processing(self, active: bool):
         if active:
@@ -268,6 +207,59 @@ class TelegramTransport(BaseTransport):
 
     def get_skills(self):
         return [TelegramSkill(self)]
+
+    async def send_images(self, paths):
+        if len(paths) == 1:
+            await self.bot.send_photo(self.chat_id, FSInputFile(paths[0]),
+                                      message_thread_id=self.thread_id)
+            return
+        # Telegram album: 10 max per call.
+        for chunk in [paths[i:i+10] for i in range(0, len(paths), 10)]:
+            media = [InputMediaPhoto(media=FSInputFile(p)) for p in chunk]
+            await self.bot.send_media_group(self.chat_id, media,
+                                            message_thread_id=self.thread_id)
+
+    async def send_files(self, paths):
+        if len(paths) == 1:
+            await self.bot.send_document(self.chat_id, FSInputFile(paths[0]),
+                                         message_thread_id=self.thread_id)
+            return
+        for chunk in [paths[i:i+10] for i in range(0, len(paths), 10)]:
+            media = [InputMediaDocument(media=FSInputFile(p)) for p in chunk]
+            await self.bot.send_media_group(self.chat_id, media,
+                                            message_thread_id=self.thread_id)
+
+    async def send_voice(self, audio_path):
+        await self.bot.send_voice(self.chat_id, FSInputFile(audio_path),
+                                  message_thread_id=self.thread_id)
+
+    # Первый emoji в опции — приклеиваем к номеру кнопки для узнаваемости.
+    _EMOJI_RE = re.compile(
+        r"[\U0001F300-\U0001F9FF\U0001FA70-\U0001FAFF"
+        r"\U00002600-\U000026FF\U00002700-\U000027BF]"
+    )
+
+    async def send_suggestions(self, text, options):
+        # Универсальный layout: варианты в теле сообщения нумерованным списком,
+        # кнопки — короткие цифровые лейблы (опционально + emoji из опции).
+        # До 8 кнопок в ряд (Telegram-лимит) — короткие лейблы влезают всегда.
+        lines = [f"{i + 1}. {o}" for i, o in enumerate(options)]
+        body = (text + "\n\n" if text else "") + "\n".join(lines)
+
+        def _label(i, opt):
+            m = self._EMOJI_RE.search(opt)
+            return f"{i + 1} {m.group(0)}" if m else str(i + 1)
+
+        buttons = [
+            InlineKeyboardButton(text=_label(i, o), callback_data=f"answer_idx:{i}")
+            for i, o in enumerate(options)
+        ]
+        rows = [buttons[i:i + 8] for i in range(0, len(buttons), 8)]
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+        msg = await self._send(_markdown_to_html(body), parse_mode="HTML", reply_markup=kb)
+        if msg is not None:
+            self._suggestion_options[msg.message_id] = list(options)
 
     def set_agent(self, agent):
         super().set_agent(agent)
@@ -305,14 +297,14 @@ class TelegramTransport(BaseTransport):
                 link_preview_options=self._no_link_preview,
                 **item["kwargs"],
             )
-            self._last_edit_texts[result.message_id] = result.html_text
+            self._last_edit_texts[result.message_id] = item["text"]
             return result
         elif kind == "edit":
             msg, text = item["msg"], item["text"]
             if self._last_edit_texts.get(msg.message_id) == text:
                 return msg
             result = await msg.edit_text(text, link_preview_options=self._no_link_preview, **item["kwargs"])
-            self._last_edit_texts[msg.message_id] = result.html_text
+            self._last_edit_texts[msg.message_id] = text
             return result
 
     async def _queue_worker(self):
@@ -376,7 +368,7 @@ class TelegramTransport(BaseTransport):
             converter = _markdown_to_html
 
         if max_chunks: overhead += 3
-        raw_chunks = _split_message_to_html(text, converter, max_len=4096 - overhead)            
+        raw_chunks = _split_message_to_html(text, converter, max_len=4096 - overhead)
 
         if max_chunks:
             if len(raw_chunks) > max_chunks:
@@ -385,7 +377,7 @@ class TelegramTransport(BaseTransport):
 
         if expandable:
             tag = "blockquote expandable" if final else "blockquote"
-            bodies = [f"<{tag}>{escaped_prefix}{c}</blockquote>" for c in raw_chunks]
+            bodies = [f"<{tag}>{escaped_prefix}{c.rstrip()}</blockquote>" for c in raw_chunks]
         else:
             bodies = raw_chunks
 
@@ -675,12 +667,19 @@ class TelegramTransport(BaseTransport):
             await callback.answer()
             await callback.message.edit_reply_markup(reply_markup=None)
 
-            if callback.data.startswith("answer:"):
-                text = callback.data[len("answer:"):]
+            if callback.data.startswith("answer_idx:"):
                 tg = await get_transport(chat_id, thread_id)
-                if tg:
-                    await callback.message.answer(text)
-                    await tg.process_message(content_parts=[{"type": "text", "text": text}])
+                if not tg: return
+                try:
+                    idx = int(callback.data[len("answer_idx:"):])
+                except ValueError:
+                    return
+                opts = tg._suggestion_options.pop(callback.message.message_id, None)
+                if not opts or idx >= len(opts):
+                    return
+                text = opts[idx]
+                await callback.message.answer(text)
+                await tg.process_message(content_parts=[{"type": "text", "text": text}])
                 return
 
             if callback.data in ("new_agent_clean", "new_agent_clone"):

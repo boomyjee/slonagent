@@ -138,7 +138,12 @@ class TTSSkill(Skill):
             except Exception:
                 logging.warning("[tts] send_message failed", exc_info=True)
 
-            sent_voice = await self._send_voice(host_path)
+            sent_voice = True
+            try:
+                await self.agent.transport.send_voice(host_path)
+            except Exception:
+                logging.warning("[tts] send_voice failed", exc_info=True)
+                sent_voice = False
         finally:
             try: os.unlink(host_path)
             except OSError: pass
@@ -151,26 +156,3 @@ class TTSSkill(Skill):
             "sent_text_to_user": sent_text,
             "sent_voice_to_user": sent_voice,
         }
-
-    async def _send_voice(self, host_path: str) -> bool:
-        # Аудио — артефакт хоста, поэтому шлём через telegram-bot напрямую,
-        # минуя send_files (тот резолвит пути через sandbox).
-        # send_voice требует OGG/Opus, поэтому конвертация выше обязательна.
-        from aiogram.types import FSInputFile
-        transport = self.agent.transport
-        children = getattr(transport, "transports", [transport])
-        for t in children:
-            bot = getattr(t, "bot", None)
-            chat_id = getattr(t, "chat_id", None)
-            if not (bot and chat_id):
-                continue
-            try:
-                await bot.send_voice(
-                    chat_id, FSInputFile(host_path),
-                    message_thread_id=getattr(t, "thread_id", None),
-                )
-                return True
-            except Exception:
-                logging.warning("[tts] send_voice failed", exc_info=True)
-                return False
-        return False

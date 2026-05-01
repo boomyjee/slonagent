@@ -6,6 +6,7 @@ import httpx
 from src.memory.memory import Memory
 from src.agent.agent_skill import AgentSkill, SubagentSkill
 from src.transport.base import BaseTransport
+from src.agent.transport_skill import TransportSkill
 
 
 class BadFinishReason(Exception):
@@ -68,7 +69,8 @@ class Agent:
     async def add_transport_skills(self):
         if not self.transport:
             return
-        for skill in self.transport.get_skills():
+        # TransportSkill — универсальные send_* тулы поверх любого транспорта.
+        for skill in [TransportSkill(), *self.transport.get_skills()]:
             if skill not in self.skills:
                 skill.register(self)
                 await skill.start()
