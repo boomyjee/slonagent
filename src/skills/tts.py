@@ -131,19 +131,20 @@ class TTSSkill(Skill):
             audio = np.frombuffer(pcm, dtype="<i2")
             sf.write(host_path, audio, sample_rate, format="OGG", subtype="OPUS")
 
-            sent_text = False
-            try:
-                await self.agent.transport.send_message(text)
-                sent_text = True
-            except Exception:
-                logging.warning("[tts] send_message failed", exc_info=True)
-
-            sent_voice = True
             try:
                 await self.agent.transport.send_voice(host_path)
-            except Exception:
+            except Exception as e:
+                # Возвращаем ошибку наверх — агент должен знать что
+                # голосовое не доехало (например телеграм-чат запрещает
+                # voice notes), чтобы выбрать другую стратегию.
                 logging.warning("[tts] send_voice failed", exc_info=True)
-                sent_voice = False
+                return {"error": f"Голосовое не отправилось: {e}"}
+
+            # Текст рядом — вспомогательный канал, его падение не критично.
+            try:
+                await self.agent.transport.send_message(text)
+            except Exception:
+                logging.warning("[tts] send_message failed", exc_info=True)
         finally:
             try: os.unlink(host_path)
             except OSError: pass
@@ -153,6 +154,4 @@ class TTSSkill(Skill):
             "duration_sec": round(len(pcm) / (2 * sample_rate), 2),
             "voice": voice,
             "model": _MODEL_ID,
-            "sent_text_to_user": sent_text,
-            "sent_voice_to_user": sent_voice,
         }
