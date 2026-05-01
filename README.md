@@ -136,7 +136,7 @@ Mastra Observational Memory набирает **94.87%** на LongMemEval — SOT
 
 ## Модель безопасности: выполнение кода
 
-Код выполняется в Podman-контейнере (`python:3.11-slim`), изолированно от хоста. Контейнер персистентный — установленные пакеты и файлы в `/workspace` сохраняются между вызовами.
+Код выполняется в Docker-контейнере (`python:3.11-slim`), изолированно от хоста. Контейнер персистентный — установленные пакеты и файлы в `/workspace` сохраняются между вызовами.
 
 По умолчанию контейнер видит только `/workspace`. Папки хоста подключаются по явному решению пользователя — на чтение или на запись:
 
@@ -157,7 +157,7 @@ Python-скрипты в `/workspace/tools/` автоматически стан
 
 | Скилл | Что делает |
 |---|---|
-| `SandboxSkill` | Работа с кодом в Podman-контейнере: exec, read, edit, write, grep, glob |
+| `SandboxSkill` | Работа с кодом в Docker-контейнере: exec, read, edit, write, grep, glob |
 | `CodingSkill` | Системный промпт и воркфлоу для кодинг-режима в sandbox |
 | `WebSkill` | Поиск в интернете (Brave Search) и скачивание веб-страниц |
 | `NanoBananaSkill` | Генерация и редактирование изображений через Gemini Imagen |
@@ -207,7 +207,7 @@ Python-скрипты в `/workspace/tools/` автоматически стан
 
 **Требования:**
 - Python **3.12** (3.13+ несовместим с некоторыми бинарными зависимостями — `pandas`, `lancedb`)
-- [**Podman**](https://podman.io/) — для `SandboxSkill`. Должен быть доступен в PATH.
+- [**Docker**](https://www.docker.com/) — для `SandboxSkill`. Должен быть доступен в PATH.
 
 ```bash
 git clone https://github.com/boomyjee/slonagent.git

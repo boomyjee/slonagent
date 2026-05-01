@@ -1,7 +1,7 @@
 """HindsightProvider — интеграция с Hindsight.
 
 Поддерживает два режима:
-- Встроенный сервер (base_url не передан): поднимает PostgreSQL в Podman-контейнере
+- Встроенный сервер (base_url не передан): поднимает PostgreSQL в Docker-контейнере
   и запускает HindsightServer в фоновом потоке. Веб-панель доступна по адресу в логе.
 - Внешний сервер (base_url передан): подключается к уже запущенному Hindsight-серверу.
 
@@ -59,14 +59,14 @@ _PG_PASS       = "hindsight"
 _PG_DB         = "hindsight"
 
 
-def _start_podman_postgres() -> str:
+def _start_docker_postgres() -> str:
     """Запускает контейнер PostgreSQL через Podman, возвращает connection URL.
 
     Если контейнер уже запущен — переиспользует его.
     Если контейнер существует, но остановлен — запускает заново.
     """
     result = subprocess.run(
-        ["podman", "inspect", "--format", "{{.State.Status}}", _PG_CONTAINER],
+        ["docker", "inspect", "--format", "{{.State.Status}}", _PG_CONTAINER],
         capture_output=True, text=True,
     )
     status = result.stdout.strip()
@@ -75,12 +75,12 @@ def _start_podman_postgres() -> str:
         log.info("[HindsightProvider] postgres container already running")
     elif status in ("exited", "stopped", "created"):
         log.info("[HindsightProvider] starting existing postgres container")
-        subprocess.run(["podman", "start", _PG_CONTAINER], check=True, capture_output=True)
+        subprocess.run(["docker", "start", _PG_CONTAINER], check=True, capture_output=True)
     else:
         log.info("[HindsightProvider] creating postgres container")
         subprocess.run(
             [
-                "podman", "run", "-d",
+                "docker", "run", "-d",
                 "--name", _PG_CONTAINER,
                 "-p", "5432:5432",
                 "-e", f"POSTGRES_USER={_PG_USER}",
@@ -97,13 +97,13 @@ def _start_podman_postgres() -> str:
     deadline = time.time() + 60
     while time.time() < deadline:
         status_result = subprocess.run(
-            ["podman", "inspect", "--format", "{{.State.Status}}", _PG_CONTAINER],
+            ["docker", "inspect", "--format", "{{.State.Status}}", _PG_CONTAINER],
             capture_output=True, text=True,
         )
         status = status_result.stdout.strip()
         if status in ("exited", "dead", "removing"):
             logs = subprocess.run(
-                ["podman", "logs", "--tail", "20", _PG_CONTAINER],
+                ["docker", "logs", "--tail", "20", _PG_CONTAINER],
                 capture_output=True, text=True, errors="replace",
             )
             raise RuntimeError(
@@ -113,7 +113,7 @@ def _start_podman_postgres() -> str:
             time.sleep(0.5)
             continue
         pg_result = subprocess.run(
-            ["podman", "exec", _PG_CONTAINER, "pg_isready", "-U", _PG_USER],
+            ["docker", "exec", _PG_CONTAINER, "pg_isready", "-U", _PG_USER],
             capture_output=True,
         )
         if pg_result.returncode == 0:
@@ -129,7 +129,7 @@ class HindsightProvider(BaseProvider):
     """
     Провайдер памяти на базе Hindsight.
 
-    Если base_url не передан — поднимает PostgreSQL в Podman-контейнере и запускает
+    Если base_url не передан — поднимает PostgreSQL в Docker-контейнере и запускает
     встроенный HindsightServer (веб-панель доступна локально).
     Если base_url передан — подключается к внешнему серверу.
 
@@ -152,7 +152,7 @@ class HindsightProvider(BaseProvider):
     ):
         """
         Args:
-            base_url: URL сервера. Если None — поднимается Podman-контейнер с PostgreSQL
+            base_url: URL сервера. Если None — поднимается Docker-контейнер с PostgreSQL
                       и запускается встроенный HindsightServer.
             bank_id: Идентификатор банка памяти.
             api_key: API-ключ для авторизации на Hindsight-сервере (если есть).
@@ -178,7 +178,7 @@ class HindsightProvider(BaseProvider):
 
     def _start_server(self):
         from hindsight import HindsightServer
-        pg_url = _start_podman_postgres()
+        pg_url = _start_docker_postgres()
         server = HindsightServer(
             db_url=pg_url,
             llm_provider=self._llm_provider,

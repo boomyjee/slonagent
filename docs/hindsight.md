@@ -7,7 +7,7 @@
 
 ## Запуск сервера (Podman / Docker)
 
-Hindsight поставляется как Docker-образ. Podman полностью совместим — команды идентичны.
+Hindsight поставляется как Docker-образ. Docker полностью совместим — команды идентичны.
 
 ### Переменные окружения
 
@@ -20,7 +20,7 @@ Hindsight поставляется как Docker-образ. Podman полнос
 ### Запуск (встроенная PostgreSQL, всё в одном контейнере)
 
 ```powershell
-podman run --rm -d `
+docker run --rm -d `
   -p 8888:8888 -p 9999:9999 `
   -e HINDSIGHT_API_LLM_PROVIDER=gemini `
   -e HINDSIGHT_API_LLM_API_KEY=<GEMINI_API_KEY> `
@@ -34,7 +34,7 @@ podman run --rm -d `
 ### Остановка
 
 ```powershell
-podman stop $(podman ps -q --filter ancestor=ghcr.io/vectorize-io/hindsight:latest)
+docker stop $(docker ps -q --filter ancestor=ghcr.io/vectorize-io/hindsight:latest)
 ```
 
 ### Проверка работоспособности

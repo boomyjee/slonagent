@@ -5,7 +5,7 @@
     LLM_KEY=<key> venv\\Scripts\\python -m pytest tests/test_integration_providers.py -v -m integration
 
 Тесты автоматически пропускаются если не заданы нужные переменные окружения или
-не установлен Podman.
+не установлен Docker.
 """
 import asyncio
 import json
@@ -37,9 +37,9 @@ def get_llm_config() -> tuple[str, str, str]:
     return key, url, model
 
 
-def require_podman():
-    if subprocess.run(["podman", "--version"], capture_output=True).returncode != 0:
-        pytest.skip("podman не найден")
+def require_docker():
+    if subprocess.run(["docker", "--version"], capture_output=True).returncode != 0:
+        pytest.skip("docker не найден")
 
 
 class PassthroughCompressor(Skill):
@@ -198,12 +198,12 @@ async def test_tool_provider_consolidate(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SandboxSkill — выполнение команды в Podman
+# SandboxSkill — выполнение команды в Docker
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def test_sandbox_exec(tmp_path):
-    """SandboxSkill выполняет команду через Podman и возвращает stdout."""
-    require_podman()
+    """SandboxSkill выполняет команду через Docker и возвращает stdout."""
+    require_docker()
     from src.skills.sandbox import SandboxSkill
 
     container_name = f"slonagent_test_{os.getpid()}"
@@ -212,7 +212,7 @@ async def test_sandbox_exec(tmp_path):
         container_name=container_name,
         image="python:3.11-slim",
         default_timeout=60,
-        runtime="podman",
+        runtime="docker",
     )
     agent, _ = make_agent(tmp_path)
     skill.register(agent)
@@ -228,14 +228,14 @@ async def test_sandbox_exec(tmp_path):
 
 async def test_sandbox_python(tmp_path):
     """SandboxSkill выполняет Python-код в контейнере."""
-    require_podman()
+    require_docker()
     from src.skills.sandbox import SandboxSkill
 
     container_name = f"slonagent_test_py_{os.getpid()}"
     skill = SandboxSkill(
         workspace_dir=str(tmp_path / "workspace"),
         container_name=container_name,
-        runtime="podman",
+        runtime="docker",
     )
     agent, _ = make_agent(tmp_path)
     skill.register(agent)
@@ -251,14 +251,14 @@ async def test_sandbox_python(tmp_path):
 
 async def test_sandbox_timeout(tmp_path):
     """SandboxSkill возвращает ошибку при превышении таймаута."""
-    require_podman()
+    require_docker()
     from src.skills.sandbox import SandboxSkill
 
     container_name = f"slonagent_test_timeout_{os.getpid()}"
     skill = SandboxSkill(
         workspace_dir=str(tmp_path / "workspace"),
         container_name=container_name,
-        runtime="podman",
+        runtime="docker",
     )
     agent, _ = make_agent(tmp_path)
     skill.register(agent)
@@ -274,7 +274,7 @@ async def test_sandbox_timeout(tmp_path):
 
 async def test_sandbox_read_file(tmp_path):
     """read_file читает файл из workspace напрямую с хоста."""
-    require_podman()
+    require_docker()
     from src.skills.sandbox import SandboxSkill
 
     workspace = tmp_path / "workspace"
@@ -282,7 +282,7 @@ async def test_sandbox_read_file(tmp_path):
     (workspace / "notes.txt").write_text("test content\nline two\n", encoding="utf-8")
 
     container_name = f"slonagent_test_rf_{os.getpid()}"
-    skill = SandboxSkill(workspace_dir=str(workspace), container_name=container_name, runtime="podman")
+    skill = SandboxSkill(workspace_dir=str(workspace), container_name=container_name, runtime="docker")
     agent, _ = make_agent(tmp_path)
     skill.register(agent)
     await skill.start()
