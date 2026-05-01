@@ -31,6 +31,8 @@ class FilesAPI:
         t.register_route("put", "/api/file", self.write)
         t.register_route("post", "/api/file/create", self.create)
         t.register_route("patch", "/api/file/rename", self.rename)
+        t.register_route("post", "/api/file/move", self.move)
+        t.register_route("post", "/api/file/copy", self.copy)
         t.register_route("delete", "/api/file", self.delete)
         t.register_route("get", "/api/dirs", self.list_dirs)
 
@@ -152,6 +154,54 @@ class FilesAPI:
             return JSONResponse({"status": "ok", "path": new_path})
         except Exception as e:
             return JSONResponse({"error": str(e)}, 500)
+
+    async def _bulk_transfer(self, request: Request, op: str):
+        """op = 'move' (shutil.move) или 'copy' (shutil.copy2/copytree).
+        body: {paths: [src1, src2, ...], dest_dir: '/some/dir', root?}.
+        Если у источника и цели одинаковая директория — no-op для этого пути."""
+        data = await request.json()
+        paths = data.get("paths") or []
+        dest_dir = data.get("dest_dir")
+        root = data.get("root", "")
+        if not isinstance(paths, list) or not dest_dir:
+            return JSONResponse({"error": "paths[] и dest_dir обязательны"}, 400)
+        dest_host = self.resolve(root, dest_dir)
+        if dest_host is None:
+            return JSONResponse({"error": "No root resolvable"}, 400)
+        if not os.path.isdir(dest_host):
+            return JSONResponse({"error": f"Not a directory: {dest_dir}"}, 400)
+        moved = []
+        errors = {}
+        for p in paths:
+            src = self.resolve(root, p)
+            if src is None:
+                errors[p] = "No root resolvable"
+                continue
+            if not os.path.exists(src):
+                errors[p] = "Not found"
+                continue
+            target = os.path.join(dest_host, os.path.basename(src))
+            if os.path.exists(target):
+                errors[p] = f"Already exists at {dest_dir}"
+                continue
+            try:
+                if op == "move":
+                    shutil.move(src, target)
+                else:  # copy
+                    if os.path.isdir(src):
+                        shutil.copytree(src, target)
+                    else:
+                        shutil.copy2(src, target)
+                moved.append(p)
+            except Exception as e:
+                errors[p] = str(e)
+        return JSONResponse({"status": "ok", "done": moved, "errors": errors})
+
+    async def move(self, request: Request):
+        return await self._bulk_transfer(request, "move")
+
+    async def copy(self, request: Request):
+        return await self._bulk_transfer(request, "copy")
 
     async def delete(self, root: str = Query(""), path: str = Query(...)):
         host = self.resolve(root, path)

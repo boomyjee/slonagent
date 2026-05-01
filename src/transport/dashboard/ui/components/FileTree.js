@@ -80,20 +80,30 @@ const tree = {
     _notify() { this._listener?.(); },
 };
 
-function DirNode({ entry, depth, onOpen, onContextMenu }) {
+function DirNode({ entry, depth, onOpen, onContextMenu, onFileClick, selected, dnd, dragOver }) {
     const open = tree.isOpen(entry.path);
     const children = tree.children[entry.path];
     const pad = (8 + depth * 8) + 'px';
+    const dirHover = dragOver === entry.path ? ' ' + cl.dropTarget : '';
     return html`<div>
-        <div class=${cl.node} style=${{paddingLeft: pad}}
+        <div class="${cl.node}${dirHover}"
+             style=${{paddingLeft: pad}}
+             draggable=${depth > 0 ? "true" : undefined}
+             onDragStart=${ev => depth > 0 && dnd.start(ev, entry)}
+             onDragOver=${ev => dnd.over(ev, entry)}
+             onDragLeave=${ev => dnd.leave(ev, entry)}
+             onDrop=${ev => dnd.drop(ev, entry)}
              onClick=${() => tree.toggle(entry.path)}
              onContextMenu=${e => onContextMenu(e, entry)}>
             <span class=${cl.chevron}>${open ? '▾' : '▸'}</span><span>${entry.name}</span>
         </div>
         ${open && children && children.map(e => e.is_dir
-            ? html`<${DirNode} key=${e.path} entry=${e} depth=${depth + 1} onOpen=${onOpen} onContextMenu=${onContextMenu} />`
-            : html`<div class=${cl.node} style=${{paddingLeft: (8 + (depth+1) * 8) + 'px'}}
-                        onClick=${() => onOpen(e.path, e.name)}
+            ? html`<${DirNode} key=${e.path} entry=${e} depth=${depth + 1} onOpen=${onOpen} onContextMenu=${onContextMenu} onFileClick=${onFileClick} selected=${selected} dnd=${dnd} dragOver=${dragOver} />`
+            : html`<div class="${cl.node}${selected.has(e.path) ? ' ' + cl.selected : ''}"
+                        style=${{paddingLeft: (8 + (depth+1) * 8) + 'px'}}
+                        draggable="true"
+                        onDragStart=${ev => dnd.start(ev, e)}
+                        onClick=${ev => onFileClick(ev, e)}
                         onContextMenu=${ev => onContextMenu(ev, e)}>
                         <span class=${cl.chevron}></span>${fileIcon(e.name)}<span>${e.name}</span></div>`
         )}
@@ -103,7 +113,7 @@ function DirNode({ entry, depth, onOpen, onContextMenu }) {
 export class FileTree extends Component {
     constructor(props) {
         super(props);
-        this.state = { menu: null };
+        this.state = { menu: null, selected: new Set(), dragOver: null };
     }
     componentDidMount() {
         tree._listener = () => this.forceUpdate();
@@ -120,9 +130,33 @@ export class FileTree extends Component {
 
     _closeMenu = () => { if (this.state.menu) this.setState({ menu: null }); };
 
+    _onFileClick = (e, entry) => {
+        // Ctrl/Cmd-click — toggle selection. Plain click — clear selection
+        // and open file as before.
+        if (e.ctrlKey || e.metaKey) {
+            const selected = new Set(this.state.selected);
+            if (selected.has(entry.path)) selected.delete(entry.path);
+            else selected.add(entry.path);
+            this.setState({ selected });
+            return;
+        }
+        if (this.state.selected.size) this.setState({ selected: new Set() });
+        this.props.onOpen(entry.path, entry.name);
+    };
+
     _onContextMenu = (e, entry) => {
-        const items = [];
         const isRoot = entry.path === this.props.rootPath;
+        const selected = this.state.selected;
+        // Multi-select context menu: только когда >1 выделенных и кликнули по
+        // одному из них (по файлу не из выборки — игнорим выборку, обычное меню).
+        if (selected.size > 1 && selected.has(entry.path)) {
+            e.preventDefault();
+            this.setState({ menu: { x: e.clientX, y: e.clientY, items: [
+                { label: `Delete ${selected.size} selected`, action: () => this._deleteSelected() },
+            ]}});
+            return;
+        }
+        const items = [];
         if (entry.is_dir) {
             items.push({ label: 'New file', action: () => this._create(entry, 'file') });
             items.push({ label: 'New folder', action: () => this._create(entry, 'folder') });
@@ -150,6 +184,74 @@ export class FileTree extends Component {
         e.preventDefault();
         this.setState({ menu: { x: e.clientX, y: e.clientY, items } });
     };
+
+    _onDragStart = (e, entry) => {
+        // Если тащим элемент из выборки — тащим всю выборку, иначе только этот.
+        const sel = this.state.selected;
+        const paths = sel.has(entry.path) ? [...sel] : [entry.path];
+        e.dataTransfer.setData("application/x-tree-paths", JSON.stringify(paths));
+        e.dataTransfer.effectAllowed = "copyMove";
+    };
+
+    _onDragOver = (e, dirEntry) => {
+        if (!dirEntry.is_dir) return;
+        if (!e.dataTransfer.types.includes("application/x-tree-paths")) return;
+        e.preventDefault();
+        // Ctrl/Cmd → copy, иначе move. Влияет на курсор.
+        e.dataTransfer.dropEffect = (e.ctrlKey || e.metaKey) ? "copy" : "move";
+        if (this.state.dragOver !== dirEntry.path) {
+            this.setState({ dragOver: dirEntry.path });
+        }
+    };
+
+    _onDragLeave = (e, dirEntry) => {
+        if (this.state.dragOver === dirEntry.path) {
+            this.setState({ dragOver: null });
+        }
+    };
+
+    _onDrop = async (e, dirEntry) => {
+        if (!dirEntry.is_dir) return;
+        e.preventDefault();
+        this.setState({ dragOver: null });
+        const raw = e.dataTransfer.getData("application/x-tree-paths");
+        if (!raw) return;
+        let paths;
+        try { paths = JSON.parse(raw); } catch { return; }
+        // Не дропаем папку саму в себя или внутрь себя.
+        const blocked = paths.filter(p => dirEntry.path === p || dirEntry.path.startsWith(p + "/"));
+        if (blocked.length) return;
+        // Не дропаем в родительскую папку (no-op).
+        const usable = paths.filter(p => (p.substring(0, p.lastIndexOf("/")) || "/") !== dirEntry.path);
+        if (!usable.length) return;
+        const op = (e.ctrlKey || e.metaKey) ? "copy" : "move";
+        const data = await api(`api/file/${op}`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ paths: usable, dest_dir: dirEntry.path }),
+        });
+        if (data.error) { alert(data.error); return; }
+        const errs = data.errors || {};
+        if (Object.keys(errs).length) {
+            alert(`Some failed:\n${Object.entries(errs).map(([p,err]) => `${p}: ${err}`).join('\n')}`);
+        }
+        // tree.refresh достаёт parent из каждого path: src → исходные,
+        // dest sentinel → целевая папка.
+        await tree.refresh([dirEntry.path + '/_', ...usable]);
+        this.setState({ selected: new Set() });
+    };
+
+    async _deleteSelected() {
+        const paths = [...this.state.selected];
+        if (!confirm(`Delete ${paths.length} files?`)) return;
+        const errors = [];
+        for (const path of paths) {
+            const data = await api(`api/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+            if (data.error) errors.push(`${path}: ${data.error}`);
+        }
+        if (errors.length) alert(`Failed:\n${errors.join('\n')}`);
+        await tree.refresh(paths);
+        this.setState({ selected: new Set() });
+    }
 
     async _create(entry, type) {
         const name = prompt(`New ${type} name:`);
@@ -195,15 +297,20 @@ export class FileTree extends Component {
         await tree.refresh([entry.path]);
     }
 
-    render({ rootPath, rootName, onOpen }, { menu }) {
+    render({ rootPath, rootName, onOpen }, { menu, selected, dragOver }) {
         if (!rootPath) return html`<div class=${cl.empty}>No root</div>`;
-        // The root entry is synthetic — server's per-entry has_git only
-        // covers children. Detect "root itself is a repo" by spotting a
-        // `.git` child in the root's listing (loaded once expanded).
         const rootHasGit = (tree.children[rootPath] || []).some(e => e.name === '.git');
         const root = { path: rootPath, name: rootName || rootPath, is_dir: true, has_git: rootHasGit };
+        const dnd = {
+            start: this._onDragStart, over: this._onDragOver,
+            leave: this._onDragLeave, drop: this._onDrop,
+        };
         return html`<div>
-            <${DirNode} entry=${root} depth=${0} onOpen=${onOpen} onContextMenu=${this._onContextMenu} />
+            <${DirNode} entry=${root} depth=${0} onOpen=${onOpen}
+                        onContextMenu=${this._onContextMenu}
+                        onFileClick=${this._onFileClick}
+                        selected=${selected}
+                        dnd=${dnd} dragOver=${dragOver} />
             ${menu && html`
                 <div class=${cl.menu} style=${{left: menu.x + 'px', top: menu.y + 'px'}}>
                     ${menu.items.map(i => html`
@@ -252,7 +359,8 @@ export function isInGitRepo(path) {
 
 cl.node = css`
   display: flex; align-items: center; padding: 2px 8px; cursor: pointer;
-  white-space: nowrap; user-select: none; font-size: 13px;
+  white-space: nowrap; font-size: 13px;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   &:hover { background: var(--surface2); }
 `;
 cl.chevron = css`width: 12px; text-align: center; font-size: 10px; flex-shrink: 0; color: var(--text-dim);`;
@@ -265,8 +373,19 @@ cl.menu = css`
   position: fixed; z-index: 100; min-width: 160px;
   background: var(--surface2); border: 1px solid var(--border);
   box-shadow: 0 4px 12px rgba(0,0,0,0.4); padding: 4px 0;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 `;
 cl.menuItem = css`
   padding: 6px 12px; font-size: 12px; color: var(--text); cursor: pointer;
+  user-select: none; -webkit-user-select: none;
   &:hover { background: var(--accent); color: #1e1e2e; }
+`;
+cl.selected = css`
+  background: var(--accent);
+  color: #1e1e2e;
+  &:hover { background: var(--accent); }
+`;
+cl.dropTarget = css`
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 `;
