@@ -4,11 +4,13 @@ ro/rw bind-mounts, config changes, resolve_path.
 Запуск:
     .venv\\Scripts\\python -m pytest tests/test_sandbox_integration.py -v -m integration
 """
+import asyncio
 import os
 import subprocess
 import sys
 
 import pytest
+import pytest_asyncio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -55,6 +57,10 @@ async def _make_agent(tmp_path):
 
 
 def _cleanup(sb: SandboxSkill):
+    # Если _ensure_container ни разу не успешно отработал — контейнера и образа
+    # нет, podman-вызовы только зря тратят 0.5-1с каждый. Проверяем по hash'у.
+    if getattr(sb, "_mounts_hash", None) is None:
+        return
     try:
         sb.stop()
     except Exception as e:
@@ -69,7 +75,22 @@ def _cleanup(sb: SandboxSkill):
 
 @pytest.fixture
 async def sandbox(tmp_path):
+    """Function-scoped: каждый тест получает свежий Agent+container.
+    Используй для тестов которые меняют config / container lifecycle."""
     agent, sb, cs = await _make_agent(tmp_path)
+    try:
+        yield agent, sb, cs
+    finally:
+        _cleanup(sb)
+
+
+@pytest_asyncio.fixture(loop_scope="session", scope="session")
+async def shared_sandbox(tmp_path_factory):
+    """Session-scoped: один контейнер на весь прогон, для тестов которые
+    запускают exec но не меняют config (TestWorkspace/TestBackgroundShell).
+    Контейнер и образ удаляются один раз в самом конце сессии."""
+    tmp_path = tmp_path_factory.mktemp("shared_sandbox")
+    agent, sb, cs = await _make_agent(str(tmp_path))
     try:
         yield agent, sb, cs
     finally:
@@ -117,34 +138,36 @@ class TestContainerLifecycle:
 
 # ─── Workspace ────────────────────────────────────────────────────────────────
 
+@pytest.mark.asyncio(loop_scope="session")
 class TestWorkspace:
+    """Тесты не меняют config — переиспользуют один контейнер на сессию."""
 
-    async def test_exec_basic_echo(self, sandbox):
-        _, sb, _ = sandbox
+    async def test_exec_basic_echo(self, shared_sandbox):
+        _, sb, _ = shared_sandbox
         r = await sb.exec("echo hello-from-sandbox")
         assert r["exit_code"] == 0
         assert "hello-from-sandbox" in r["stdout"]
 
-    async def test_workspace_persists_between_calls(self, sandbox):
-        _, sb, _ = sandbox
-        await sb.exec("echo persist > /workspace/marker.txt")
-        r = await sb.exec("cat /workspace/marker.txt")
+    async def test_workspace_persists_between_calls(self, shared_sandbox):
+        _, sb, _ = shared_sandbox
+        await sb.exec("echo persist > /workspace/persist_marker.txt")
+        r = await sb.exec("cat /workspace/persist_marker.txt")
         assert "persist" in r["stdout"]
 
-    async def test_workspace_write_visible_on_host(self, sandbox):
-        _, sb, _ = sandbox
-        await sb.exec("echo from-container > /workspace/host.txt")
-        host_path = os.path.join(sb.workspace_dir, "host.txt")
+    async def test_workspace_write_visible_on_host(self, shared_sandbox):
+        _, sb, _ = shared_sandbox
+        await sb.exec("echo from-container > /workspace/visible_host.txt")
+        host_path = os.path.join(sb.workspace_dir, "visible_host.txt")
         assert os.path.exists(host_path)
         assert "from-container" in open(host_path, encoding="utf-8").read()
 
-    async def test_host_write_visible_in_container(self, sandbox):
-        _, sb, _ = sandbox
+    async def test_host_write_visible_in_container(self, shared_sandbox):
+        _, sb, _ = shared_sandbox
         await sb._ensure_container()
-        host_path = os.path.join(sb.workspace_dir, "from_host.txt")
+        host_path = os.path.join(sb.workspace_dir, "visible_container.txt")
         with open(host_path, "w", encoding="utf-8") as f:
             f.write("from host\n")
-        r = await sb.exec("cat /workspace/from_host.txt")
+        r = await sb.exec("cat /workspace/visible_container.txt")
         assert "from host" in r["stdout"]
 
 
@@ -297,6 +320,8 @@ class TestConfigChanges:
 # ─── resolve_path (pure) ─────────────────────────────────────────────────────
 
 class TestResolvePath:
+    """Pure-functional тесты — но кейсы с mount-конфигом меняют ConfigSkill,
+    поэтому используем function-scoped sandbox чтоб тесты не пересекались."""
 
     async def test_workspace_root(self, sandbox):
         _, sb, _ = sandbox
@@ -335,3 +360,303 @@ def _container_subpath(host: str) -> str:
     if len(p) >= 2 and p[1] == ":":
         return p[0] + "/" + p[2:].lstrip("/")
     return p.lstrip("/")
+
+
+# ─── Read tool ────────────────────────────────────────────────────────────────
+
+class TestRead:
+    """read должен возвращать контент с padded line numbers (Claude Code addLineNumbers формат)."""
+
+    async def test_padded_line_numbers(self, sandbox):
+        _, sb, _ = sandbox
+        with open(os.path.join(sb.workspace_dir, "read_basic.py"), "w", encoding="utf-8") as f:
+            f.write("def foo():\n    return 1\n")
+        r = sb.read("/workspace/read_basic.py")
+        assert "content" in r, r
+        # Right-aligned in 6-char field, then arrow.
+        assert r["content"].startswith("     1→def foo():\n     2→    return 1\n"), r["content"]
+        assert r["total_lines"] == 2
+        assert r["returned_lines"] == 2
+
+    async def test_offset_and_limit(self, sandbox):
+        _, sb, _ = sandbox
+        path = os.path.join(sb.workspace_dir, "read_range.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(f"line{i}" for i in range(1, 11)) + "\n")
+        r = sb.read("/workspace/read_range.txt", offset=3, limit=2)
+        assert r["returned_lines"] == 2
+        assert r["offset"] == 3
+        assert "     3→line3" in r["content"]
+        assert "     4→line4" in r["content"]
+        assert "line5" not in r["content"]
+
+    async def test_image_returns_parts(self, sandbox):
+        _, sb, _ = sandbox
+        # Smallest valid PNG (1x1 transparent).
+        png_bytes = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000d49444154789c6300010000000500010d0a2db40000000049454e44ae426082"
+        )
+        path = os.path.join(sb.workspace_dir, "tiny.png")
+        with open(path, "wb") as f:
+            f.write(png_bytes)
+        r = sb.read("/workspace/tiny.png")
+        assert "_parts" in r
+        assert r["_parts"][0]["type"] == "image_url"
+        assert r["_parts"][0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+# ─── Grep tool ────────────────────────────────────────────────────────────────
+
+class TestGrep:
+
+    @staticmethod
+    def _setup(sb):
+        for sub in ("", "sub", ".git"):
+            os.makedirs(os.path.join(sb.workspace_dir, sub), exist_ok=True)
+        with open(os.path.join(sb.workspace_dir, "a.py"), "w", encoding="utf-8") as f:
+            f.write("def foo():\n    return 1\n")
+        with open(os.path.join(sb.workspace_dir, "b.js"), "w", encoding="utf-8") as f:
+            f.write("function FOO() { return 2; }\n")
+        with open(os.path.join(sb.workspace_dir, "sub", "c.py"), "w", encoding="utf-8") as f:
+            f.write("class Bar:\n    pass\n")
+        with open(os.path.join(sb.workspace_dir, ".git", "noise.py"), "w", encoding="utf-8") as f:
+            f.write("def hidden():\n    return 0\n")
+
+    async def test_default_mode_files_with_matches(self, sandbox):
+        _, sb, _ = sandbox
+        self._setup(sb)
+        r = sb.grep(pattern=r"\bfoo\b", path="/workspace")
+        assert r["mode"] == "files_with_matches"
+        # default case-sensitive: "FOO" в b.js не матчится \bfoo\b
+        assert "a.py" in r["filenames"]
+        assert "b.js" not in r["filenames"]
+
+    async def test_vcs_dirs_excluded(self, sandbox):
+        _, sb, _ = sandbox
+        self._setup(sb)
+        r = sb.grep(pattern="def", path="/workspace")
+        assert all(".git" not in f for f in r["filenames"]), r["filenames"]
+
+    async def test_type_filter(self, sandbox):
+        _, sb, _ = sandbox
+        self._setup(sb)
+        r_py = sb.grep(pattern="return", path="/workspace", type="py")
+        assert "a.py" in r_py["filenames"]
+        assert "b.js" not in r_py["filenames"]
+        r_js = sb.grep(pattern="return", path="/workspace", type="js")
+        assert "a.py" not in r_js["filenames"]
+        assert "b.js" in r_js["filenames"]
+
+    async def test_glob_filter(self, sandbox):
+        _, sb, _ = sandbox
+        self._setup(sb)
+        r = sb.grep(pattern="return", path="/workspace", glob="*.py")
+        assert "a.py" in r["filenames"]
+        assert "b.js" not in r["filenames"]
+
+    async def test_case_insensitive(self, sandbox):
+        _, sb, _ = sandbox
+        self._setup(sb)
+        r = sb.grep(pattern="foo", path="/workspace", case_insensitive=True)
+        # b.js имеет FOO uppercase
+        assert "b.js" in r["filenames"]
+        assert "a.py" in r["filenames"]
+
+    async def test_content_with_context(self, sandbox):
+        _, sb, _ = sandbox
+        self._setup(sb)
+        r = sb.grep(pattern="return", path="/workspace", output_mode="content", context=1)
+        assert r["mode"] == "content"
+        # Контекст: для return в a.py должен также вытянуть def foo()
+        assert "a.py:1:def foo():" in r["content"]
+        assert "a.py:2:    return 1" in r["content"]
+
+    async def test_content_no_line_numbers(self, sandbox):
+        _, sb, _ = sandbox
+        self._setup(sb)
+        r = sb.grep(pattern="return", path="/workspace", output_mode="content", line_numbers=False)
+        # Без номеров: формат a.py:contents
+        assert any(line.startswith("a.py:    return") for line in r["content"].split("\n")), r["content"]
+
+    async def test_count_mode(self, sandbox):
+        _, sb, _ = sandbox
+        self._setup(sb)
+        r = sb.grep(pattern="def", path="/workspace", output_mode="count")
+        assert r["mode"] == "count"
+        assert r["numFiles"] >= 1
+        assert r["numMatches"] >= 1
+        assert "a.py:1" in r["content"]
+
+    async def test_pagination(self, sandbox):
+        _, sb, _ = sandbox
+        for i in range(5):
+            with open(os.path.join(sb.workspace_dir, f"f{i}.py"), "w", encoding="utf-8") as f:
+                f.write("hit\n")
+        r1 = sb.grep(pattern="hit", path="/workspace", head_limit=2, offset=0)
+        assert r1["numFiles"] == 2
+        assert r1.get("appliedLimit") == 2
+        r2 = sb.grep(pattern="hit", path="/workspace", head_limit=2, offset=2)
+        assert r2["numFiles"] == 2
+        assert r2.get("appliedOffset") == 2
+        # Не пересекаются
+        assert set(r1["filenames"]).isdisjoint(set(r2["filenames"]))
+
+    async def test_multiline(self, sandbox):
+        _, sb, _ = sandbox
+        with open(os.path.join(sb.workspace_dir, "ml.py"), "w", encoding="utf-8") as f:
+            f.write("class Foo:\n    pass\n\nclass Bar:\n    pass\n")
+        # Pattern that spans newline: class \w+:\n.*pass
+        r = sb.grep(pattern=r"class \w+:\n\s+pass", path="/workspace", multiline=True, output_mode="content")
+        assert r["mode"] == "content"
+        assert "ml.py" in r["content"]
+
+
+# ─── Glob tool ────────────────────────────────────────────────────────────────
+
+class TestGlob:
+
+    async def test_recursive_double_star(self, sandbox):
+        _, sb, _ = sandbox
+        os.makedirs(os.path.join(sb.workspace_dir, "deep", "nested"), exist_ok=True)
+        for p in ("a.py", "deep/b.py", "deep/nested/c.py"):
+            with open(os.path.join(sb.workspace_dir, p), "w") as f: f.write("x")
+        r = sb.glob(pattern="**/*.py", path="/workspace")
+        names = set(r["filenames"])
+        assert "a.py" in names
+        assert "deep/b.py" in names
+        assert "deep/nested/c.py" in names
+
+    async def test_brace_expansion(self, sandbox):
+        _, sb, _ = sandbox
+        for p in ("x.ts", "y.tsx", "z.js"):
+            with open(os.path.join(sb.workspace_dir, p), "w") as f: f.write("x")
+        r = sb.glob(pattern="*.{ts,tsx}", path="/workspace")
+        names = set(r["filenames"])
+        assert "x.ts" in names
+        assert "y.tsx" in names
+        assert "z.js" not in names
+
+    async def test_mtime_sort_oldest_first(self, sandbox):
+        _, sb, _ = sandbox
+        import time
+        # Создаём в обратном алфавитном порядке.
+        for name in ("c.txt", "b.txt", "a.txt"):
+            with open(os.path.join(sb.workspace_dir, name), "w") as f: f.write("x")
+            time.sleep(0.05)
+        r = sb.glob(pattern="*.txt", path="/workspace")
+        # oldest first — c.txt создан первым, a.txt последним.
+        assert r["filenames"] == ["c.txt", "b.txt", "a.txt"], r["filenames"]
+
+    async def test_vcs_excluded(self, sandbox):
+        _, sb, _ = sandbox
+        os.makedirs(os.path.join(sb.workspace_dir, ".git"), exist_ok=True)
+        with open(os.path.join(sb.workspace_dir, "real.py"), "w") as f: f.write("x")
+        with open(os.path.join(sb.workspace_dir, ".git", "noise.py"), "w") as f: f.write("x")
+        r = sb.glob(pattern="**/*.py", path="/workspace")
+        assert "real.py" in r["filenames"]
+        assert all(".git" not in f for f in r["filenames"])
+
+
+# ─── MultiEdit tool ───────────────────────────────────────────────────────────
+
+class TestMultiEdit:
+
+    async def test_sequential_edits(self, sandbox):
+        _, sb, _ = sandbox
+        path = os.path.join(sb.workspace_dir, "me.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("foo\nbar\nbaz\n")
+        r = sb.multi_edit(path="/workspace/me.py", edits=[
+            {"old_string": "foo", "new_string": "FOO"},
+            {"old_string": "bar", "new_string": "BAR"},
+        ])
+        assert r["status"] == "ok"
+        assert r["edits"] == 2
+        assert open(path, encoding="utf-8").read() == "FOO\nBAR\nbaz\n"
+
+    async def test_rollback_on_failure(self, sandbox):
+        _, sb, _ = sandbox
+        path = os.path.join(sb.workspace_dir, "me_fail.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("alpha\nbeta\n")
+        original = open(path, encoding="utf-8").read()
+        r = sb.multi_edit(path="/workspace/me_fail.py", edits=[
+            {"old_string": "alpha", "new_string": "AAA"},
+            {"old_string": "NOTHERE", "new_string": "X"},
+        ])
+        assert "error" in r
+        # Файл не должен измениться.
+        assert open(path, encoding="utf-8").read() == original
+
+    async def test_replace_all_per_edit(self, sandbox):
+        _, sb, _ = sandbox
+        path = os.path.join(sb.workspace_dir, "me_all.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("x x x\n")
+        r = sb.multi_edit(path="/workspace/me_all.py", edits=[
+            {"old_string": "x", "new_string": "Y", "replace_all": True},
+        ])
+        assert r["status"] == "ok"
+        assert open(path, encoding="utf-8").read() == "Y Y Y\n"
+
+    async def test_unique_required_without_replace_all(self, sandbox):
+        _, sb, _ = sandbox
+        path = os.path.join(sb.workspace_dir, "me_unique.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("dup\ndup\n")
+        r = sb.multi_edit(path="/workspace/me_unique.py", edits=[
+            {"old_string": "dup", "new_string": "X"},
+        ])
+        assert "error" in r
+        assert "найден" in r["error"]
+
+
+# ─── Background shell ─────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio(loop_scope="session")
+class TestBackgroundShell:
+    """Тесты не меняют config — переиспользуют один контейнер на сессию."""
+
+    async def test_background_runs_and_kill(self, shared_sandbox):
+        _, sb, _ = shared_sandbox
+        # Долгоиграющий цикл который шлёт строки в stdout каждые 0.2с.
+        cmd = "for i in $(seq 1 50); do echo line-$i; sleep 0.2; done"
+        r = await sb.exec(command=cmd, background=True)
+        assert "shell_id" in r, r
+        assert r["pid"] > 0
+        sid = r["shell_id"]
+
+        # Дать процессу выдать пару строк.
+        await asyncio.sleep(0.6)
+
+        rs = await sb.read_shell(shell_id=sid)
+        assert "output" in rs, rs
+        assert "line-1" in rs["output"]
+        assert rs["alive"] is True
+
+        # Прибиваем.
+        rk = await sb.kill_shell(shell_id=sid)
+        assert rk["status"] == "killed"
+
+        await asyncio.sleep(0.3)
+        rs2 = await sb.read_shell(shell_id=sid)
+        assert rs2["alive"] is False
+
+    async def test_completed_process_marked_dead(self, shared_sandbox):
+        _, sb, _ = shared_sandbox
+        r = await sb.exec(command="echo hello-bg && sleep 0.3", background=True)
+        assert "shell_id" in r
+        sid = r["shell_id"]
+        # Wait for it to exit.
+        await asyncio.sleep(1.0)
+        rs = await sb.read_shell(shell_id=sid)
+        assert "hello-bg" in rs["output"]
+        assert rs["alive"] is False
+
+    async def test_invalid_shell_id(self, shared_sandbox):
+        _, sb, _ = shared_sandbox
+        r = await sb.read_shell(shell_id="not-a-real-id")
+        assert "error" in r
+        r = await sb.kill_shell(shell_id="invalid")
+        assert "error" in r

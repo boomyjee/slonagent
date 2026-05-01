@@ -38,8 +38,14 @@ class Skill:
 
         def param_schema(hint, desc) -> dict:
             _JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean"}
+            def _item(h):
+                if h is dict or get_origin(h) is dict:
+                    return {"type": "object"}
+                return {"type": _JSON_TYPES.get(h, "string")}
             if get_origin(hint) is list:
-                schema = {"type": "array", "items": {"type": _JSON_TYPES.get(get_args(hint)[0], "string")}}
+                schema = {"type": "array", "items": _item(get_args(hint)[0])}
+            elif hint is dict or get_origin(hint) is dict:
+                schema = {"type": "object"}
             else:
                 schema = {"type": _JSON_TYPES.get(hint, "string")}
             if desc:

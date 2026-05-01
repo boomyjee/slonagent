@@ -1,8 +1,10 @@
-import asyncio, base64, hashlib, json, os, re, logging, subprocess, threading
+import asyncio, base64, hashlib, json, os, re, logging, shlex, subprocess, threading
 from typing import Annotated
 from agent import Skill, tool
 
 from src.skills.sandbox import script_tools
+
+_SHELL_LOG_DIR = "/tmp/_sandbox_shells"
 
 
 class SandboxSkill(Skill):
@@ -219,7 +221,9 @@ class SandboxSkill(Skill):
         return await asyncio.to_thread(subprocess.run, *args, **kwargs)
 
     def stop(self):
-        subprocess.run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
+        # `-t 0` пропускает 10-секундное ожидание SIGTERM. Контейнер крутит
+        # `sleep infinity` — терять там нечего, можно сразу SIGKILL.
+        subprocess.run([self.runtime, "rm", "-f", "-t", "0", self.container_name], capture_output=True)
         logging.info("[exec] Контейнер %s остановлен", self.container_name)
 
     def _volume_args(self):
@@ -292,7 +296,7 @@ class SandboxSkill(Skill):
             elif actual_mounts != desired_mounts:
                 logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
                 await self._run([self.runtime, "commit", self.container_name, env_image], check=True)
-                await self._run([self.runtime, "rm", "-f", self.container_name], capture_output=True)
+                await self._run([self.runtime, "rm", "-f", "-t", "0", self.container_name], capture_output=True)
                 await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
                 logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
         self._mounts_hash = new_hash
@@ -300,22 +304,52 @@ class SandboxSkill(Skill):
     @tool(
         "Выполнить команду внутри Docker-контейнера. "
         "Всегда доступна директория /workspace. "
-        "Папки хост-машины монтируются по WSL-схеме: C:\\\\foo → /mnt/c/foo."
+        "Папки хост-машины монтируются по WSL-схеме: C:\\\\foo → /mnt/c/foo. "
+        "background=true для долгоживущих процессов (сервер, watcher) — вернёт shell_id, "
+        "читать вывод через sandbox_read_shell, убивать через sandbox_kill_shell."
     )
     async def exec(
         self,
         command: Annotated[str, "Строка команды для выполнения (bash/sh синтаксис)."],
-        timeout: Annotated[int, "Таймаут в секундах (по умолчанию 120)."] = None,
+        timeout: Annotated[int, "Таймаут в секундах (по умолчанию 120). Игнорируется в background-режиме."] = None,
         workdir: Annotated[str, "Рабочая директория внутри контейнера (по умолчанию /workspace)."] = "/workspace",
+        background: Annotated[bool, "Запустить в фоне и сразу вернуть shell_id."] = False,
     ):
-        if timeout is None:
-            timeout = self.default_timeout
-
         try:
             await self._ensure_container()
         except Exception as e:
             return {"error": f"Не удалось запустить контейнер: {e}"}
 
+        if background:
+            # mv после запуска: nohup пишет в .tmp лог, мы переименовываем в {pid}.log
+            # (mv в пределах одной FS не закрывает open fd — процесс продолжает писать
+            # в тот же inode по новому имени).
+            # ВАЖНО: TMP=... должен быть отдельным statement'ом до `&`, иначе
+            # `&&` цепляется к `&` и присваивание уезжает в фоновый сабшелл.
+            wrapped = (
+                f"mkdir -p {_SHELL_LOG_DIR}; "
+                f"TMP={_SHELL_LOG_DIR}/.tmp.$$.log; "
+                f"nohup bash -lc {shlex.quote(command)} > $TMP 2>&1 & "
+                f"PID=$!; "
+                f"mv $TMP {_SHELL_LOG_DIR}/$PID.log; "
+                f"echo $PID"
+            )
+            docker_cmd = [self.runtime, "exec", "-e", "PYTHONPATH=/slonagent", "-w", workdir,
+                          self.container_name, "bash", "-lc", wrapped]
+            logging.info("[exec] background: %s", command)
+            try:
+                proc = await self._run(docker_cmd, capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace", timeout=10)
+            except Exception as e:
+                return {"error": f"Не удалось запустить фоновый процесс: {e}"}
+            pid = proc.stdout.strip()
+            if not pid.isdigit():
+                return {"error": f"Не удалось получить pid: {proc.stdout!r} / {proc.stderr!r}"}
+            return {"shell_id": f"sh_{pid}", "pid": int(pid),
+                    "log": f"{_SHELL_LOG_DIR}/{pid}.log"}
+
+        if timeout is None:
+            timeout = self.default_timeout
         docker_cmd = [self.runtime, "exec", "-e", "PYTHONPATH=/slonagent", "-w", workdir, self.container_name, "bash", "-lc", command]
         logging.info("[exec] Запуск команды: %s", command)
 
@@ -354,6 +388,61 @@ class SandboxSkill(Skill):
 
         return {**res, "stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
 
+    @tool("Прочитать накопленный вывод фонового процесса по shell_id из exec(background=true). "
+          "Возвращает {output, alive, lines_total}.")
+    async def read_shell(
+        self,
+        shell_id: Annotated[str, "shell_id из exec(background=true)."],
+        offset: Annotated[int, "С какой строки читать (1-based, по умолчанию 1)."] = 1,
+        limit: Annotated[int, "Максимум строк (по умолчанию 500)."] = 500,
+    ):
+        if not shell_id.startswith("sh_") or not shell_id[3:].isdigit():
+            return {"error": f"Невалидный shell_id: {shell_id}"}
+        pid = shell_id[3:]
+        log_path = f"{_SHELL_LOG_DIR}/{pid}.log"
+        # Liveness: процесс жив только если /proc/$PID существует И состояние не Z (zombie).
+        # `kill -0` возвращает success на zombie'ах, поэтому отдельно проверяем State.
+        cmd = (
+            f"P={shlex.quote(pid)}; F={shlex.quote(log_path)}; "
+            f"if [ ! -f \"$F\" ]; then echo __NOLOG__; exit 0; fi; "
+            f"echo __TOTAL__$(wc -l < \"$F\"); "
+            f"sed -n {int(offset)},{int(offset)+int(limit)-1}p \"$F\"; "
+            f"if [ -e /proc/$P/status ] && [ \"$(awk '/^State:/ {{print $2}}' /proc/$P/status 2>/dev/null)\" != Z ]; then "
+            f"echo __ALIVE__1; else echo __ALIVE__0; fi"
+        )
+        proc = await self._run(
+            [self.runtime, "exec", self.container_name, "bash", "-lc", cmd],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+        )
+        out = proc.stdout
+        if "__NOLOG__" in out:
+            return {"error": f"Лог не найден: {log_path}"}
+        total = 0
+        alive = False
+        lines = []
+        for line in out.splitlines():
+            if line.startswith("__TOTAL__"):
+                try: total = int(line[9:])
+                except ValueError: pass
+            elif line.startswith("__ALIVE__"):
+                alive = line.endswith("1")
+            else:
+                lines.append(line)
+        return {"output": "\n".join(lines), "alive": alive, "lines_total": total, "offset": offset}
+
+    @tool("Прибить фоновый процесс по shell_id. SIGTERM, через 0.5с SIGKILL если выжил.")
+    async def kill_shell(
+        self,
+        shell_id: Annotated[str, "shell_id из exec(background=true)."],
+    ):
+        if not shell_id.startswith("sh_") or not shell_id[3:].isdigit():
+            return {"error": f"Невалидный shell_id: {shell_id}"}
+        pid = shell_id[3:]
+        cmd = f"kill -TERM {pid} 2>/dev/null; sleep 0.5; kill -KILL {pid} 2>/dev/null; true"
+        await self._run([self.runtime, "exec", self.container_name, "bash", "-lc", cmd],
+                        capture_output=True, text=True, timeout=10)
+        return {"status": "killed", "pid": int(pid)}
+
     _IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp"}
     _IMAGE_MIME = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
                    "gif": "image/gif", "webp": "image/webp"}
@@ -366,7 +455,8 @@ class SandboxSkill(Skill):
             return None, {"error": f"Файл не найден: {path}"}
         return host_path, None
 
-    @tool("Прочитать файл. Текстовые файлы возвращают содержимое, изображения передаются в LLM для анализа.")
+    @tool("Прочитать файл. Текстовые файлы возвращают содержимое с префиксом номера строки "
+          "(`<lineno>→<line>`), изображения передаются в LLM для анализа.")
     def read(
         self,
         path: Annotated[str, "Путь к файлу (например /workspace/notes.txt или /mnt/c/project/main.py)."],
@@ -387,7 +477,17 @@ class SandboxSkill(Skill):
                 lines = f.readlines()
             start = max(0, offset - 1)
             chunk = lines[start:start + limit]
-            return {"content": "".join(chunk), "total_lines": len(lines), "returned_lines": len(chunk), "offset": start + 1}
+            # Match Claude Code's addLineNumbers: правое выравнивание в 6 символов,
+            # стрелка-разделитель. Числа ≥6 знаков выводятся без паддинга.
+            def _fmt(n: int, line: str) -> str:
+                ns = str(n)
+                prefix = ns if len(ns) >= 6 else ns.rjust(6)
+                if not line.endswith("\n"):
+                    line += "\n"
+                return f"{prefix}→{line}"
+            numbered = "".join(_fmt(start + i + 1, line) for i, line in enumerate(chunk))
+            return {"content": numbered, "total_lines": len(lines),
+                    "returned_lines": len(chunk), "offset": start + 1}
         except Exception as e:
             return {"error": str(e)}
 
@@ -417,6 +517,44 @@ class SandboxSkill(Skill):
         except Exception as e:
             return {"error": str(e)}
 
+    @tool("Применить несколько edit-операций к файлу атомарно. "
+          "edits — список {old_string, new_string, replace_all?}. "
+          "Если хоть одна не сматчится — НИКАКАЯ не применяется (rollback в памяти до записи).")
+    def multi_edit(
+        self,
+        path: Annotated[str, "Путь к файлу."],
+        edits: Annotated[list[dict], "Список объектов {old_string, new_string, replace_all?:bool}. Применяются последовательно."],
+    ):
+        host_path, err = self._check_path(path)
+        if err:
+            return err
+        if not edits:
+            return {"error": "edits пустой"}
+        try:
+            with open(host_path, encoding="utf-8") as f:
+                content = f.read()
+            replacements = []
+            for i, edit in enumerate(edits, 1):
+                if not isinstance(edit, dict):
+                    return {"error": f"edit #{i}: не объект"}
+                old = edit.get("old_string")
+                new = edit.get("new_string")
+                if old is None or new is None:
+                    return {"error": f"edit #{i}: нужны old_string и new_string"}
+                replace_all = bool(edit.get("replace_all", False))
+                count = content.count(old)
+                if count == 0:
+                    return {"error": f"edit #{i}: old_string не найден"}
+                if count > 1 and not replace_all:
+                    return {"error": f"edit #{i}: old_string найден {count} раз — установи replace_all=true или дай больше контекста"}
+                content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
+                replacements.append(count if replace_all else 1)
+            with open(host_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {"status": "ok", "edits": len(edits), "replacements": replacements}
+        except Exception as e:
+            return {"error": str(e)}
+
     @tool("Создать новый файл или полностью перезаписать существующий.")
     def write(
         self,
@@ -434,64 +572,226 @@ class SandboxSkill(Skill):
         except Exception as e:
             return {"error": str(e)}
 
-    @tool("Поиск текста по файлам (regex). Возвращает совпавшие строки с номерами.")
+    _VCS_EXCLUDE = {".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
+
+    # Минимальный mapping rg --type → glob-патернов. Не полный, но покрывает
+    # самые частые языки. Для редких типов лучше явный glob.
+    _RG_TYPES = {
+        "py": ["*.py", "*.pyi"],
+        "js": ["*.js", "*.mjs", "*.cjs", "*.jsx"],
+        "ts": ["*.ts", "*.tsx"],
+        "rust": ["*.rs"], "rs": ["*.rs"],
+        "go": ["*.go"],
+        "java": ["*.java"],
+        "c": ["*.c", "*.h"],
+        "cpp": ["*.cpp", "*.cxx", "*.cc", "*.hpp", "*.hxx", "*.hh"],
+        "rb": ["*.rb"], "ruby": ["*.rb"],
+        "sh": ["*.sh", "*.bash"],
+        "html": ["*.html", "*.htm"],
+        "css": ["*.css"],
+        "json": ["*.json"],
+        "yaml": ["*.yml", "*.yaml"],
+        "md": ["*.md", "*.markdown"],
+        "toml": ["*.toml"],
+        "xml": ["*.xml"],
+    }
+
+    @tool("Поиск текста по файлам (regex). "
+          "Дефолтный output_mode='files_with_matches' возвращает только пути (отсортировано по mtime). "
+          "'content' возвращает строки с номерами + контекстом (-A/-B/-C или context). "
+          "'count' возвращает счётчик матчей по файлам. "
+          "Авто-исключаются VCS-директории (.git, .svn, .hg, .bzr, .jj, .sl).")
     def grep(
         self,
         pattern: Annotated[str, "Регулярное выражение для поиска."],
         path: Annotated[str, "Путь к файлу или директории."],
-        glob_filter: Annotated[str, "Фильтр файлов, например *.py (опционально)."] = "",
-        max_results: Annotated[int, "Максимум результатов. По умолчанию 50."] = 50,
+        glob: Annotated[str, "Glob-фильтр файлов, например '*.py' или '*.{ts,tsx}'."] = "",
+        type: Annotated[str, "Тип файлов (rg --type): py, js, ts, rust, go, java, c, cpp, rb, sh, html, css, json, yaml, md, toml, xml."] = "",
+        output_mode: Annotated[str, "'content' | 'files_with_matches' (дефолт) | 'count'."] = "files_with_matches",
+        head_limit: Annotated[int, "Максимум результатов. По умолчанию 250. 0 = без лимита."] = 250,
+        offset: Annotated[int, "Сколько результатов пропустить (для пагинации). По умолчанию 0."] = 0,
+        context: Annotated[int, "Симметричный контекст (-C): N строк до и после. Применяется в content."] = 0,
+        before: Annotated[int, "Контекст перед матчем (-B). Игнорируется если задан context."] = 0,
+        after: Annotated[int, "Контекст после матча (-A). Игнорируется если задан context."] = 0,
+        case_insensitive: Annotated[bool, "Регистронезависимый поиск (-i)."] = False,
+        line_numbers: Annotated[bool, "Показывать номера строк в content-режиме (-n). Дефолт true."] = True,
+        multiline: Annotated[bool, "Многострочный матчинг (-U --multiline-dotall)."] = False,
     ):
         import re, fnmatch
         host_path, err = self._check_path(path)
         if err:
             return err
+        flags = 0
+        if case_insensitive: flags |= re.IGNORECASE
+        if multiline: flags |= re.MULTILINE | re.DOTALL
         try:
-            regex = re.compile(pattern)
+            regex = re.compile(pattern, flags)
         except re.error as e:
             return {"error": f"Невалидный regex: {e}"}
-        results = []
+        if output_mode not in ("content", "files_with_matches", "count"):
+            return {"error": f"Неизвестный output_mode: {output_mode}"}
+
+        # Файлы для скана.
+        type_globs = self._RG_TYPES.get(type.lower()) if type else None
+        glob_patterns = [glob] if glob else None
+
+        def _matches_filter(fname: str) -> bool:
+            if glob_patterns and not any(fnmatch.fnmatch(fname, g) for g in glob_patterns):
+                return False
+            if type_globs and not any(fnmatch.fnmatch(fname, g) for g in type_globs):
+                return False
+            return True
+
         files = []
         if os.path.isfile(host_path):
             files = [host_path]
         else:
-            for root, _, fnames in os.walk(host_path):
+            for root, dirs, fnames in os.walk(host_path):
+                # Исключаем VCS-директории.
+                dirs[:] = [d for d in dirs if d not in self._VCS_EXCLUDE]
                 for fn in fnames:
-                    if glob_filter and not fnmatch.fnmatch(fn, glob_filter):
+                    if not _matches_filter(fn):
                         continue
                     files.append(os.path.join(root, fn))
+
+        def rel(fp):
+            r = os.path.relpath(fp, host_path) if os.path.isdir(host_path) else os.path.basename(fp)
+            return r.replace(os.sep, "/")
+
+        def _apply_pagination(items: list) -> tuple[list, int | None]:
+            """[items, applied_limit_if_truncated]. head_limit=0 → без лимита."""
+            sliced = items[offset:]
+            if head_limit == 0:
+                return sliced, None
+            limit = head_limit
+            truncated = len(sliced) > limit
+            return sliced[:limit], (limit if truncated else None)
+
+        if output_mode == "files_with_matches":
+            matched = []
+            for fpath in files:
+                try:
+                    with open(fpath, encoding="utf-8", errors="replace") as f:
+                        if regex.search(f.read()):
+                            matched.append(fpath)
+                except (UnicodeDecodeError, PermissionError):
+                    continue
+            # Сортировка по mtime (oldest first) — как rg --sort=modified.
+            try:
+                matched.sort(key=lambda p: os.path.getmtime(p))
+            except OSError:
+                pass
+            paged, applied = _apply_pagination(matched)
+            result = {"mode": "files_with_matches",
+                      "filenames": [rel(p) for p in paged],
+                      "numFiles": len(paged)}
+            if applied is not None: result["appliedLimit"] = applied
+            if offset: result["appliedOffset"] = offset
+            return result
+
+        if output_mode == "count":
+            entries = []
+            for fpath in files:
+                try:
+                    with open(fpath, encoding="utf-8", errors="replace") as f:
+                        n = len(regex.findall(f.read()))
+                    if n: entries.append((rel(fpath), n))
+                except (UnicodeDecodeError, PermissionError):
+                    continue
+            paged, applied = _apply_pagination(entries)
+            content_lines = [f"{p}:{n}" for p, n in paged]
+            result = {"mode": "count",
+                      "content": "\n".join(content_lines),
+                      "filenames": [],
+                      "numFiles": len(paged),
+                      "numMatches": sum(n for _, n in paged)}
+            if applied is not None: result["appliedLimit"] = applied
+            if offset: result["appliedOffset"] = offset
+            return result
+
+        # output_mode == "content"
+        # Контекст: -C / context имеет приоритет над -B/-A.
+        ctx_before = context if context else before
+        ctx_after = context if context else after
+        all_lines = []
         for fpath in files:
             try:
                 with open(fpath, encoding="utf-8", errors="replace") as f:
-                    for i, line in enumerate(f, 1):
-                        if regex.search(line):
-                            rel = os.path.relpath(fpath, host_path) if os.path.isdir(host_path) else os.path.basename(fpath)
-                            results.append(f"{rel}:{i}: {line.rstrip()}")
-                            if len(results) >= max_results:
-                                return {"matches": results, "truncated": True}
+                    text = f.read()
             except (UnicodeDecodeError, PermissionError):
                 continue
-        return {"matches": results, "truncated": False}
+            file_lines = text.splitlines()
+            r = rel(fpath)
+            def _fmt(line_idx: int) -> str:  # 0-based -> с/без номера
+                num = line_idx + 1
+                body = file_lines[line_idx] if line_idx < len(file_lines) else ""
+                return f"{r}:{num}:{body}" if line_numbers else f"{r}:{body}"
+            if multiline:
+                for m in regex.finditer(text):
+                    start_line = text[:m.start()].count("\n")
+                    end_line = start_line + m.group(0).count("\n")
+                    for i in range(start_line, end_line + 1):
+                        if i < len(file_lines):
+                            all_lines.append(_fmt(i))
+            else:
+                for i, line in enumerate(file_lines):
+                    if regex.search(line):
+                        lo = max(0, i - ctx_before)
+                        hi = min(len(file_lines) - 1, i + ctx_after)
+                        for j in range(lo, hi + 1):
+                            all_lines.append(_fmt(j))
+        paged, applied = _apply_pagination(all_lines)
+        result = {"mode": "content",
+                  "content": "\n".join(paged),
+                  "numFiles": 0,
+                  "filenames": [],
+                  "numLines": len(paged)}
+        if applied is not None: result["appliedLimit"] = applied
+        if offset: result["appliedOffset"] = offset
+        return result
 
-    @tool("Найти файлы по glob-паттерну.")
+    @tool("Найти файлы по glob-паттерну. Поддерживает '**' для рекурсии и {a,b} для альтернатив. "
+          "Сортирует по mtime (oldest first, как rg --sort=modified). "
+          "Авто-исключаются VCS-директории (.git и т.п.). Лимит 100, флаг truncated если обрезано.")
     def glob(
         self,
-        pattern: Annotated[str, "Glob-паттерн, например **/*.py или *.txt."],
+        pattern: Annotated[str, "Glob-паттерн, например **/*.py или *.{ts,tsx}."],
         path: Annotated[str, "Директория для поиска."],
     ):
-        import fnmatch
+        import glob as glob_module
         host_path, err = self._check_path(path)
         if err:
             return err
         if not os.path.isdir(host_path):
             return {"error": f"Не директория: {path}"}
-        matches = []
-        for root, dirs, fnames in os.walk(host_path):
-            # Skip hidden dirs
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for fn in fnames:
-                rel = os.path.relpath(os.path.join(root, fn), host_path).replace(os.sep, "/")
-                if fnmatch.fnmatch(rel, pattern):
-                    matches.append(rel)
-        matches.sort()
-        return {"files": matches[:500], "total": len(matches)}
+        # Поддержка brace-expansion: *.{ts,tsx} → [*.ts, *.tsx].
+        expanded = []
+        m = re.match(r"^(.*)\{([^}]+)\}(.*)$", pattern)
+        if m:
+            pre, opts, post = m.group(1), m.group(2), m.group(3)
+            for o in opts.split(","):
+                expanded.append(f"{pre}{o.strip()}{post}")
+        else:
+            expanded = [pattern]
+        matches: dict[str, float] = {}
+        for pat in expanded:
+            full_pat = os.path.join(host_path, pat)
+            for fpath in glob_module.iglob(full_pat, recursive=True):
+                if not os.path.isfile(fpath):
+                    continue
+                rel_path = os.path.relpath(fpath, host_path).replace(os.sep, "/")
+                # Исключаем VCS-директории на любом уровне.
+                if any(part in self._VCS_EXCLUDE for part in rel_path.split("/")):
+                    continue
+                try:
+                    mtime = os.path.getmtime(fpath)
+                except OSError:
+                    mtime = 0.0
+                matches[rel_path] = mtime
+        # rg --sort=modified — ascending (oldest first).
+        ordered = sorted(matches.items(), key=lambda x: x[1])
+        LIMIT = 100
+        truncated = len(ordered) > LIMIT
+        return {"filenames": [p for p, _ in ordered[:LIMIT]],
+                "numFiles": min(len(ordered), LIMIT),
+                "truncated": truncated}
