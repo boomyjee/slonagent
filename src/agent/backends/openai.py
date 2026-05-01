@@ -67,20 +67,7 @@ class OpenAIBackend(BaseBackend):
                 tc_counter = 0
                 seen = {}
 
-                # Дамп всех чанков последнего тура — для отладки проблем
-                # с разделением мыслей и текста (см. fix(agent): split thoughts).
-                # Файл очищается в начале тура (handle_turn), здесь только дописываем.
-                # Эфемерным агентам (memory_dir="") дамп не нужен — иначе мусор
-                # лежит в cwd через os.path.join("", ...).
-                chunk_dump = None
-                if agent.memory.memory_dir:
-                    chunk_dump_path = os.path.join(agent.memory.memory_dir, "last_turn_chunks.log")
-                    chunk_dump = open(chunk_dump_path, "a", encoding="utf-8")
-
                 async for chunk in stream:
-                    if chunk_dump is not None:
-                        chunk_dump.write(chunk.model_dump_json(exclude_none=False) + "\n")
-                        chunk_dump.flush()
                     # Gemini шлёт role="assistant" в каждом чанке — openai-аккумулятор
                     # склеит в "assistantassistant…", оставляем только из первого.
                     # thought=true приходит в каждом thinking-чанке; на финальной
@@ -133,10 +120,6 @@ class OpenAIBackend(BaseBackend):
                         else:
                             display_text += content
                             await agent.transport.send_message(display_text, stream_id, final=False)
-
-                if chunk_dump is not None:
-                    try: chunk_dump.close()
-                    except Exception: pass
 
                 if display_thinking and not display_text:
                     await agent.transport.send_thinking(display_thinking, thinking_id, final=True)
