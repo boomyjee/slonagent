@@ -1,14 +1,20 @@
-import os, shutil
+import asyncio, os, shutil
 from agent import Skill
 from src.memory.memory import load_turns_json, save_turns_json, Memory
 
 class BaseProvider(Skill):
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls._pending_by_dir = {}
+        cls._locks = {}
+
     def __init__(self, consolidate_tokens: int = 1_000):
         super().__init__()
-        self.folder_name = type(self).__name__.lower().removesuffix("provider")
+        self.folder_name = type(self).__name__.lower().removesuffix("provider").removesuffix("compressor")
         self.consolidate_tokens = consolidate_tokens
-        self._pending: list = []
+        self._pending = None
         self._pending_file: str | None = None
+        self.cls = type(self)
 
     @property
     def provider_dir(self) -> str:
@@ -29,15 +35,21 @@ class BaseProvider(Skill):
                 self.agent.memory.memory_dir,
                 f"PENDING_{type(self).__name__.lower()}.json",
             )
-            self._pending = load_turns_json(self._pending_file)
+            md = self.agent.memory.memory_dir
+            if md not in self.cls._pending_by_dir:
+                self.cls._pending_by_dir[md] = load_turns_json(self._pending_file)
+            self._pending = self.cls._pending_by_dir[md]
 
     async def add_turn(self, turn):
         if self.consolidate_tokens == 0 or not isinstance(turn, dict): return
         self._pending.append(turn)
         if turn.get("role") == "assistant" and not turn.get("tool_calls"):
             if Memory.count_tokens(self._pending) >= self.consolidate_tokens:
-                await self._consolidate(self._pending)
-                self._pending = []
+                snapshot = list(self._pending)
+                self._pending.clear()
+                md = self.agent.memory.memory_dir
+                async with self.cls._locks.setdefault(md, asyncio.Lock()):
+                    await self._consolidate(snapshot)
             save_turns_json(self._pending_file, self._pending)
 
     async def _consolidate(self, pending):

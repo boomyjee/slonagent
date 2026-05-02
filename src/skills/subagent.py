@@ -59,7 +59,9 @@ class SubAgentSkill(Skill):
                 self.result = text
                 return stream_id
 
-        class PassthroughCompressor(Skill):
+        from src.memory.providers.base import BaseProvider
+        class PassthroughCompressor(BaseProvider):
+            def __init__(self): super().__init__(consolidate_tokens=0)
             async def compress(self, turns: list) -> list:
                 return turns
 

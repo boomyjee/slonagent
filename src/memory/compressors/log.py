@@ -9,13 +9,13 @@ compress(turns) → recent_turns. Старые сообщения уплотня
 В контекст LLM наблюдения попадают через get_context_prompt — оба бэкенда
 зовут его в общем skill-loop системного промпта.
 """
-import asyncio
 import logging
 import os
 import re
 from datetime import datetime
 from agent import Skill, Agent
 from src.memory.memory import Memory
+from src.memory.providers.base import BaseProvider
 
 # ── Observer prompts (Mastra observer-agent.ts, single-thread) ─────────────────
 
@@ -612,7 +612,7 @@ def _optimize_for_context(observations: str) -> str:
 
 # ── Provider ──────────────────────────────────────────────────────────────────
 
-class LogCompressor(Skill):
+class LogCompressor(BaseProvider):
     """
     Компрессор истории на основе Mastra Observational Memory.
 
@@ -622,10 +622,6 @@ class LogCompressor(Skill):
 
     OM_turn персистируется в истории через memory.py как обычный turn.
     """
-
-    # Лок на memory_dir — два транспорта-треда одного агента не должны
-    # одновременно гонять observer и перетирать друг друга в LOG.md.
-    _locks: dict[str, asyncio.Lock] = {}
 
     def __init__(self, model_name: str, api_key: str = "", base_url: str = "",
                  backend: str = "openai", backend_params: dict | None = None,
@@ -678,40 +674,62 @@ class LogCompressor(Skill):
         )
 
     async def compress(self, turns: list) -> list:
-        turns = [t for t in turns if not (isinstance(t, dict) and t.get("_observation_message"))]
-        to_observe, recent = self._split_recent(turns)
+        turns = [t for t in turns if not t.get("_observation_message")]
+        kept = []
+        recent_size = 0
+        for turn in reversed(turns):
+            if turn.get("_observed"):
+                cost = Memory.count_tokens([turn])
+                if recent_size + cost > self._max_recent_turns_tokens:  break
+                if recent_size + cost > self._recent_tokens and len(kept) >= self._min_recent_turns: break
+                recent_size += cost
+            kept.append(turn)
+        kept.reverse()
+        while kept and kept[0].get("role") == "tool": kept.pop(0)
+        return kept
 
-        if Memory.count_tokens(to_observe) < self._compress_after_tokens:
-            return turns
+    async def _consolidate(self, turns: list) -> None:
+        by_thread = {}
+        for turn in turns:
+            by_thread.setdefault(turn.get("_thread_id", ""), []).append(turn)
 
-        lock = self._locks.setdefault(self.agent.memory.memory_dir, asyncio.Lock())
-        async with lock:
-            existing_observations = self._read_log()
-            await self.send_memory_info("", cont=False)
-            await self.send_memory_info(f"Уплотняю память: наблюдаю за {len(to_observe)} сообщениями…")
-            new_obs = await self._run_observer(to_observe, existing_observations)
-            if not new_obs:
-                log.warning("[LogCompressor] Observer returned empty")
-                await self.send_memory_info("Observer вернул пусто, пропускаю", final=True)
-                return turns
+        existing_observations = self._read_log()
+        await self.send_memory_info("", cont=False)
 
-            updated = (existing_observations + "\n\n" + new_obs).strip() if existing_observations else new_obs
+        new_obs_parts = []
+        for tid, thread_turns in by_thread.items():
+            label = f"thread {tid}" if tid else "default"
+            await self.send_memory_info(f"Уплотняю память: наблюдаю за {len(thread_turns)} сообщениями ({label})…")
+            obs = await self._run_observer(thread_turns, existing_observations)
+            if not obs:
+                continue
+            new_obs_parts.append(f'<thread id="{tid}">\n{obs}\n</thread>')
 
-            new_obs_tokens = Memory.count_tokens([{"role": "user", "content": new_obs}])
-            await self.send_memory_info(f"+{new_obs_tokens} токенов наблюдений")
+        if not new_obs_parts:
+            log.warning("[LogCompressor] Observer returned empty")
+            await self.send_memory_info("Observer вернул пусто, пропускаю", final=True)
+            return
 
-            obs_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
-            if obs_tokens >= self._reflect_after_tokens:
-                updated = await self._run_reflector(updated) or updated
+        new_obs = "\n\n".join(new_obs_parts)
+        updated = (existing_observations + "\n\n" + new_obs).strip() if existing_observations else new_obs
 
-            self._write_log(updated)
-        log.info("[LogCompressor] %d → LOG.md + %d recent turns", len(to_observe), len(recent))
+        new_obs_tokens = Memory.count_tokens([{"role": "user", "content": new_obs}])
+        await self.send_memory_info(f"+{new_obs_tokens} токенов наблюдений")
+
+        obs_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
+        if obs_tokens >= self._reflect_after_tokens:
+            updated = await self._run_reflector(updated) or updated
+
+        self._write_log(updated)
+        for t in turns:
+            if isinstance(t, dict):
+                t["_observed"] = True
+        log.info("[LogCompressor] %d turns from %d thread(s) → LOG.md", len(turns), len(by_thread))
         final_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
         await self.send_memory_info(
-            f"Свернул {len(to_observe)} сообщений в наблюдения ({final_tokens} токенов), оставил {len(recent)} recent",
+            f"Свернул {len(turns)} сообщений в наблюдения ({final_tokens} токенов)",
             final=True,
         )
-        return recent
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -731,32 +749,6 @@ class LogCompressor(Skill):
                 f.write(observations)
         except Exception as e:
             log.warning("[LogCompressor] write LOG.md failed: %s", e, exc_info=True)
-
-    def _split_recent(self, turns: list) -> tuple[list, list]:
-        """Отделяет recent_turns (последние до recent_tokens) от turns для наблюдения.
-
-        Гарантирует не менее min_recent_turns шагов в recent, даже если они превышают бюджет токенов.
-        Никогда не разрывает пару assistant(tool_calls) + tool: если граница попадает внутрь пары,
-        tool-туры сдвигаются в to_observe вместе с вызовом.
-        """
-        recent_budget = self._recent_tokens
-        recent, tokens = [], 0
-        for turn in reversed(turns):
-            t = Memory.count_tokens([turn])
-            if tokens + t > self._max_recent_turns_tokens:
-                break
-            if tokens + t > recent_budget and len(recent) >= self._min_recent_turns:
-                break
-            recent.append(turn)
-            tokens += t
-        recent.reverse()
-        to_observe = turns[:len(turns) - len(recent)]
-
-        # Не допускаем, чтобы recent начинался с tool-тура без парного assistant перед ним.
-        while recent and isinstance(recent[0], dict) and recent[0].get("role") == "tool":
-            to_observe.append(recent.pop(0))
-
-        return to_observe, recent
 
     async def _generate(self, label: str, system: str, messages: list, **kwargs) -> str:
         if not hasattr(self, "_llm_agent"):

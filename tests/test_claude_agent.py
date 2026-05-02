@@ -19,6 +19,7 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 from agent import Skill, tool
+from src.memory.providers.base import BaseProvider
 from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,

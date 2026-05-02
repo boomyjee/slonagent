@@ -25,9 +25,11 @@ from src.memory.compressors.log import (
     LogCompressor,
 )
 from agent import Skill
+from src.memory.providers.base import BaseProvider
 
 
-class PassthroughCompressor(Skill):
+class PassthroughCompressor(BaseProvider):
+    def __init__(self): super().__init__(consolidate_tokens=0)
     async def compress(self, turns): return turns
 
 
@@ -176,121 +178,68 @@ class TestAddRelativeTime:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LogCompressor._split_recent
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestSplitRecent:
-
-    def _make_compressor(self, recent_tokens=500, min_recent_turns=2):
-        return LogCompressor(
-            model_name="test", api_key="test", base_url="http://test",
-            recent_tokens=recent_tokens,
-            min_recent_turns=min_recent_turns,
-            compress_after_tokens=1,
-            reflect_after_tokens=999999,
-        )
-
-    def test_all_recent_when_small(self):
-        c = self._make_compressor(recent_tokens=999999)
-        turns = make_turns(6)
-        to_obs, recent = c._split_recent(turns)
-        assert to_obs == []
-        assert recent == turns
-
-    def test_old_turns_go_to_observe(self):
-        c = self._make_compressor(recent_tokens=100, min_recent_turns=0)
-        turns = make_turns(10, chars=200)
-        to_obs, recent = c._split_recent(turns)
-        assert len(to_obs) > 0
-        assert len(recent) > 0
-        assert to_obs + recent == turns
-
-    def test_min_recent_turns_respected(self):
-        # Даже если budget исчерпан раньше — гарантируем min_recent_turns
-        c = self._make_compressor(recent_tokens=1, min_recent_turns=3)
-        turns = make_turns(6, chars=200)
-        _, recent = c._split_recent(turns)
-        assert len(recent) >= 3
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LogCompressor.compress — с мок LLM
+# LogCompressor.compress — keep recent + unobserved
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestLogCompressorCompress:
 
-    def _make_compressor(self, tmp_path):
+    def _make_compressor(self, tmp_path, **kwargs):
         agent = make_agent(tmp_path)
         c = LogCompressor(
             model_name="test", api_key="test", base_url="http://test",
-            recent_tokens=100,
-            min_recent_turns=1,
-            compress_after_tokens=1,
-            reflect_after_tokens=999999,
+            recent_tokens=kwargs.get("recent_tokens", 100),
+            min_recent_turns=kwargs.get("min_recent_turns", 1),
+            max_recent_turns_tokens=kwargs.get("max_recent_turns_tokens", 50_000),
+            compress_after_tokens=kwargs.get("compress_after_tokens", 30_000),
+            reflect_after_tokens=kwargs.get("reflect_after_tokens", 999_999),
         )
         c.register(agent)
         return c
 
-    def _mock_llm(self, c, response_text: str):
-        # После рефакторинга LogCompressor строит inner Agent лениво в _generate.
-        # Подменяем его готовым моком до первого вызова compress().
-        fake = MagicMock()
-        fake.memory.clear = MagicMock()
-        fake.memory.add_turn = AsyncMock()
-        fake.llm = AsyncMock(return_value={"role": "assistant", "content": response_text})
-        c._llm_agent = fake
-        return fake
-
     @pytest.mark.asyncio
-    async def test_returns_all_turns_below_threshold(self, tmp_path):
-        c = LogCompressor(
-            model_name="test", api_key="test", base_url="http://test",
-            compress_after_tokens=999999,
-        )
-        c.register(make_agent(tmp_path))
-        turns = make_turns(4)
+    async def test_keeps_all_turns_when_all_unobserved(self, tmp_path):
+        c = self._make_compressor(tmp_path)
+        turns = make_turns(6, chars=500)  # все unobserved
         result = await c.compress(turns)
         assert result == turns
 
     @pytest.mark.asyncio
-    async def test_compress_produces_om_turn_plus_recent(self, tmp_path):
-        c = self._make_compressor(tmp_path)
-        obs_text = "<observations>\n* 🔴 (10:00) User said hello.\n</observations>"
-        self._mock_llm(c, obs_text)
-
+    async def test_trims_observed_to_recent_budget(self, tmp_path):
+        c = self._make_compressor(tmp_path, recent_tokens=50, min_recent_turns=1)
         turns = make_turns(10, chars=500)
+        for t in turns:
+            t["_observed"] = True
         result = await c.compress(turns)
-
-        om_turns = [t for t in result if isinstance(t, dict) and t.get("_observation_message")]
-        assert len(om_turns) == 1
-        assert "_raw_observations" in om_turns[0]
+        assert 1 <= len(result) < len(turns)
+        assert result == turns[-len(result):]
 
     @pytest.mark.asyncio
-    async def test_compress_om_turn_is_first(self, tmp_path):
-        c = self._make_compressor(tmp_path)
-        obs_text = "<observations>\n* 🔴 item\n</observations>"
-        self._mock_llm(c, obs_text)
-
-        result = await c.compress(make_turns(10, chars=500))
-        assert result[0].get("_observation_message") is True
+    async def test_min_recent_turns_floor(self, tmp_path):
+        c = self._make_compressor(tmp_path, recent_tokens=1, min_recent_turns=3)
+        turns = make_turns(6, chars=200)
+        for t in turns:
+            t["_observed"] = True
+        result = await c.compress(turns)
+        assert len(result) >= 3
 
     @pytest.mark.asyncio
-    async def test_existing_om_turn_updated(self, tmp_path):
+    async def test_unobserved_kept_beyond_recent_budget(self, tmp_path):
+        c = self._make_compressor(tmp_path, recent_tokens=50, min_recent_turns=0)
+        turns = make_turns(10, chars=500)
+        # старые observed, новые unobserved
+        for t in turns[:6]:
+            t["_observed"] = True
+        result = await c.compress(turns)
+        # 4 unobserved обязательно в keep, observed — по бюджету
+        assert all(t in result for t in turns[6:])
+
+    @pytest.mark.asyncio
+    async def test_observation_message_filtered(self, tmp_path):
         c = self._make_compressor(tmp_path)
-        self._mock_llm(c, "<observations>\n* 🔴 new obs\n</observations>")
-
-        existing_om = {
-            "role": "user",
-            "content": "old observations block",
-            "_observation_message": True,
-            "_raw_observations": "Date: Jan 1, 2025\n* 🔴 old obs",
-        }
-        new_turns = make_turns(6, chars=500)
-        result = await c.compress([existing_om] + new_turns)
-
-        om = next(t for t in result if isinstance(t, dict) and t.get("_observation_message"))
-        assert "old obs" in om["_raw_observations"]
-        assert "new obs" in om["_raw_observations"]
+        om = {"role": "user", "content": "obs", "_observation_message": True}
+        turns = [om] + make_turns(4, chars=100)
+        result = await c.compress(turns)
+        assert om not in result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -314,54 +263,10 @@ class TestOptimizeForContextCollapsed:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# _split_recent — tool-pair boundary
+# LogCompressor._consolidate — observer + reflector через mock LLM
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestSplitRecentToolPair:
-
-    def _make_compressor(self, recent_tokens=99999, min_recent_turns=0):
-        return LogCompressor(
-            model_name="test", api_key="test", base_url="http://test",
-            recent_tokens=recent_tokens,
-            min_recent_turns=min_recent_turns,
-            compress_after_tokens=1,
-            reflect_after_tokens=999999,
-        )
-
-    def test_tool_turn_not_first_in_recent(self):
-        """recent не должен начинаться с tool-тура без парного assistant перед ним."""
-        turns = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
-            {"role": "tool", "tool_call_id": "1", "content": "result"},
-            {"role": "assistant", "content": "done"},
-        ]
-        c = self._make_compressor(recent_tokens=1, min_recent_turns=0)
-        to_obs, recent = c._split_recent(turns)
-        assert not (recent and isinstance(recent[0], dict) and recent[0].get("role") == "tool")
-
-    def test_tool_turns_moved_to_observe(self):
-        """Если граница режет между assistant(tool_calls) и tool — tool уходит в to_observe."""
-        tool_turn = {"role": "tool", "tool_call_id": "1", "content": "x" * 200}
-        turns = [
-            {"role": "user", "content": "q"},
-            {"role": "assistant", "content": None, "tool_calls": []},
-            tool_turn,
-            {"role": "user", "content": "x" * 200},
-            {"role": "assistant", "content": "x" * 200},
-        ]
-        c = self._make_compressor(recent_tokens=120, min_recent_turns=0)
-        to_obs, recent = c._split_recent(turns)
-        if recent and recent[0].get("role") == "tool":
-            pytest.fail("recent starts with tool turn")
-        assert to_obs + recent == turns
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# compress — edge cases
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestLogCompressorEdgeCases:
+class TestLogCompressorConsolidate:
 
     def _make_compressor(self, tmp_path, reflect_after=999999):
         agent = make_agent(tmp_path)
@@ -384,28 +289,49 @@ class TestLogCompressorEdgeCases:
         return fake
 
     @pytest.mark.asyncio
-    async def test_observer_empty_returns_original_turns(self, tmp_path):
-        """Если observer вернул пустую строку — turns не меняются."""
+    async def test_observer_empty_does_nothing(self, tmp_path):
         c = self._make_compressor(tmp_path)
         self._mock_llm(c, "")
-        turns = make_turns(10, chars=500)
-        result = await c.compress(turns)
-        assert result == turns
+        turns = make_turns(4, chars=200)
+        await c._consolidate(turns)
+        # LOG.md не появился
+        assert not os.path.exists(c._log_path())
+        # _observed не проставлен (observer вернул пусто)
+        assert not any(t.get("_observed") for t in turns)
+
+    @pytest.mark.asyncio
+    async def test_observer_writes_log_and_marks_observed(self, tmp_path):
+        c = self._make_compressor(tmp_path)
+        self._mock_llm(c, "<observations>\n* 🔴 hello\n</observations>")
+        turns = make_turns(4, chars=200)
+        await c._consolidate(turns)
+        assert os.path.exists(c._log_path())
+        assert all(t.get("_observed") for t in turns)
+        log_content = c._read_log()
+        assert "hello" in log_content
+
+    @pytest.mark.asyncio
+    async def test_thread_grouping_wraps_each(self, tmp_path):
+        c = self._make_compressor(tmp_path)
+        self._mock_llm(c, "<observations>\n* 🔴 obs\n</observations>")
+        turns = [
+            {"role": "user", "content": "a", "_thread_id": "t1"},
+            {"role": "assistant", "content": "b", "_thread_id": "t1"},
+            {"role": "user", "content": "c", "_thread_id": "t2"},
+            {"role": "assistant", "content": "d", "_thread_id": "t2"},
+        ]
+        await c._consolidate(turns)
+        log_content = c._read_log()
+        assert '<thread id="t1">' in log_content
+        assert '<thread id="t2">' in log_content
 
     @pytest.mark.asyncio
     async def test_reflector_triggered_when_obs_exceed_threshold(self, tmp_path):
-        """Рефлектор вызывается когда observations превышают reflect_after_tokens."""
-        # reflect_after=50: big_obs (~100 токенов) триггерит рефлектор,
-        # small_reflected (~10 токенов) — под порогом, эскалация не нужна
         c = self._make_compressor(tmp_path, reflect_after=50)
-
-        # observer возвращает большой блок (~100 токенов)
         big_obs = "<observations>\n* 🔴 (10:00) " + "x" * 400 + "\n</observations>"
-        # reflector возвращает маленький — под порогом reflect_after=50
         small_reflected = "<observations>\n* 🔴 (10:00) condensed\n</observations>"
 
         call_count = 0
-
         async def side_effect(**kwargs):
             nonlocal call_count
             call_count += 1
@@ -413,24 +339,18 @@ class TestLogCompressorEdgeCases:
 
         fake = self._mock_llm(c, "")
         fake.llm = AsyncMock(side_effect=side_effect)
-        result = await c.compress(make_turns(10, chars=500))
+        await c._consolidate(make_turns(4, chars=200))
 
         assert call_count == 2
-        om = next(t for t in result if isinstance(t, dict) and t.get("_observation_message"))
-        assert "condensed" in om["_raw_observations"]
+        assert "condensed" in c._read_log()
 
     @pytest.mark.asyncio
     async def test_reflector_escalates_compression_level(self, tmp_path):
-        """Если reflector не сжимает — уровень растёт до тех пор пока не достигнет 4."""
         c = self._make_compressor(tmp_path, reflect_after=1)
-
-        # observer даёт 400 символов → ~100 токенов
         big_obs = "* 🔴 (10:00) " + "x" * 400
         obs_response = f"<observations>\n{big_obs}\n</observations>"
 
-        # reflector всегда возвращает такой же размер → не сжимает → уровень растёт
         call_count = 0
-
         async def side_effect(**kwargs):
             nonlocal call_count
             call_count += 1
@@ -438,25 +358,10 @@ class TestLogCompressorEdgeCases:
 
         fake = self._mock_llm(c, "")
         fake.llm = AsyncMock(side_effect=side_effect)
-        await c.compress(make_turns(10, chars=500))
+        await c._consolidate(make_turns(4, chars=200))
 
-        # 1 вызов observer + 5 вызовов reflector (уровни 0→1→2→3→4, на 4 останавливается)
+        # 1 observer + 5 reflector (уровни 0→1→2→3→4)
         assert call_count == 6
-
-    @pytest.mark.asyncio
-    async def test_compress_no_to_observe_returns_original(self, tmp_path):
-        """Если все turns попали в recent — turns не меняются."""
-        c = LogCompressor(
-            model_name="test", api_key="test", base_url="http://test",
-            recent_tokens=999999,
-            min_recent_turns=0,
-            compress_after_tokens=1,
-            reflect_after_tokens=999999,
-        )
-        c.register(make_agent(tmp_path))
-        turns = make_turns(4, chars=10)
-        result = await c.compress(turns)
-        assert result == turns
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -480,10 +385,10 @@ _REAL_DIALOG = [
 
 @pytest.mark.integration
 class TestLogCompressorIntegrationOpenAI:
-    """Прогоняем реальную компрессию через OpenAI-совместимый бекенд (Gemini Flash)."""
+    """Прогоняем реальную консолидацию через OpenAI-совместимый бекенд (Gemini Flash)."""
 
     @pytest.mark.asyncio
-    async def test_compress_real_dialog(self, tmp_path):
+    async def test_consolidate_real_dialog(self, tmp_path):
         api_key = os.environ.get("LLM_KEY")
         if not api_key:
             pytest.skip("LLM_KEY не задан")
@@ -495,52 +400,38 @@ class TestLogCompressorIntegrationOpenAI:
             api_key=api_key,
             base_url=base_url,
             backend="openai",
-            recent_tokens=50,         # маленький бюджет — большая часть уйдёт в observe
+            recent_tokens=50,
             min_recent_turns=2,
-            compress_after_tokens=1,  # любой диалог триггерит compress
+            compress_after_tokens=1,
             reflect_after_tokens=999_999,
         )
         c.register(make_agent(tmp_path))
 
-        result = await c.compress(list(_REAL_DIALOG))
+        await c._consolidate(list(_REAL_DIALOG))
 
-        # OM-turn первый, остальное — recent
-        assert result, "compress вернул пустой список"
-        assert isinstance(result[0], dict) and result[0].get("_observation_message"), \
-            f"первый turn не OM: {result[0]}"
-        om = result[0]
-        assert "_raw_observations" in om and om["_raw_observations"].strip(), \
-            "OM должен содержать непустые _raw_observations"
+        log = c._read_log()
+        assert log, "LOG.md пустой"
 
-        # Observer должен извлечь конкретные факты из диалога — хоть один из ключевых терминов
-        raw = om["_raw_observations"].lower()
         keywords = ["иван", "ivan", "go", "kafka", "rust", "lsm", "авито", "avito"]
-        assert any(k in raw for k in keywords), \
-            f"OM не содержит ни одного ключевого слова из {keywords}: {raw[:300]}"
-
-        # Recent — последние реплики, в исходном порядке, без OM
-        recent = result[1:]
-        assert recent, "не осталось recent-turns"
-        assert recent == _REAL_DIALOG[-len(recent):], \
-            "recent должен быть хвостом исходного диалога"
+        assert any(k in log.lower() for k in keywords), \
+            f"LOG.md не содержит ни одного ключевого слова из {keywords}: {log[:300]}"
 
 
 @pytest.mark.integration
 class TestLogCompressorIntegrationClaude:
-    """Прогоняем реальную компрессию через Claude-бекенд (haiku) в bare-режиме."""
+    """Прогоняем реальную консолидацию через Claude-бекенд (haiku) в bare-режиме."""
 
     @pytest.mark.asyncio
-    async def test_compress_real_dialog_via_haiku(self, tmp_path):
-        # Для claude-бекенда не нужен LLM_KEY — он использует claude CLI напрямую.
+    async def test_consolidate_real_dialog_via_haiku(self, tmp_path):
         model = os.environ.get("CLAUDE_HAIKU_MODEL", "haiku")
 
         c = LogCompressor(
             model_name=model,
             backend="claude",
             backend_params={"sdk_options": {
-                "system_prompt": None,    # без claude_code preset
-                "setting_sources": None,  # без user-settings
-                "tools": [],              # без встроенных тулов
+                "system_prompt": None,
+                "setting_sources": None,
+                "tools": [],
             }},
             recent_tokens=50,
             min_recent_turns=2,
@@ -550,25 +441,14 @@ class TestLogCompressorIntegrationClaude:
         c.register(make_agent(tmp_path))
 
         try:
-            result = await c.compress(list(_REAL_DIALOG))
+            await c._consolidate(list(_REAL_DIALOG))
         finally:
-            # Останавливаем inner agent, если он успел подняться (закроет claude SDK).
             if hasattr(c, "_llm_agent"):
                 await c._llm_agent.close()
 
-        assert result, "compress вернул пустой список"
-        assert isinstance(result[0], dict) and result[0].get("_observation_message"), \
-            f"первый turn не OM: {result[0]}"
-        om = result[0]
-        assert "_raw_observations" in om and om["_raw_observations"].strip(), \
-            "OM должен содержать непустые _raw_observations"
+        log = c._read_log()
+        assert log, "LOG.md пустой"
 
-        raw = om["_raw_observations"].lower()
         keywords = ["иван", "ivan", "go", "kafka", "rust", "lsm", "авито", "avito"]
-        assert any(k in raw for k in keywords), \
-            f"OM не содержит ни одного ключевого слова из {keywords}: {raw[:300]}"
-
-        recent = result[1:]
-        assert recent, "не осталось recent-turns"
-        assert recent == _REAL_DIALOG[-len(recent):], \
-            "recent должен быть хвостом исходного диалога"
+        assert any(k in log.lower() for k in keywords), \
+            f"LOG.md не содержит ни одного ключевого слова из {keywords}: {log[:300]}"

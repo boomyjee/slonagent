@@ -125,7 +125,7 @@ def load_turns_json(path):
 
 class Memory:
     def __init__(self, compressor, providers: list = None, memory_dir: str = None, thread_id: str = ""):
-        self.providers = providers or []
+        self.providers = (providers or []) + ([compressor] if compressor else [])
         self.compressor = compressor
         self.thread_id = thread_id
         if memory_dir is None:
@@ -153,8 +153,8 @@ class Memory:
         if os.path.exists(src._state_file):
             shutil.copy2(src._state_file, self._state_file)
             self._turns = load_turns_json(self._state_file)
-        for skill in filter(None, [self.compressor, *self.providers]):
-            skill.copy_from(src.memory_dir)
+        for provider in self.providers:
+            provider.copy_from(src.memory_dir)
 
     @staticmethod
     def count_tokens(turns: list) -> int:
@@ -212,6 +212,7 @@ class Memory:
         for turn in turns:
             if "_timestamp" not in turn:
                 turn = {**turn, "_timestamp": datetime.now(timezone.utc).isoformat()}
+            turn = {**turn, "_thread_id": self.thread_id}
             self._turns.append(turn)
             if turn.get("role") == "assistant" and not turn.get("tool_calls"):
                 self.save()

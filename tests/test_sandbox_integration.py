@@ -17,6 +17,7 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 from agent import Agent, Skill
+from src.memory.providers.base import BaseProvider
 from src.skills.config import ConfigSkill
 from src.skills.sandbox import SandboxSkill
 
@@ -36,7 +37,8 @@ if not _podman_available():
     pytest.skip("podman not available", allow_module_level=True)
 
 
-class PassthroughCompressor(Skill):
+class PassthroughCompressor(BaseProvider):
+    def __init__(self): super().__init__(consolidate_tokens=0)
     async def compress(self, turns): return turns
 
 

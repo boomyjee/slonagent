@@ -21,6 +21,7 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 from agent import Agent, Skill
+from src.memory.providers.base import BaseProvider
 from src.transport.base import BaseTransport
 
 pytestmark = pytest.mark.integration
@@ -42,7 +43,8 @@ def require_podman():
         pytest.skip("podman не найден")
 
 
-class PassthroughCompressor(Skill):
+class PassthroughCompressor(BaseProvider):
+    def __init__(self): super().__init__(consolidate_tokens=0)
     async def compress(self, turns): return turns
 
 

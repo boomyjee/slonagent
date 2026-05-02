@@ -18,7 +18,8 @@ from src.memory.memory import Memory
 from src.memory.providers.base import BaseProvider
 
 
-class PassthroughCompressor(Skill):
+class PassthroughCompressor(BaseProvider):
+    def __init__(self): super().__init__(consolidate_tokens=0)
     async def compress(self, turns): return turns
 
 
@@ -105,7 +106,7 @@ class TestBaseProvider:
         await p.add_turn({"role": "user", "content": "hi"})
         await p.add_turn({"role": "assistant", "content": "hello"})
         assert len(p.consolidated_batches) == 0
-        assert len(p._pending) == 0  # consolidate_tokens=0 → add_turn возвращается сразу
+        assert p._pending is None  # consolidate_tokens=0 → start не инициализирует pending
 
     @pytest.mark.asyncio
     async def test_consolidate_batch_contains_all_turns(self, tmp_path):

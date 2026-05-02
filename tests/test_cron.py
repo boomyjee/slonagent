@@ -16,10 +16,12 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 from agent import Skill
+from src.memory.providers.base import BaseProvider
 from src.skills.cron import CronSkill
 
 
-class PassthroughCompressor(Skill):
+class PassthroughCompressor(BaseProvider):
+    def __init__(self): super().__init__(consolidate_tokens=0)
     async def compress(self, turns): return turns
 
 

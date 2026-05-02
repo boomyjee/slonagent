@@ -20,6 +20,7 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 from agent import Agent, Skill
+from src.memory.providers.base import BaseProvider
 from src.skills.config import ConfigSkill
 from src.skills.sandbox import SandboxSkill
 from src.transport.dashboard import DashboardTransport
@@ -49,7 +50,8 @@ def _free_port() -> int:
     return port
 
 
-class PassthroughCompressor(Skill):
+class PassthroughCompressor(BaseProvider):
+    def __init__(self): super().__init__(consolidate_tokens=0)
     async def compress(self, turns): return turns
 
 
