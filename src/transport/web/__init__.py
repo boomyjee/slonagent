@@ -522,6 +522,11 @@ class WebTransport(BaseTransport):
                 )
             except Exception:
                 log.exception("[ws] process_message FAILED")
+            return
+        if msg.get("type") == "transport" and msg.get("method") == "rename_thread":
+            uuid, name = msg.get("uuid"), msg.get("name")
+            if uuid and name:
+                await self.agent.thread_rename(uuid, name)
 
     @property
     def uploads_dir(self) -> str:
@@ -665,6 +670,9 @@ class WebTransport(BaseTransport):
 
     async def inject_message(self, text: str):
         await self._transport_event("inject_message", text=text)
+
+    async def thread_rename(self, uuid: str, name: str):
+        await self.send({"type": "thread_renamed", "uuid": uuid, "name": name})
 
     # ─── Outbound media — копируем файл в uploads_dir, фронт получает URL ────
 

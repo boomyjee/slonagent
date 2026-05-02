@@ -83,3 +83,7 @@ class MultiTransport(BaseTransport):
     async def send_suggestions(self, text, options):
         for t in self.transports:
             await t.send_suggestions(text, options)
+
+    async def thread_rename(self, uuid, name):
+        for t in self.transports:
+            await t.thread_rename(uuid, name)

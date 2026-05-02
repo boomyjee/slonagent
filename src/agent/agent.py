@@ -159,6 +159,37 @@ class Agent:
         except Exception as e:
             logging.warning("[agent] не удалось сохранить restrictions: %s", e)
 
+    def _threads_file(self) -> str | None:
+        return os.path.join(self.memory.memory_dir, "THREADS.json") if self.memory.memory_dir else None
+
+    def _load_threads(self) -> dict:
+        if not (f := self._threads_file()): return {}
+        try: 
+            with open(f, encoding="utf-8") as fh: return json.load(fh)
+        except FileNotFoundError: return {}
+        except Exception as e: 
+            logging.warning("[agent] threads load failed: %s", e)
+            return {}
+
+    def _save_threads(self, threads: dict):
+        f = self._threads_file()
+        if not f: return
+        try:
+            with open(f, "w", encoding="utf-8") as fh:
+                json.dump(threads, fh, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.warning("[agent] threads save failed: %s", e)
+
+    def thread_name(self, uuid: str) -> str | None:
+        return self._load_threads().get(uuid, {}).get("name")
+
+    async def thread_rename(self, uuid: str, name: str):
+        threads = self._load_threads()
+        if threads.get(uuid, {}).get("name") == name: return
+        threads.setdefault(uuid, {})["name"] = name
+        self._save_threads(threads)
+        await self.transport.thread_rename(uuid, name)
+
     def apply_error_restriction(self, model_name: str, e: Exception, messages: list) -> list:
         """Выставляет ограничение на основе ошибки и возвращает обновлённые messages."""
         err = str(e)

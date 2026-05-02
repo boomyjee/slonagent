@@ -3,7 +3,7 @@ import base64, io, os, re, asyncio, logging, json, mimetypes, uuid
 
 log = logging.getLogger(__name__)
 from typing import Annotated
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramRetryAfter, TelegramServerError
 from aiogram.types import Message, CallbackQuery, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat
@@ -302,6 +302,18 @@ class TelegramTransport(BaseTransport):
         msg = await self._send(_markdown_to_html(body), parse_mode="HTML", reply_markup=kb)
         if msg is not None:
             self._suggestion_options[msg.message_id] = list(options)
+
+    async def thread_rename(self, uuid: str, name: str):
+        if self.chat_id is None: return
+        chat = self.load_bindings().get(str(self.chat_id), {})
+        topic_id = next((int(tid) for tid, tu in chat.get("topics", {}).items() if tu == uuid), None)
+        if topic_id is None: return
+        try:
+            await self.bot.edit_forum_topic(self.chat_id, topic_id, name=name)
+        except Exception as e:
+            log.warning("[telegram] edit_forum_topic failed: %s", e)
+        if self.agent is not None and self.agent.thread_id == uuid:
+            self.thread_name = name
 
     def set_agent(self, agent):
         super().set_agent(agent)
@@ -880,6 +892,21 @@ class TelegramTransport(BaseTransport):
                 await callback.message.answer(f"{label}: <b>{html.escape(name)}</b>. Напиши сообщение.", parse_mode="HTML")
                 return
 
+        async def on_topic_edit(message: Message):
+            edited = message.forum_topic_edited
+            if not edited or not edited.name: return
+            if message.chat.id < 0:
+                if not await is_group_allowed(message.chat.id): return
+            else:
+                if message.from_user and message.from_user.id not in allowed_user_ids: return
+            binding = cls.lookup_binding(message.chat.id, message.message_thread_id)
+            if not binding: return
+            agent_id, thread_uuid = binding
+            agent = await make_agent(agent_id, thread_uuid)
+            if not agent: return
+            await agent.thread_rename(thread_uuid, edited.name)
+
+        dp.message(F.forum_topic_edited)(on_topic_edit)
         dp.message()(on_message)
         dp.callback_query()(on_callback_query)
         asyncio.create_task(dp.start_polling(cls.bot))

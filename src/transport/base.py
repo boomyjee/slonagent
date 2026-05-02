@@ -72,4 +72,7 @@ class BaseTransport:
         body = "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
         await self.send_message(f"{text}\n\n{body}" if text else body)
 
+    async def thread_rename(self, uuid: str, name: str):
+        pass
+
 
