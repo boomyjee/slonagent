@@ -4,15 +4,12 @@
   Observer  — наблюдает старые сообщения и превращает их в observations (append-only).
   Reflector — переписывает observations когда они вырастают выше REFLECTION_TOKENS.
 
-compress(turns) → [OM_turn] + [recent_turns]
-  OM_turn — специальное сообщение с observations, помечено _observation_message=True.
-  recent_turns — свежие сообщения которые ещё не наблюдались.
-
-Промпты ниже: Mastra single-thread (без multi-thread ветки).
-
-Хранение:
-  memory/log/CONTEXT.json — observations (персистентно между сессиями)
+compress(turns) → recent_turns. Старые сообщения уплотняются в наблюдения,
+которые хранятся в memory/LOG.md (общий на агента — шарятся между тредами).
+В контекст LLM наблюдения попадают через get_context_prompt — оба бэкенда
+зовут его в общем skill-loop системного промпта.
 """
+import asyncio
 import logging
 import os
 import re
@@ -626,6 +623,10 @@ class LogCompressor(Skill):
     OM_turn персистируется в истории через memory.py как обычный turn.
     """
 
+    # Лок на memory_dir — два транспорта-треда одного агента не должны
+    # одновременно гонять observer и перетирать друг друга в LOG.md.
+    _locks: dict[str, asyncio.Lock] = {}
+
     def __init__(self, model_name: str, api_key: str = "", base_url: str = "",
                  backend: str = "openai", backend_params: dict | None = None,
                  recent_tokens: int           = 15_000,
@@ -645,7 +646,6 @@ class LogCompressor(Skill):
         self._backend = backend
         self._backend_params = backend_params
 
-    # ── Public ────────────────────────────────────────────────────────────────
 
     async def send_memory_info(self, delta: str = "", *, cont: bool = True, final: bool = False):
         if not cont:
@@ -660,60 +660,74 @@ class LogCompressor(Skill):
                 final=final,
             )
 
-    async def compress(self, turns: list) -> list:
-        om_turn, rest = None, []
-        for t in turns:
-            if isinstance(t, dict) and t.get("_observation_message"):
-                om_turn = t
-            else:
-                rest.append(t)
+    def copy_from(self, src_memory_dir: str):
+        import shutil
+        src = os.path.join(src_memory_dir, "LOG.md")
+        if os.path.exists(src):
+            shutil.copy2(src, self._log_path())
 
-        existing_observations = om_turn.get("_raw_observations", "") if om_turn else ""
-        to_observe, recent = self._split_recent(rest)
-
-        if Memory.count_tokens(to_observe) < self._compress_after_tokens:
-            return turns
-
-        await self.send_memory_info("", cont=False)
-        await self.send_memory_info(f"Уплотняю память: наблюдаю за {len(to_observe)} сообщениями…")
-        new_obs = await self._run_observer(to_observe, existing_observations)
-        if not new_obs:
-            log.warning("[LogCompressor] Observer returned empty")
-            await self.send_memory_info("Observer вернул пусто, пропускаю", final=True)
-            return turns
-
-        updated = (existing_observations + "\n\n" + new_obs).strip() if existing_observations else new_obs
-
-        new_obs_tokens = Memory.count_tokens([{"role": "user", "content": new_obs}])
-        await self.send_memory_info(f"+{new_obs_tokens} токенов наблюдений")
-
-        obs_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
-        if obs_tokens >= self._reflect_after_tokens:
-            updated = await self._run_reflector(updated) or updated
-
-        obs_text = (
+    async def get_context_prompt(self, user_text = ""):
+        updated = self._read_log()
+        if not updated: return "";
+        return (
             "The following observations block contains your memory of past conversations with this user.\n\n"
             f"<observations>\n{_optimize_for_context(_add_relative_time(updated, datetime.now()))}\n</observations>\n\n"
             "IMPORTANT: When responding, reference specific details from these observations. "
             "Do not give generic advice — personalize your response based on what you know about this user. "
             "For conflicting information, prefer the MOST RECENT observation (check dates)."
         )
-        new_om = {"role": "user", "content": obs_text, "_observation_message": True, "_raw_observations": updated}
-        self._write_log(updated)  # debug only
-        log.info("[LogCompressor] %d → 1 OM + %d recent turns", len(to_observe), len(recent))
+
+    async def compress(self, turns: list) -> list:
+        turns = [t for t in turns if not (isinstance(t, dict) and t.get("_observation_message"))]
+        to_observe, recent = self._split_recent(turns)
+
+        if Memory.count_tokens(to_observe) < self._compress_after_tokens:
+            return turns
+
+        lock = self._locks.setdefault(self.agent.memory.memory_dir, asyncio.Lock())
+        async with lock:
+            existing_observations = self._read_log()
+            await self.send_memory_info("", cont=False)
+            await self.send_memory_info(f"Уплотняю память: наблюдаю за {len(to_observe)} сообщениями…")
+            new_obs = await self._run_observer(to_observe, existing_observations)
+            if not new_obs:
+                log.warning("[LogCompressor] Observer returned empty")
+                await self.send_memory_info("Observer вернул пусто, пропускаю", final=True)
+                return turns
+
+            updated = (existing_observations + "\n\n" + new_obs).strip() if existing_observations else new_obs
+
+            new_obs_tokens = Memory.count_tokens([{"role": "user", "content": new_obs}])
+            await self.send_memory_info(f"+{new_obs_tokens} токенов наблюдений")
+
+            obs_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
+            if obs_tokens >= self._reflect_after_tokens:
+                updated = await self._run_reflector(updated) or updated
+
+            self._write_log(updated)
+        log.info("[LogCompressor] %d → LOG.md + %d recent turns", len(to_observe), len(recent))
         final_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
         await self.send_memory_info(
-            f"Свернул {len(to_observe)} сообщений в OM ({final_tokens} токенов), оставил {len(recent)} recent",
+            f"Свернул {len(to_observe)} сообщений в наблюдения ({final_tokens} токенов), оставил {len(recent)} recent",
             final=True,
         )
-        return [new_om] + recent
+        return recent
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _write_log(self, observations: str):
-        path = os.path.join(self.agent.memory.memory_dir, "LOG.md")
+    def _log_path(self) -> str:
+        return os.path.join(self.agent.memory.memory_dir, "LOG.md")
+
+    def _read_log(self) -> str:
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(self._log_path(), encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+
+    def _write_log(self, observations: str):
+        try:
+            with open(self._log_path(), "w", encoding="utf-8") as f:
                 f.write(observations)
         except Exception as e:
             log.warning("[LogCompressor] write LOG.md failed: %s", e, exc_info=True)

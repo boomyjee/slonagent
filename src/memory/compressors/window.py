@@ -21,6 +21,9 @@ class WindowCompressor(Skill):
         self.soft_limit_tokens = soft_limit_tokens
         self.min_user_turns = min_user_turns
 
+    def copy_from(self, src_memory_dir: str):
+        return
+
     async def compress(self, turns: list) -> list:
         result, tokens, user_ids = [], 0, set()
         for turn in reversed(turns):

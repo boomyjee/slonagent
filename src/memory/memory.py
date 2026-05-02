@@ -153,8 +153,8 @@ class Memory:
         if os.path.exists(src._state_file):
             shutil.copy2(src._state_file, self._state_file)
             self._turns = load_turns_json(self._state_file)
-        for provider in self.providers:
-            provider.copy_from(src.memory_dir)
+        for skill in filter(None, [self.compressor, *self.providers]):
+            skill.copy_from(src.memory_dir)
 
     @staticmethod
     def count_tokens(turns: list) -> int:

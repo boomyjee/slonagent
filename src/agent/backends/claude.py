@@ -249,12 +249,7 @@ class ClaudeBackend(BaseBackend):
                 f"Синхронизировал claude-сессию: вычистил {pruned} старых записей", final=True,
             )
 
-        # Динамический контекст: OM_turn + context_prompts всех скиллов
         parts = []
-        for t in agent.memory._turns:
-            if isinstance(t, dict) and t.get("_observation_message"):
-                parts.append(t.get("content", ""))
-                break
         for skill in agent.skills:
             ctx = await skill.get_context_prompt(user_text)
             if ctx:
@@ -340,7 +335,7 @@ class ClaudeBackend(BaseBackend):
 
         pending = []
         for t in reversed(agent.memory._turns):
-            if not isinstance(t, dict) or t.get("role") != "user" or t.get("_observation_message"): break
+            if not isinstance(t, dict) or t.get("role") != "user": break
             pending.insert(0, t)
 
         if not pending:
