@@ -191,6 +191,7 @@ class TelegramTransport(BaseTransport):
         self._typing_task: asyncio.Task | None = None
         self._queue: asyncio.Queue = asyncio.Queue()
         self._queue_task: asyncio.Task | None = None
+        self._update_commands_task: asyncio.Task | None = None
         self._last_edit_texts: dict[int, str] = {}  # msg_id → last sent text
         self._stream_messages: dict[int, list] = {}  # stream_id → list of Message
         self._suggestion_options: dict[int, list[str]] = {}  # msg_id → options для длинных кнопок
@@ -304,6 +305,7 @@ class TelegramTransport(BaseTransport):
 
     def set_agent(self, agent):
         super().set_agent(agent)
+        if self._update_commands_task is not None: return
 
         async def update_commands():
             last_hash = None
@@ -313,7 +315,7 @@ class TelegramTransport(BaseTransport):
                     continue
                 cmds = {
                     cmd: desc
-                    for skill in agent.skills
+                    for skill in self.agent.skills
                     for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
                 }
                 if self.chat_id < 0:
@@ -330,7 +332,7 @@ class TelegramTransport(BaseTransport):
                     except Exception as e:
                         log.warning("[telegram] set_my_commands failed: %s", e)
                 await asyncio.sleep(1)
-        asyncio.create_task(update_commands())
+        self._update_commands_task = asyncio.create_task(update_commands())
 
     async def _exec_item(self, item):
         kind = item["kind"]
