@@ -71,9 +71,13 @@ async def run_cli():
             print()
 
 async def run_telegram():
-    DashboardTransport.set_server_config(**config.get("web", {}))
+    agents: dict[tuple[str, str], "Agent"] = {}
 
-    async def make_agent(agent_id, transport, force_create: bool, copy_memory_from=None):
+    async def make_agent(agent_id, thread_id="", force_create: bool = False, copy_memory_from=None):
+        key = (agent_id, thread_id)
+        if key in agents and not force_create:
+            return agents[key]
+
         is_main_agent = (agent_id == "main")
         agent_dir = os.getcwd() if is_main_agent else os.path.join(os.getcwd(), "forks", agent_id)
         if not force_create and not os.path.exists(agent_dir): return None
@@ -94,17 +98,23 @@ async def run_telegram():
             with open(config_path, encoding="utf-8") as f:
                 agent_cfg = json.load(f)["agent"]
 
-        transport = MultiTransport([transport, DashboardTransport(**config.get("web", {}).get("transport", {}))])
-        agent = Agent.from_config(resolve(agent_cfg), id=agent_id, agent_dir=agent_dir, transport=transport)
+        transport = MultiTransport([
+            TelegramTransport(**config.get("telegram", {}).get("transport", {})),
+            DashboardTransport(**config.get("web", {}).get("transport", {})),
+        ])
+        agent = Agent.from_config(resolve(agent_cfg), id=agent_id, thread_id=thread_id,
+                                  agent_dir=agent_dir, transport=transport)
         if copy_memory_from:
-            agent.memory.copy_from(copy_memory_from.agent.memory)
+            agent.memory.copy_from(copy_memory_from.memory)
         await agent.start()
+        agents[key] = agent
         return agent
 
-    await TelegramTransport.listen(
-        config=config["telegram"],
-        make_agent=make_agent,
-    )
+    DashboardTransport.set_server_config(**config.get("web", {}))
+    TelegramTransport.start(config["telegram"], make_agent)
+
+    await make_agent("main")
+    await asyncio.Event().wait()
 
 acquire_pid_lock()
 os.makedirs(_LOG_DIR := os.path.expanduser("~/.slonagent"), exist_ok=True)

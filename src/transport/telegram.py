@@ -1,5 +1,5 @@
 import html
-import base64, io, os, re, asyncio, logging, json, mimetypes
+import base64, io, os, re, asyncio, logging, json, mimetypes, uuid
 
 log = logging.getLogger(__name__)
 from typing import Annotated
@@ -9,6 +9,7 @@ from aiogram.exceptions import TelegramRetryAfter, TelegramServerError
 from aiogram.types import Message, CallbackQuery, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat
 from agent import Skill, tool
 from src.transport.base import BaseTransport
+
 
 def _markdown_to_html(text: str) -> str:
     """Convert normal markdown to Telegram-safe HTML."""
@@ -113,6 +114,8 @@ class TelegramSkill(Skill):
         from src.skills.sandbox import SandboxSkill
         self.sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         t = self.transport
+        if t.chat_id is None:
+            return
         try:
             chat = await t.bot.get_chat(t.chat_id)
             self._chat_title = chat.title or chat.full_name or str(t.chat_id)
@@ -121,9 +124,17 @@ class TelegramSkill(Skill):
             logging.warning("[TelegramSkill] не удалось получить инфо о чате: %s", e)
 
     async def get_context_prompt(self, user_text: str = "") -> str:
+        t = self.transport
+        if not self._chat_title and t.chat_id is not None:
+            try:
+                chat = await t.bot.get_chat(t.chat_id)
+                self._chat_title = chat.title or chat.full_name or str(t.chat_id)
+                self._is_private = chat.type == "private"
+            except Exception as e:
+                logging.warning("[TelegramSkill] не удалось получить инфо о чате: %s", e)
+                return ""
         if not self._chat_title:
             return ""
-        t = self.transport
         if self._is_private:
             return f"Ты работаешь в личном чате с {self._chat_title}."
         if t.thread_id:
@@ -162,11 +173,13 @@ class TelegramSkill(Skill):
 
 class TelegramTransport(BaseTransport):
     bot: Bot = None
+    _main_chat_id: int | None = None  # ставится в start() из allowed_user_ids[0]
+    _BINDINGS_PATH = os.path.join("forks", "telegram.json")
 
-    def __init__(self, chat_id: int, thread_id: int | None = None, verbose: bool = True):
+    def __init__(self, verbose: bool = True):
         super().__init__()
-        self.chat_id = chat_id
-        self.thread_id = thread_id
+        self.chat_id: int | None = None
+        self.thread_id: int | None = None
         self.thread_name: str | None = None
         self.agent = None
         self._no_link_preview = LinkPreviewOptions(is_disabled=True)
@@ -182,7 +195,31 @@ class TelegramTransport(BaseTransport):
         self._stream_messages: dict[int, list] = {}  # stream_id → list of Message
         self._suggestion_options: dict[int, list[str]] = {}  # msg_id → options для длинных кнопок
 
+    async def _ensure_chat_and_topic(self) -> bool:
+        """True — можно слать. False — у агента нет группы или не удалось создать топик."""
+        if self.chat_id is None:
+            self.chat_id, self.thread_id = self.reverse_binding(self.agent.id, self.agent.thread_id)
+        if self.chat_id is None:
+            self.chat_id = self.find_chat_for_agent(self.agent.id)
+            if self.chat_id is None:
+                return False
+        if self.thread_id is not None or self.agent.thread_id == "":
+            return True
+        name = self.thread_name or f"thread {self.agent.thread_id[:8]}"
+        try:
+            topic = await self.bot.create_forum_topic(self.chat_id, name=name)
+        except Exception as e:
+            log.warning("create_forum_topic failed: %s", e)
+            return False
+        self.thread_id = topic.message_thread_id
+        b = self.load_bindings()
+        chat = b.setdefault(str(self.chat_id), {"topics": {}})
+        chat.setdefault("topics", {})[str(self.thread_id)] = self.agent.thread_id
+        self.save_bindings(b)
+        return True
+
     async def send_processing(self, active: bool):
+        if not await self._ensure_chat_and_topic(): return
         if active:
             if self._typing_task:
                 return
@@ -209,6 +246,7 @@ class TelegramTransport(BaseTransport):
         return [TelegramSkill(self)]
 
     async def send_images(self, paths):
+        if not await self._ensure_chat_and_topic(): return
         if len(paths) == 1:
             await self.bot.send_photo(self.chat_id, FSInputFile(paths[0]),
                                       message_thread_id=self.thread_id)
@@ -220,6 +258,7 @@ class TelegramTransport(BaseTransport):
                                             message_thread_id=self.thread_id)
 
     async def send_files(self, paths):
+        if not await self._ensure_chat_and_topic(): return
         if len(paths) == 1:
             await self.bot.send_document(self.chat_id, FSInputFile(paths[0]),
                                          message_thread_id=self.thread_id)
@@ -230,6 +269,7 @@ class TelegramTransport(BaseTransport):
                                             message_thread_id=self.thread_id)
 
     async def send_voice(self, audio_path):
+        if not await self._ensure_chat_and_topic(): return
         await self.bot.send_voice(self.chat_id, FSInputFile(audio_path),
                                   message_thread_id=self.thread_id)
 
@@ -240,6 +280,7 @@ class TelegramTransport(BaseTransport):
     )
 
     async def send_suggestions(self, text, options):
+        if not await self._ensure_chat_and_topic(): return
         # Универсальный layout: варианты в теле сообщения нумерованным списком,
         # кнопки — короткие цифровые лейблы (опционально + emoji из опции).
         # До 8 кнопок в ряд (Telegram-лимит) — короткие лейблы влезают всегда.
@@ -263,10 +304,13 @@ class TelegramTransport(BaseTransport):
 
     def set_agent(self, agent):
         super().set_agent(agent)
+
         async def update_commands():
-            # Скиллы у агента могут добавляться/убираться в любой момент
             last_hash = None
             while True:
+                if not await self._ensure_chat_and_topic():
+                    await asyncio.sleep(1)
+                    continue
                 cmds = {
                     cmd: desc
                     for skill in agent.skills
@@ -346,17 +390,20 @@ class TelegramTransport(BaseTransport):
         if not self._queue_task or self._queue_task.done():
             self._queue_task = asyncio.create_task(self._queue_worker())
 
-    async def _send(self, text: str, **kwargs) -> Message:
+    async def _send(self, text: str, **kwargs) -> Message | None:
+        if not await self._ensure_chat_and_topic(): return None
         self._ensure_queue()
         future = asyncio.get_event_loop().create_future()
         self._queue.put_nowait({"kind": "send", "text": text, "kwargs": kwargs, "future": future})
         return await future
 
-    def _edit(self, msg: Message, text: str, **kwargs):
+    async def _edit(self, msg: Message, text: str, **kwargs):
+        if not await self._ensure_chat_and_topic(): return
         self._ensure_queue()
         self._queue.put_nowait({"kind": "edit", "msg": msg, "text": text, "kwargs": kwargs})
-    
+
     async def _answer(self, text: str, messages: list | None = None, expandable: bool = False, final: bool = False, prefix: str = "", max_chunks = None):
+        if not await self._ensure_chat_and_topic(): return
         if messages is None:
             messages = []
         if expandable:
@@ -383,7 +430,7 @@ class TelegramTransport(BaseTransport):
 
         for m, body in enumerate(bodies):
             if m < len(messages):
-                self._edit(messages[m], body, parse_mode="HTML")
+                await self._edit(messages[m], body, parse_mode="HTML")
             else:
                 messages.append(await self._send(body, parse_mode="HTML"))
         for msg in messages[len(bodies):]:
@@ -407,7 +454,7 @@ class TelegramTransport(BaseTransport):
             result_text = html.escape(result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2))
         result_text = result_text[:2000]
         if self._tool_msg:
-            self._edit(
+            await self._edit(
                 self._tool_msg,
                 f"<blockquote expandable>{self._tool_call_text}</blockquote>\n<blockquote expandable>{result_text}</blockquote>",
                 parse_mode="HTML",
@@ -426,6 +473,7 @@ class TelegramTransport(BaseTransport):
         await self._answer("[→]" + text, final=True)
 
     async def send_app_url(self, url: str, text: str, button: str = ""):
+        if not await self._ensure_chat_and_topic(): return
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=button or text, web_app=WebAppInfo(url=url))
@@ -599,28 +647,140 @@ class TelegramTransport(BaseTransport):
             trigger_answer=trigger_answer,
         )
 
+    # forks/telegram.json:
+    #   { "<chat_id>": {"agent_id": "<id>", "topics": {"<topic_id>": "<thread_id>"}} }
+    # Личка/general (telegram_thread_id is None) — это thread "" агента, в topics не пишем.
+    # Новый топик в привязанной группе автоматически создаёт thread с id == topic_id.
+    # Implicit: личка _main_chat_id привязана к main (можно не хранить).
+
+    _bindings_cache: dict | None = None
+
     @classmethod
-    async def listen(cls, config: dict, make_agent):
+    def load_bindings(cls) -> dict:
+        if cls._bindings_cache is None:
+            try:
+                with open(cls._BINDINGS_PATH, encoding="utf-8") as f:
+                    cls._bindings_cache = json.load(f)
+            except FileNotFoundError:
+                cls._bindings_cache = {}
+        return cls._bindings_cache
+
+    @classmethod
+    def save_bindings(cls, b: dict):
+        os.makedirs(os.path.dirname(cls._BINDINGS_PATH), exist_ok=True)
+        with open(cls._BINDINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(b, f, ensure_ascii=False, indent=2)
+        cls._bindings_cache = b
+
+    @classmethod
+    def lookup_binding(cls, chat_id: int, telegram_thread_id: int | None) -> tuple[str, str] | None:
+        b = cls.load_bindings()
+        chat = b.get(str(chat_id))
+        if not chat:
+            if chat_id == cls._main_chat_id and telegram_thread_id is None:
+                return ("main", "")
+            return None
+        agent_id = chat.get("agent_id")
+        if not agent_id:
+            return None
+        if telegram_thread_id is None:
+            return (agent_id, "")
+        tk = str(telegram_thread_id)
+        topics = chat.setdefault("topics", {})
+        if tk not in topics:
+            topics[tk] = uuid.uuid4().hex[:8]
+            cls.save_bindings(b)
+        return (agent_id, topics[tk])
+
+    @classmethod
+    def reverse_binding(cls, agent_id: str, agent_thread_id: str) -> tuple[int | None, int | None]:
+        b = cls.load_bindings()
+        for chat_str, chat in b.items():
+            if chat.get("agent_id") != agent_id:
+                continue
+            if agent_thread_id == "":
+                return (int(chat_str), None)
+            for tk, tid in chat.get("topics", {}).items():
+                if tid == agent_thread_id:
+                    return (int(chat_str), int(tk))
+        if agent_id == "main" and agent_thread_id == "" and cls._main_chat_id is not None:
+            return (cls._main_chat_id, None)
+        return (None, None)
+
+    @classmethod
+    def find_chat_for_agent(cls, agent_id: str) -> int | None:
+        for chat_str, chat in cls.load_bindings().items():
+            if chat.get("agent_id") == agent_id:
+                return int(chat_str)
+        if agent_id == "main" and cls._main_chat_id is not None:
+            return cls._main_chat_id
+        return None
+
+    @classmethod
+    def start(cls, config: dict, make_agent):
         proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         cls.bot = Bot(token=config["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
         dp = Dispatcher()
 
         allowed_user_ids = config["allowed_user_ids"]
-        transport_kwargs = config.get("transport", {})
+        cls._main_chat_id = allowed_user_ids[0]
 
-        transports: dict[str, "TelegramTransport"] = {}
-        async def get_transport(chat_id, thread_id, force_create=False, copy_memory_from=None):
-            is_main = (chat_id == allowed_user_ids[0] and thread_id is None)
-            agent_id = "main" if is_main else f"{chat_id}_{thread_id}"
-            if agent_id in transports:
-                return transports[agent_id]
-            tg = cls(chat_id=chat_id, thread_id=thread_id, **transport_kwargs)
-            agent = await make_agent(agent_id, tg, force_create=force_create, copy_memory_from=copy_memory_from)
-            if agent:
-                transports[agent_id] = tg
-                return tg
-            return None
+        # Multi-step bind flow per (chat, telegram_thread): "name" | "clone".
+        pending: dict[tuple, dict] = {}
 
+        def _list_forks() -> list[str]:
+            forks_dir = "forks"
+            if not os.path.isdir(forks_dir): return ["main"]
+            names = [n for n in os.listdir(forks_dir) if os.path.isdir(os.path.join(forks_dir, n))]
+            return ["main"] + sorted(names)
+
+        def _save_binding(chat_id: int, agent_id: str):
+            # Снимаем старую привязку этого агента, если была — один агент на одну группу.
+            b = cls.load_bindings()
+            chat_key = str(chat_id)
+            for k, v in list(b.items()):
+                if k != chat_key and v.get("agent_id") == agent_id:
+                    del b[k]
+            b.setdefault(chat_key, {"topics": {}})["agent_id"] = agent_id
+            cls.save_bindings(b)
+
+        def _kb_grid(buttons: list, per_row: int = 3) -> InlineKeyboardMarkup:
+            rows = [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
+            return InlineKeyboardMarkup(inline_keyboard=rows)
+
+        async def _ask_initial(chat_id: int, ttid: int | None):
+            buttons = [InlineKeyboardButton(text=f, callback_data=f"bind_to:{f}") for f in _list_forks()]
+            buttons.append(InlineKeyboardButton(text="+ Новый агент", callback_data="bind_new"))
+            await cls.bot.send_message(
+                chat_id,
+                "Этот чат не привязан к агенту. Выбери существующего или создай нового:",
+                message_thread_id=ttid,
+                reply_markup=_kb_grid(buttons),
+            )
+
+        async def _ask_clone(chat_id: int, ttid: int | None, name: str):
+            buttons = [InlineKeyboardButton(text="без памяти", callback_data="clone_from:_none_")]
+            buttons += [InlineKeyboardButton(text=f, callback_data=f"clone_from:{f}") for f in _list_forks()]
+            await cls.bot.send_message(
+                chat_id,
+                f"Откуда копировать память для <b>{html.escape(name)}</b>?",
+                parse_mode="HTML",
+                message_thread_id=ttid,
+                reply_markup=_kb_grid(buttons),
+            )
+
+        async def resolve_tg(chat_id: int, telegram_thread_id: int | None):
+            binding = cls.lookup_binding(chat_id, telegram_thread_id)
+            if not binding: return None
+            agent_id, agent_thread_id = binding
+            agent = await make_agent(agent_id, agent_thread_id)
+            if not agent: return None
+            transports = getattr(agent.transport, "transports", [agent.transport])
+            tg = next((t for t in transports if isinstance(t, cls)), None)
+            if tg:
+                # Биндинг мог быть только что добавлен — set_agent его ещё не видел.
+                tg.chat_id, tg.thread_id = chat_id, telegram_thread_id
+            return tg
 
         allowed_groups: dict[int, bool] = {}
         async def is_group_allowed(chat_id: int) -> bool:
@@ -639,59 +799,86 @@ class TelegramTransport(BaseTransport):
             else:
                 if message.from_user.id not in allowed_user_ids: return
 
-            thread_id = message.message_thread_id if message.chat.is_forum else None
-            tg = await get_transport(message.chat.id, thread_id)
-            if not tg:
-                if message.text:
-                    kb = InlineKeyboardMarkup(inline_keyboard=[[
-                        InlineKeyboardButton(text="🗒 Чистый агент", callback_data="new_agent_clean"),
-                        InlineKeyboardButton(text="🧠 Клон с памятью", callback_data="new_agent_clone"),
-                    ]])
-                    await message.answer(
-                        "В этом топике ещё нет агента.\n\n"
-                        "• <b>🗒 Чистый агент</b> — начнёт с нуля, без памяти\n"
-                        "• <b>🧠 Клон с памятью</b> — скопирует личность и инструменты из основного агента",
-                        reply_markup=kb,
-                        parse_mode="HTML",
-                    )
+            ttid = message.message_thread_id if message.chat.is_forum else None
+            key = (message.chat.id, ttid)
+
+            # Bind-flow: ждём имя нового агента
+            if pending.get(key, {}).get("step") == "name":
+                name = (message.text or "").strip()
+                if not name or "/" in name or name.startswith("."):
+                    await message.reply("Имя пустое или с недопустимыми символами. Попробуй ещё:")
+                    return
+                if name in _list_forks():
+                    await message.reply(f"Имя '{name}' уже занято. Введи другое:")
+                    return
+                pending[key] = {"step": "clone", "name": name}
+                await _ask_clone(message.chat.id, ttid, name)
                 return
 
+            binding = cls.lookup_binding(message.chat.id, ttid)
+            if binding and binding[0] == "main" and ttid is None and message.chat.id != cls._main_chat_id:
+                await message.reply("Главному агенту можно писать только в личку без топика.")
+                return
+
+            tg = await resolve_tg(message.chat.id, ttid)
+            if not tg:
+                await _ask_initial(message.chat.id, ttid)
+                return
             await tg.handle_message(message)
 
         async def on_callback_query(callback: CallbackQuery):
             if not callback.from_user or callback.from_user.id not in allowed_user_ids: return
-
             chat_id = callback.message.chat.id
-            thread_id = callback.message.message_thread_id if callback.message.chat.is_forum else None
-
+            ttid = callback.message.message_thread_id if callback.message.chat.is_forum else None
+            key = (chat_id, ttid)
             await callback.answer()
             await callback.message.edit_reply_markup(reply_markup=None)
 
             if callback.data.startswith("answer_idx:"):
-                tg = await get_transport(chat_id, thread_id)
+                tg = await resolve_tg(chat_id, ttid)
                 if not tg: return
-                try:
-                    idx = int(callback.data[len("answer_idx:"):])
-                except ValueError:
-                    return
+                try: idx = int(callback.data[len("answer_idx:"):])
+                except ValueError: return
                 opts = tg._suggestion_options.pop(callback.message.message_id, None)
-                if not opts or idx >= len(opts):
-                    return
+                if not opts or idx >= len(opts): return
                 text = opts[idx]
                 await callback.message.answer(text)
                 await tg.process_message(content_parts=[{"type": "text", "text": text}])
                 return
 
-            if callback.data in ("new_agent_clean", "new_agent_clone"):
-                status = await callback.message.answer("⏳ Создаю агента...")
-                copy_from = main_transport if callback.data == "new_agent_clone" else None
-                await get_transport(chat_id, thread_id, force_create=True, copy_memory_from=copy_from)
-                label = "✅ Клон создан" if callback.data == "new_agent_clone" else "✅ Агент создан"
-                await status.edit_text(label)
+            if callback.data.startswith("bind_to:"):
+                agent_id = callback.data[len("bind_to:"):]
+                _save_binding(chat_id, agent_id)
+                pending.pop(key, None)
+                await callback.message.answer(f"✅ Чат привязан к <b>{html.escape(agent_id)}</b>. Напиши сообщение.", parse_mode="HTML")
+                return
+
+            if callback.data == "bind_new":
+                pending[key] = {"step": "name"}
+                await callback.message.answer("Введи имя нового агента ответом:")
+                return
+
+            if callback.data.startswith("clone_from:"):
+                state = pending.get(key)
+                if not state or state.get("step") != "clone":
+                    await callback.message.answer("Сессия истекла, начни заново.")
+                    return
+                name = state["name"]
+                choice = callback.data[len("clone_from:"):]
+                # Биндинг сохраняем ДО make_agent: set_agent внутри прочитает его.
+                _save_binding(chat_id, name)
+                copy_from = None if choice == "_none_" else await make_agent(choice)
+                agent = await make_agent(name, "", force_create=True, copy_memory_from=copy_from)
+                if not agent:
+                    await callback.message.answer(f"❌ Не удалось создать агента {name}.")
+                    pending.pop(key, None)
+                    return
+                pending.pop(key, None)
+                label = "✅ Создан" if choice == "_none_" else f"✅ Создан, память клонирована из {choice}"
+                await callback.message.answer(f"{label}: <b>{html.escape(name)}</b>. Напиши сообщение.", parse_mode="HTML")
+                return
 
         dp.message()(on_message)
         dp.callback_query()(on_callback_query)
-
-        main_transport = await get_transport(allowed_user_ids[0], None, force_create=True)
-        await dp.start_polling(cls.bot)
+        asyncio.create_task(dp.start_polling(cls.bot))
 
