@@ -153,6 +153,7 @@ class WebTransport(BaseTransport):
         self._replay_transport: deque = deque(maxlen=100)
         self._replay_other: deque = deque(maxlen=400)
         self._mount_id: str | None = None
+        self._thread_id: str | None = None
         # Monotonic id stamped on every outgoing event. Clients track the
         # highest id they've seen and ask for "give me everything since X"
         # via {type:"replay", last_seen_id: X} on ws.open — that way a
@@ -366,6 +367,8 @@ class WebTransport(BaseTransport):
 
     def set_agent(self, agent):
         super().set_agent(agent)
+        if self._thread_id is None:
+            self._thread_id = agent.thread_id
         if not self._mount or self._mount_id is not None: return
         self._mount_id = agent.id
         self._ensure_server()
@@ -603,7 +606,7 @@ class WebTransport(BaseTransport):
 
     async def send(self, event: dict, replay=False):
         self._message_id_counter += 1
-        event = {**event, "id": self._message_id_counter, "thread_id": self.agent.thread_id}
+        event = {**event, "id": self._message_id_counter, "thread_id": self._thread_id}
         if replay:
             buf = self._replay_transport if event.get("type") == "transport" else self._replay_other
             buf.append(event)
@@ -625,7 +628,7 @@ class WebTransport(BaseTransport):
         if target is None or target not in self._clients:
             raise RuntimeError("no active dashboard client")
         self._message_id_counter += 1
-        event = {**event, "id": self._message_id_counter, "thread_id": self.agent.thread_id}
+        event = {**event, "id": self._message_id_counter, "thread_id": self._thread_id}
         try:
             await target.send_text(json.dumps(event, ensure_ascii=False))
         except Exception as e:
