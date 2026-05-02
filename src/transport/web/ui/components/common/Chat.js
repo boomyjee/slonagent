@@ -1,6 +1,7 @@
 import { html, Component, css, keyframes, persist } from '../../lib.js';
 import { Tabs } from './Tabs.js';
 import { ChatDialog } from './ChatDialog.js';
+import { Dialog } from './Dialog.js';
 
 const cl = {};
 
@@ -26,56 +27,83 @@ export class Chat extends Component {
     constructor(props) {
         super(props);
         const enabled = props.threadsEnabled !== false;
-        const saved = enabled ? persist.get('chat:threads', null) : null;
-        const threads = saved?.threads?.length ? saved.threads : [{ id: '', label: 'main' }];
-        const active = saved?.active != null ? saved.active : threads[0].id;
+        const saved = enabled ? persist.get('chat:tabs', null) : null;
+        const tabs = saved?.tabs?.length ? saved.tabs : [{ id: '', label: '' }];
+        const active = saved?.active != null ? saved.active : tabs[0].id;
         this.state = {
-            threads,                                // [{id, label}]
-            activeThread: active,
+            tabs,                                   // [{id, label}] — открытые табы
+            activeTab: active,
             messagesByThread: {},                   // tid → [...]
             processingByThread: {},                 // tid → bool
+            threads: {},                            // uuid → label, всё что прислал сервер
         };
         this._streams = {};        // `${tid}:${k}` → index in messagesByThread[tid]
     }
 
     _persist() {
         if (this.props.threadsEnabled === false) return;
-        persist.set('chat:threads', { threads: this.state.threads, active: this.state.activeThread });
+        persist.set('chat:tabs', { tabs: this.state.tabs, active: this.state.activeTab });
     }
 
-    _ensureThread(tid) {
-        if (this.state.threads.some(t => t.id === tid)) return;
-        const next = [...this.state.threads, { id: tid, label: tid || 'main' }];
-        const newActive = this.state.activeThread || tid;
-        this.setState({ threads: next, activeThread: newActive }, () => this._persist());
+    _ensureTab(tid) {
+        if (this.state.tabs.some(t => t.id === tid)) return;
+        const next = [...this.state.tabs, { id: tid, label: this.state.threads[tid] || '' }];
+        const newActive = this.state.activeTab || tid;
+        this.setState({ tabs: next, activeTab: newActive }, () => this._persist());
     }
 
-    _onSelectThread = (id) => {
-        this.setState({ activeThread: id }, () => this._persist());
+    _onSelectTab = (id) => {
+        this.setState({ activeTab: id }, () => this._persist());
     };
 
-    _onCloseThread = (id) => {
-        const next = this.state.threads.filter(t => t.id !== id);
-        const active = this.state.activeThread === id ? (next[0]?.id || '') : this.state.activeThread;
+    _onCloseTab = (id) => {
+        const next = this.state.tabs.filter(t => t.id !== id);
+        const active = this.state.activeTab === id ? (next[0]?.id || '') : this.state.activeTab;
         this.setState(({ messagesByThread, processingByThread }) => {
             const m = { ...messagesByThread }; delete m[id];
             const p = { ...processingByThread }; delete p[id];
-            return { threads: next, activeThread: active, messagesByThread: m, processingByThread: p };
+            return { tabs: next, activeTab: active, messagesByThread: m, processingByThread: p };
         }, () => this._persist());
     };
 
-    _onAddThread = () => {
-        // TODO: серверный протокол создания треда. Пока — локальный пустой таб.
-        const id = `new-${Date.now()}`;
+    _onAddTab = () => {
+        const id = (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/-/g, '').slice(0, 8);
+        this.props.app.send({ type: 'transport', method: 'thread_rename', uuid: id, name: '' });
         this.setState({
-            threads: [...this.state.threads, { id, label: 'new' }],
-            activeThread: id,
+            tabs: [...this.state.tabs, { id, label: '' }],
+            activeTab: id,
         }, () => this._persist());
+    };
+
+    _onRenameTab = (id) => {
+        const cur = this.state.tabs.find(t => t.id === id);
+        const name = prompt('Имя треда:', cur?.label || '');
+        if (name == null || name === cur?.label) return;
+        this.props.app.send({ type: 'transport', method: 'thread_rename', uuid: id, name });
+    };
+
+    _openTabFromHistory = (id) => {
+        const label = this.state.threads[id] || '';
+        this.setState({
+            tabs: [...this.state.tabs, { id, label }],
+            activeTab: id,
+        }, () => this._persist());
+        Dialog.close();
     };
 
     _onShowHistory = () => {
-        // TODO: список архивных тредов (отдельный popup/overlay).
-        console.log('thread history (TODO)');
+        const openIds = new Set(this.state.tabs.map(t => t.id));
+        const closed = Object.entries(this.state.threads).filter(([id]) => !openIds.has(id));
+        Dialog.open(html`
+            <div class=${cl.historyHeader}>История тредов</div>
+            ${closed.length === 0
+                ? html`<div class=${cl.historyEmpty}>Все треды уже открыты</div>`
+                : html`<div class=${cl.historyList}>${closed.map(([id, label]) => html`
+                    <div key=${id} class=${cl.historyItem} onClick=${() => this._openTabFromHistory(id)}>
+                        <span class=${label ? '' : cl.untitled}>${label || 'Untitled'}</span>
+                    </div>`)}
+                </div>`}
+        `);
     };
 
     _updateThread(tid, fn) {
@@ -98,7 +126,7 @@ export class Chat extends Component {
 
     handleMessage(ev) {
         const tid = ev.thread_id || '';
-        if (this.props.threadsEnabled !== false) this._ensureThread(tid);
+        if (this.props.threadsEnabled !== false) this._ensureTab(tid);
         const m = ev.method;
         const sid = ev.stream_id;
         const sk = sid != null ? `${tid}:${sid}` : null;
@@ -158,6 +186,11 @@ export class Chat extends Component {
             this._updateThread(tid, cur => [...cur, { kind: 'media', media: 'voice', items: [ev.item] }]);
         } else if (m === 'send_suggestions') {
             this._updateThread(tid, cur => [...cur, { kind: 'suggestions', text: ev.text || '', options: ev.options || [] }]);
+        } else if (m === 'thread_rename') {
+            this.setState(({ tabs, threads }) => ({
+                tabs: tabs.map(t => t.id === ev.uuid ? { ...t, label: ev.name } : t),
+                threads: { ...threads, [ev.uuid]: ev.name },
+            }), () => this._persist());
         } else if (m === 'process_message') {
             const items = [];
             for (const p of (ev.content_parts || [])) {
@@ -177,27 +210,28 @@ export class Chat extends Component {
         }
     }
 
-    render({ connected, className, threadsEnabled = true }, { threads, activeThread, messagesByThread, processingByThread }) {
-        const tabs = threads.map(t => ({
+    render({ connected, className, threadsEnabled = true }, { tabs, activeTab, messagesByThread, processingByThread }) {
+        const tabsRender = tabs.map(t => ({
             id: t.id,
-            label: html`<span>${t.label}</span>${processingByThread[t.id] ? html`<span class=${cl.tabSpinner}></span>` : null}`,
+            label: html`<span class=${t.label ? '' : cl.untitled}>${t.label || 'Untitled'}</span>${processingByThread[t.id] ? html`<span class=${cl.tabSpinner}></span>` : null}`,
             closable: threadsEnabled,
         }));
         return html`
             <div class="${cl.chat} ${className || ''}">
                 <div class=${cl.tabBar}>
-                    <${Tabs} tabs=${tabs} active=${activeThread}
-                             onSelect=${this._onSelectThread}
-                             onClose=${this._onCloseThread} />
+                    <${Tabs} tabs=${tabsRender} active=${activeTab}
+                             onSelect=${this._onSelectTab}
+                             onClose=${this._onCloseTab}
+                             contextItems=${threadsEnabled ? (t => [{ label: 'Переименовать', action: () => this._onRenameTab(t.id) }]) : null} />
                     ${threadsEnabled && html`
-                        <button class=${cl.headerBtn} title="Thread history" onClick=${this._onShowHistory}>${ICON_CLOCK}</button>
-                        <button class=${cl.headerBtn} title="New thread" onClick=${this._onAddThread}>${ICON_PLUS}</button>`}
+                        <button class=${cl.headerBtn} title="История тредов" onClick=${this._onShowHistory}>${ICON_CLOCK}</button>
+                        <button class=${cl.headerBtn} title="Новый тред" onClick=${this._onAddTab}>${ICON_PLUS}</button>`}
                 </div>
-                ${threads.map(t => html`
+                ${tabs.map(t => html`
                     <${ChatDialog}
                         key=${t.id}
                         connected=${connected}
-                        className=${t.id === activeThread ? '' : cl.hidden}
+                        className=${t.id === activeTab ? '' : cl.hidden}
                         messages=${messagesByThread[t.id] || []}
                         threadId=${t.id}
                         onSubmit=${this._onSubmit(t.id)} />`)}
@@ -230,6 +264,19 @@ cl.headerBtn = css`
   & svg { display: block; }
 `;
 const spin = keyframes`to { transform: rotate(360deg); }`;
+cl.untitled = css`color: var(--text-dim); font-style: italic;`;
+cl.historyHeader = css`
+  padding: 12px 16px; font-size: 14px; font-weight: 500; color: var(--text);
+  border-bottom: 1px solid var(--border);
+`;
+cl.historyList = css`
+  min-width: 280px; max-height: 60vh; overflow-y: auto;
+`;
+cl.historyItem = css`
+  padding: 10px 16px; cursor: pointer; font-size: 13px; color: var(--text);
+  &:hover { background: var(--surface2); }
+`;
+cl.historyEmpty = css`padding: 16px; font-size: 13px; color: var(--text-dim); text-align: center;`;
 cl.tabSpinner = css`
   display: inline-block; width: 8px; height: 8px;
   margin-left: 6px; vertical-align: middle;

@@ -161,7 +161,7 @@ async def main():
     tool_name = sys.argv[1] if len(sys.argv) > 1 else "sandbox_codingmode_launch"
     args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
     user_text = sys.argv[3] if len(sys.argv) > 3 else "Привет! Напиши в чате «pong» три раза подряд."
-    DashboardTransport.set_server_config(**config.get("web", {}))
+    DashboardTransport.start(config.get("web", {}))
     transport = DummyTransport()
     agent = Agent.from_config(
         config["agent"], id="main", transport=transport,

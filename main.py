@@ -58,7 +58,7 @@ def release_pid_lock():
     except FileNotFoundError: pass
 
 async def run_cli():
-    DashboardTransport.set_server_config(**config.get("web", {}))
+    DashboardTransport.start(config.get("web", {}))
     transport = MultiTransport([CliTransport(), DashboardTransport(**config.get("web", {}).get("transport", {}))])
     agent = Agent.from_config(resolve(config["agent"]), id="main", agent_dir=os.getcwd(), transport=transport)
     await agent.start()
@@ -110,8 +110,8 @@ async def run_telegram():
         agents[key] = agent
         return agent
 
-    DashboardTransport.set_server_config(**config.get("web", {}))
-    TelegramTransport.start(config["telegram"], make_agent)
+    DashboardTransport.start(config.get("web", {}), make_agent)
+    TelegramTransport.start(config.get("telegram",{}), make_agent)
 
     await make_agent("main")
     await asyncio.Event().wait()

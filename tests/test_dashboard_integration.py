@@ -75,7 +75,7 @@ async def dash():
     WebTransport._server_task = None
     WebTransport._tunnel_url = None
     WebTransport._tunnel_ready = None
-    WebTransport.set_server_config(port=port, password_hash="")
+    WebTransport.start({"port": port, "password_hash": ""})
 
     sb = SandboxSkill()
     cs = ConfigSkill()

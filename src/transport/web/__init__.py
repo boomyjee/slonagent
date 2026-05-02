@@ -1,5 +1,6 @@
 import asyncio, base64, contextlib, hashlib, inspect, json, logging, mimetypes, os, re, shutil, time, uuid
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated
@@ -86,6 +87,15 @@ async def start_tunnel(port: int, subdomain: str, sish_domain: str, sish_port: i
     return url, conn
 
 
+@dataclass
+class MountState:
+    clients: set = field(default_factory=set)
+    last_active_ws: WebSocket | None = None
+    replay_transport: deque = field(default_factory=lambda: deque(maxlen=100))
+    replay_other: deque = field(default_factory=lambda: deque(maxlen=400))
+    message_id_counter: int = 0
+
+
 class WebTransport(BaseTransport):
     """Base for transports that serve a chat UI over a shared HTTP server.
 
@@ -112,7 +122,7 @@ class WebTransport(BaseTransport):
     _sish_port: int = 2222
     _sish_key: str = ""
     _password_hash: str = ""
-    # Loop on which the uvicorn server lives. Captured at set_server_config()
+    # Loop on which the uvicorn server lives. Captured in WebTransport.start()
     # so _ensure_server can schedule its server/tunnel tasks here regardless
     # of which thread first triggers it (e.g. an RPC worker calling into a
     # sandbox-bridge factory).
@@ -141,46 +151,39 @@ class WebTransport(BaseTransport):
         "Access-Control-Allow-Origin": "*",
     }
 
+    # Shared state per mount (fork): clients/replay/last_active/counter.
+    # Multiple WebTransport instances (one per thread agent) of the same fork
+    # all bind to the same WS endpoint and share the same connected clients.
+    _mount_states: dict[str, "MountState"] = {}
+    _agent_factory = None  # main.py устанавливает в WebTransport.start()
+
     def __init__(self, prefix: str = "", verbose: bool = True):
         super().__init__()
         self._prefix = prefix
         self.verbose = verbose
-        self._clients: set[WebSocket] = set()
-        # Последний WS, через который пришло user-message. Команды-уведомления
-        # (open_tab) уходят именно туда, чтобы не открывать вкладку у юзера
-        # который сейчас не «активен».
-        self._last_active_ws: WebSocket | None = None
-        self._replay_transport: deque = deque(maxlen=100)
-        self._replay_other: deque = deque(maxlen=400)
         self._mount_id: str | None = None
         self._thread_id: str | None = None
-        # Monotonic id stamped on every outgoing event. Clients track the
-        # highest id they've seen and ask for "give me everything since X"
-        # via {type:"replay", last_seen_id: X} on ws.open — that way a
-        # mobile reconnect into a still-alive page doesn't redraw history.
-        self._message_id_counter: int = 0
         self._web_skill = WebTransportSkill(self)
+
+    @property
+    def _mount_state(self) -> "MountState":
+        return WebTransport._mount_states[self._mount_id]
 
     def get_skills(self):
         return [self._web_skill]
 
-    @staticmethod
-    def set_server_config(
-        port: int = 8765,
-        sish_domain: str = "",
-        sish_port: int = 2222,
-        sish_key: str = "",
-        password_hash: str = "",
-        **_ignored,
-    ):
-        """Configure the shared uvicorn server. Call once from main.py before
-        constructing any web transports. Can be invoked via any subclass."""
-        WebTransport._port = port
-        WebTransport._sish_domain = sish_domain
-        WebTransport._sish_port = sish_port
-        WebTransport._sish_key = sish_key
-        WebTransport._password_hash = password_hash
+    @classmethod
+    def start(cls, config: dict, make_agent=None):
+        """Configure the shared uvicorn server and stash the agent factory.
+        Call once from main.py before constructing any web transports."""
+        WebTransport._port = config.get("port", 8765)
+        WebTransport._sish_domain = config.get("sish_domain", "")
+        WebTransport._sish_port = config.get("sish_port", 2222)
+        WebTransport._sish_key = config.get("sish_key", "")
+        WebTransport._password_hash = config.get("password_hash", "")
         WebTransport._loop = asyncio.get_running_loop()
+        if make_agent is not None:
+            WebTransport._agent_factory = staticmethod(make_agent)
 
     async def get_auth_url(self, sub_path: str = "") -> str:
         """URL with a daily auth token appended (for sharing in Telegram etc)."""
@@ -208,12 +211,12 @@ class WebTransport(BaseTransport):
     def _ensure_server():
         # May be called from any thread (e.g. an RPC worker building a
         # sandbox-bridge transport). All loop-bound operations are scheduled
-        # onto WebTransport._loop, captured at set_server_config(), so this
+        # onto WebTransport._loop, captured in WebTransport.start(), so this
         # function has no thread affinity of its own.
         if WebTransport._app is not None:
             return
         if WebTransport._loop is None:
-            raise RuntimeError("WebTransport._loop not set; call set_server_config() from the main loop first")
+            raise RuntimeError("WebTransport._loop not set; call WebTransport.start() from the main loop first")
         WebTransport._app = FastAPI()
 
         _REALM = "SlonAgent"
@@ -367,13 +370,14 @@ class WebTransport(BaseTransport):
 
     def set_agent(self, agent):
         super().set_agent(agent)
-        if self._thread_id is None:
-            self._thread_id = agent.thread_id
-        if not self._mount or self._mount_id is not None: return
+        if self._mount_id is not None: return
+        self._thread_id = agent.thread_id
         self._mount_id = agent.id
-        self._ensure_server()
-        self._registered_urls: list[str] = []
-        self.register_routes()
+        WebTransport._mount_states.setdefault(self._mount_id, MountState())
+        if self._mount:
+            self._registered_urls: list[str] = []
+            self._ensure_server()
+            self.register_routes()
 
     def register_routes(self):
         self.register_route("websocket", "/ws", self._ws)
@@ -465,7 +469,12 @@ class WebTransport(BaseTransport):
         # No auto-replay — clients ask for it explicitly via a "replay"
         # message after they connect (so reconnects on a live page can
         # specify last_seen_id and skip what they already have).
-        self._clients.add(ws)
+        self._mount_state.clients.add(ws)
+        for uuid_, info in self.agent.thread_list().items():
+            await ws.send_text(json.dumps({
+                "type": "transport", "method": "thread_rename",
+                "uuid": uuid_, "name": info.get("name", ""),
+            }, ensure_ascii=False))
         try:
             while True:
                 data = await ws.receive_text()
@@ -478,9 +487,9 @@ class WebTransport(BaseTransport):
         except WebSocketDisconnect:
             pass
         finally:
-            self._clients.discard(ws)
-            if self._last_active_ws is ws:
-                self._last_active_ws = None
+            self._mount_state.clients.discard(ws)
+            if self._mount_state.last_active_ws is ws:
+                self._mount_state.last_active_ws = None
             self.on_ws_close(ws)
 
     def on_ws_close(self, ws):
@@ -491,7 +500,7 @@ class WebTransport(BaseTransport):
         if msg.get("type") == "replay" and ws is not None:
             last_seen = msg.get("last_seen_id", -1)
             import heapq
-            stream = heapq.merge(self._replay_transport, self._replay_other,key=lambda e: e.get("id", 0))
+            stream = heapq.merge(self._mount_state.replay_transport, self._mount_state.replay_other,key=lambda e: e.get("id", 0))
             for event in stream:
                 if event.get("id", 0) > last_seen:
                     await ws.send_text(json.dumps(event, ensure_ascii=False))
@@ -500,7 +509,7 @@ class WebTransport(BaseTransport):
             # Запоминаем клиента который последним прислал user message — туда
             # уйдут адресные команды от агента (например, dashboard.open_tab).
             if ws is not None:
-                self._last_active_ws = ws
+                self._mount_state.last_active_ws = ws
             new_parts = []
             for p in msg.get("content_parts", []):
                 if isinstance(p, dict) and p.get("type") == "file":
@@ -514,8 +523,14 @@ class WebTransport(BaseTransport):
             # replayed on reconnect. Chat.js no longer adds user messages
             # to local state — it renders them when this event comes in.
             await self.send(msg, replay=True)
+            target = self.agent
+            tid = msg.get("thread_id", "")
+            if tid != self.agent.thread_id and WebTransport._agent_factory:
+                resolved = await WebTransport._agent_factory(self.agent.id, tid)
+                if resolved is not None:
+                    target = resolved
             try:
-                await self.process_message(
+                await target.process_message(
                     content_parts=content_parts,
                     user_message_id=msg.get("user_message_id"),
                     trigger_answer=msg.get("trigger_answer", True),
@@ -523,9 +538,9 @@ class WebTransport(BaseTransport):
             except Exception:
                 log.exception("[ws] process_message FAILED")
             return
-        if msg.get("type") == "transport" and msg.get("method") == "rename_thread":
+        if msg.get("type") == "transport" and msg.get("method") == "thread_rename":
             uuid, name = msg.get("uuid"), msg.get("name")
-            if uuid and name:
+            if uuid is not None and name is not None:
                 await self.agent.thread_rename(uuid, name)
 
     @property
@@ -610,35 +625,35 @@ class WebTransport(BaseTransport):
         self._gc_uploads()
 
     async def send(self, event: dict, replay=False):
-        self._message_id_counter += 1
-        event = {**event, "id": self._message_id_counter, "thread_id": self._thread_id}
+        self._mount_state.message_id_counter += 1
+        event = {**event, "id": self._mount_state.message_id_counter, "thread_id": self._thread_id}
         if replay:
-            buf = self._replay_transport if event.get("type") == "transport" else self._replay_other
+            buf = self._mount_state.replay_transport if event.get("type") == "transport" else self._mount_state.replay_other
             buf.append(event)
-        if not self._clients: return
+        if not self._mount_state.clients: return
         data = json.dumps(event, ensure_ascii=False)
         dead = set()
-        for ws in list(self._clients):
+        for ws in list(self._mount_state.clients):
             try:
                 await ws.send_text(data)
             except Exception:
                 dead.add(ws)
-        self._clients -= dead
+        self._mount_state.clients -= dead
 
     async def send_targeted(self, event: dict):
         """Шлёт только клиенту, который последним прислал user-message.
         Если такого нет (никто не подключён или disconnected) — кидает,
         чтобы вызывающий tool вернул ошибку в ллм."""
-        target = self._last_active_ws
-        if target is None or target not in self._clients:
+        target = self._mount_state.last_active_ws
+        if target is None or target not in self._mount_state.clients:
             raise RuntimeError("no active dashboard client")
-        self._message_id_counter += 1
-        event = {**event, "id": self._message_id_counter, "thread_id": self._thread_id}
+        self._mount_state.message_id_counter += 1
+        event = {**event, "id": self._mount_state.message_id_counter, "thread_id": self._thread_id}
         try:
             await target.send_text(json.dumps(event, ensure_ascii=False))
         except Exception as e:
-            self._clients.discard(target)
-            self._last_active_ws = None
+            self._mount_state.clients.discard(target)
+            self._mount_state.last_active_ws = None
             raise RuntimeError(f"target client send failed: {e}")
 
     # --- BaseTransport interface ---
@@ -672,7 +687,7 @@ class WebTransport(BaseTransport):
         await self._transport_event("inject_message", text=text)
 
     async def thread_rename(self, uuid: str, name: str):
-        await self.send({"type": "thread_renamed", "uuid": uuid, "name": name})
+        await self._transport_event("thread_rename", uuid=uuid, name=name)
 
     # ─── Outbound media — копируем файл в uploads_dir, фронт получает URL ────
 
@@ -723,7 +738,7 @@ class WebTransport(BaseTransport):
         и попробует загрузить, поэтому файл нужен."""
         cutoff = time.time() - 24 * 3600
         referenced = set()
-        for buf in (self._replay_transport, self._replay_other):
+        for buf in (self._mount_state.replay_transport, self._mount_state.replay_other):
             for ev in buf:
                 self._collect_upload_names(ev, referenced)
         for entry in os.scandir(self.uploads_dir):

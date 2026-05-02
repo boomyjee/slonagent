@@ -257,6 +257,7 @@ class TestAgentLoop:
         t.send_app_url = AsyncMock(return_value=None)
         t.get_skills = MagicMock(return_value=[])
         t.set_agent = MagicMock(return_value=None)
+        t.thread_rename = AsyncMock(return_value=None)
         return t
 
     async def _wait_for(self, predicate, timeout=2.0):

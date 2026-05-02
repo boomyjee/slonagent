@@ -13,6 +13,7 @@ class OpenAIBackend(BaseBackend):
     def __init__(self, agent, base_url: str, api_key: str):
         super().__init__(agent)
         self.client = Agent.OpenAI(api_key, base_url)
+        self._stream_counter: int = 0
 
     async def llm(self, tool_choice: str = None, parallel_tool_calls: bool = None, temperature: float = 1.0, max_tokens: int | None = None, system_prompt: str | None = None):
         agent = self.agent
@@ -61,8 +62,8 @@ class OpenAIBackend(BaseBackend):
                 state = ChatCompletionStreamState()
                 display_text = ""
                 display_thinking = ""
-                thinking_id = agent._stream_counter = agent._stream_counter + 1
-                stream_id = agent._stream_counter = agent._stream_counter + 1
+                self._stream_counter += 1; thinking_id = self._stream_counter
+                self._stream_counter += 1; stream_id = self._stream_counter
                 is_thought = False  # XML state machine: внутри <thought>...</thought>
                 tc_counter = 0
                 seen = {}

@@ -838,6 +838,10 @@ class TelegramTransport(BaseTransport):
             if not tg:
                 await _ask_initial(message.chat.id, ttid)
                 return
+            if message.forum_topic_created:
+                if message.forum_topic_created.name:
+                    await tg.agent.thread_rename(tg.agent.thread_id, message.forum_topic_created.name)
+                return
             await tg.handle_message(message)
 
         async def on_callback_query(callback: CallbackQuery):

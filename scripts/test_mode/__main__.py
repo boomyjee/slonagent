@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 async def main():
     if len(sys.argv) < 2: print("Usage: python -m scripts.test_mode <tool_name>"); sys.exit(1)
     tool_name = sys.argv[1]
-    DashboardTransport.set_server_config(**config.get("web", {}))
+    DashboardTransport.start(config.get("web", {}))
 
     async def make_agent(agent_id, tg, **_):
         if agent_id != "main": return None

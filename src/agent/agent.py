@@ -130,6 +130,9 @@ class Agent:
         elif backend == "claude":
             from src.agent.backends.claude import ClaudeBackend
             self.backend_impl = ClaudeBackend(self, **self.backend_params)
+        elif backend == "echo":
+            from src.agent.backends.echo import EchoBackend
+            self.backend_impl = EchoBackend(self, **self.backend_params)
         else:
             raise ValueError(f"Unknown backend: {backend!r}")
 
@@ -138,7 +141,6 @@ class Agent:
         self._stop_event = asyncio.Event()
         self._restrictions_file = os.path.join(memory_dir, ".restrictions.json") if memory_dir else None
         self._restrictions: dict = self._load_restrictions()
-        self._stream_counter: int = 0
 
     def _load_restrictions(self) -> dict:
         if not self._restrictions_file:
@@ -182,6 +184,9 @@ class Agent:
 
     def thread_name(self, uuid: str) -> str | None:
         return self._load_threads().get(uuid, {}).get("name")
+
+    def thread_list(self) -> dict:
+        return self._load_threads()
 
     async def thread_rename(self, uuid: str, name: str):
         threads = self._load_threads()
@@ -270,6 +275,7 @@ class Agent:
     async def start(self, run_loop=True):
         for skill in self.skills:
             await skill.start()
+        await self.thread_rename(self.thread_id, self.thread_name(self.thread_id) or "")
         if run_loop:
             asyncio.create_task(self.loop())
 
