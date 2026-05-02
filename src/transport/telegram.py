@@ -206,13 +206,14 @@ class TelegramTransport(BaseTransport):
                 return False
         if self.thread_id is not None or self.agent.thread_id == "":
             return True
-        name = self.thread_name or f"thread {self.agent.thread_id[:8]}"
+        name = self.agent.thread_name(self.agent.thread_id) or f"thread {self.agent.thread_id[:8]}"
         try:
             topic = await self.bot.create_forum_topic(self.chat_id, name=name)
         except Exception as e:
             log.warning("create_forum_topic failed: %s", e)
             return False
         self.thread_id = topic.message_thread_id
+        self.thread_name = name
         b = self.load_bindings()
         chat = b.setdefault(str(self.chat_id), {"topics": {}})
         chat.setdefault("topics", {})[str(self.thread_id)] = self.agent.thread_id
@@ -304,16 +305,16 @@ class TelegramTransport(BaseTransport):
             self._suggestion_options[msg.message_id] = list(options)
 
     async def thread_rename(self, uuid: str, name: str):
-        if self.chat_id is None: return
-        chat = self.load_bindings().get(str(self.chat_id), {})
-        topic_id = next((int(tid) for tid, tu in chat.get("topics", {}).items() if tu == uuid), None)
-        if topic_id is None: return
-        try:
-            await self.bot.edit_forum_topic(self.chat_id, topic_id, name=name)
-        except Exception as e:
-            log.warning("[telegram] edit_forum_topic failed: %s", e)
-        if self.agent is not None and self.agent.thread_id == uuid:
-            self.thread_name = name
+        for chat_str, chat in self.load_bindings().items():
+            for tid, tu in chat.get("topics", {}).items():
+                if tu != uuid: continue
+                try:
+                    await self.bot.edit_forum_topic(int(chat_str), int(tid), name=name)
+                except Exception as e:
+                    log.warning("[telegram] edit_forum_topic failed: %s", e)
+                if self.agent is not None and self.agent.thread_id == uuid:
+                    self.thread_name = name
+                return
 
     def set_agent(self, agent):
         super().set_agent(agent)
@@ -708,6 +709,9 @@ class TelegramTransport(BaseTransport):
 
     @classmethod
     def reverse_binding(cls, agent_id: str, agent_thread_id: str) -> tuple[int | None, int | None]:
+        # main-агент особый: дефолтный тред — всегда личка.
+        if agent_id == "main" and agent_thread_id == "":
+            return (cls._main_chat_id, None) if cls._main_chat_id is not None else (None, None)
         b = cls.load_bindings()
         for chat_str, chat in b.items():
             if chat.get("agent_id") != agent_id:
@@ -717,8 +721,6 @@ class TelegramTransport(BaseTransport):
             for tk, tid in chat.get("topics", {}).items():
                 if tid == agent_thread_id:
                     return (int(chat_str), int(tk))
-        if agent_id == "main" and agent_thread_id == "" and cls._main_chat_id is not None:
-            return (cls._main_chat_id, None)
         return (None, None)
 
     @classmethod
@@ -808,6 +810,7 @@ class TelegramTransport(BaseTransport):
 
         async def on_message(message: Message):
             if not message.from_user: return
+            if message.forum_topic_created and message.from_user.is_bot: return
             if message.chat.id < 0:
                 if not await is_group_allowed(message.chat.id): return
             else:

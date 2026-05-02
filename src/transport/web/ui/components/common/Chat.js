@@ -45,13 +45,6 @@ export class Chat extends Component {
         persist.set('chat:tabs', { tabs: this.state.tabs, active: this.state.activeTab });
     }
 
-    _ensureTab(tid) {
-        if (this.state.tabs.some(t => t.id === tid)) return;
-        const next = [...this.state.tabs, { id: tid, label: this.state.threads[tid] || '' }];
-        const newActive = this.state.activeTab || tid;
-        this.setState({ tabs: next, activeTab: newActive }, () => this._persist());
-    }
-
     _onSelectTab = (id) => {
         this.setState({ activeTab: id }, () => this._persist());
     };
@@ -67,8 +60,9 @@ export class Chat extends Component {
     };
 
     _onAddTab = () => {
+        // Тред регистрируется на сервере лениво — при первом сообщении (через make_agent
+        // → Agent.start) или явном rename. Закрытие пустого таба не оставит хвостов.
         const id = (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/-/g, '').slice(0, 8);
-        this.props.app.send({ type: 'transport', method: 'thread_rename', uuid: id, name: '' });
         this.setState({
             tabs: [...this.state.tabs, { id, label: '' }],
             activeTab: id,
@@ -126,7 +120,6 @@ export class Chat extends Component {
 
     handleMessage(ev) {
         const tid = ev.thread_id || '';
-        if (this.props.threadsEnabled !== false) this._ensureTab(tid);
         const m = ev.method;
         const sid = ev.stream_id;
         const sk = sid != null ? `${tid}:${sid}` : null;
