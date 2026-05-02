@@ -99,16 +99,38 @@ class FactProvider(BaseProvider):
     async def _consolidate(self, pending: list) -> None:
         """
         Конвертирует накопленные ходы в RetainItem и запускает retain pipeline.
-        Диалоговые реплики конкатенируются в один item чтобы чанкер мог
-        разбить их с учётом контекста соседних сообщений.
+        Pending группируется по треду — чтобы чанкер видел когерентный разговор,
+        а не мешанину реплик из параллельных бесед.
         """
+        by_thread: dict[str, list] = {}
+        for turn in pending:
+            if isinstance(turn, dict):
+                by_thread.setdefault(turn.get("_thread_id", ""), []).append(turn)
+
+        items: list[RetainItem] = []
+        for thread_pending in by_thread.values():
+            items.extend(self._build_retain_items(thread_pending))
+
+        if not items:  return
+
+        threads = ", ".join(tid or "default" for tid in by_thread.keys())
+        async def on_done(summary: str):
+            annotated = f"[треды: {threads}]\n{summary}"
+            self.agent.call_before_next_message(
+                self.agent.transport.send_memory_info(annotated, final=True)
+            )
+
+        retain(items, self._llm, self._model_name, self.storage,
+               with_observations=self._auto_consolidate,
+               done_cb=on_done)
+
+    def _build_retain_items(self, pending: list) -> list[RetainItem]:
+        """Конвертирует pending одного треда в RetainItem'ы (один conversation-item + по одному на документ)."""
         conv_lines: list[str] = []
         conv_ts: datetime | None = None
         items: list[RetainItem] = []
 
         for turn in pending:
-            if not isinstance(turn, dict):
-                continue
             role = turn.get("role", "")
             if role not in ("user", "assistant"):
                 continue
@@ -159,17 +181,7 @@ class FactProvider(BaseProvider):
                 retain_mission=self._retain_mission,
                 custom_instructions=self._custom_instructions,
             ))
-
-        if not items:  return
-
-        async def on_done(summary: str):
-            self.agent.call_before_next_message(
-                self.agent.transport.send_memory_info(summary, final=True)
-            )
-
-        retain(items, self._llm, self._model_name, self.storage,
-               with_observations=self._auto_consolidate,
-               done_cb=on_done)
+        return items
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         """Автоматический recall по тексту пользователя → системный промпт."""

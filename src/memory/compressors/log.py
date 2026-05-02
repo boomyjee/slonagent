@@ -726,8 +726,9 @@ class LogCompressor(BaseProvider):
                 t["_observed"] = True
         log.info("[LogCompressor] %d turns from %d thread(s) → LOG.md", len(turns), len(by_thread))
         final_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
+        threads = ", ".join(tid or "default" for tid in by_thread.keys())
         await self.send_memory_info(
-            f"Свернул {len(turns)} сообщений в наблюдения ({final_tokens} токенов)",
+            f"Свернул {len(turns)} сообщений в наблюдения ({final_tokens} токенов) [треды: {threads}]",
             final=True,
         )
 

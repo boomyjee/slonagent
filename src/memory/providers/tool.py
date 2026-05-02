@@ -69,11 +69,20 @@ class ToolProvider(BaseProvider):
             log.warning("[ToolProvider] save failed: %s", e, exc_info=True)
 
     async def _consolidate(self, pending: list):
+        by_thread: dict[str, list] = {}
+        for turn in pending:
+            if isinstance(turn, dict):
+                by_thread.setdefault(turn.get("_thread_id", ""), []).append(turn)
+
+        for tid, thread_pending in by_thread.items():
+            await self._consolidate_thread(tid, thread_pending)
+        self._save()
+
+    async def _consolidate_thread(self, thread_id: str, pending: list):
         tool_names: set[str] = set()
         pending_calls: dict[str, tuple[dict, str]] = {}  # tool_call_id -> (call_info, call_time)
         contents = []
         for turn in pending:
-            if not isinstance(turn, dict): continue
             role = turn.get("role", "")
             text_parts = []
 
@@ -134,8 +143,7 @@ class ToolProvider(BaseProvider):
         contents = self.agent.strip_contents_private(contents, self.model_name)
         if tool_names:
             await asyncio.gather(*[self._summarize_tool_use(name, contents) for name in tool_names])
-            log.info("[ToolProvider] consolidated %d tools: %s", len(tool_names), list(tool_names))
-        self._save()
+            log.info("[ToolProvider] thread %r: consolidated %d tools: %s", thread_id, len(tool_names), list(tool_names))
 
     async def _summarize_tool_use(self, tool_name: str, contents: list):
         entry = self._tool_stats.setdefault(tool_name, {"content": "", "total_calls": 0, "total_success": 0})
