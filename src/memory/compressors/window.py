@@ -1,10 +1,8 @@
 from src.memory.memory import Memory
+from src.memory.providers.base import BaseProvider
 
 
-from agent import Skill
-
-
-class WindowCompressor(Skill):
+class WindowCompressor(BaseProvider):
     """Стратегия по умолчанию: скользящее окно по токен-бюджету.
 
     Старые сообщения молча удаляются при переполнении.
@@ -16,13 +14,10 @@ class WindowCompressor(Skill):
         soft_limit_tokens: int = 50_000,
         min_user_turns: int = 10,
     ):
-        super().__init__()
+        super().__init__(consolidate_tokens=0)
         self.hard_limit_tokens = hard_limit_tokens
         self.soft_limit_tokens = soft_limit_tokens
         self.min_user_turns = min_user_turns
-
-    def copy_from(self, src_memory_dir: str):
-        return
 
     async def compress(self, turns: list) -> list:
         result, tokens, user_ids = [], 0, set()
