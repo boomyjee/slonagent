@@ -46,9 +46,16 @@ class ClaudeAgentSkill(Skill):
 
 class ClaudeBackend(BaseBackend):
     def __init__(self, agent, sdk_options: dict | None = None):
-        """sdk_options — словарь, который переопределяет дефолтные ключи
-        ClaudeAgentOptions перед запросом. Например, для голой модели:
-        {'system_prompt': None, 'setting_sources': None, 'tools': []}."""
+        """sdk_options — словарь, который переопределяет/добавляет ключи
+        ClaudeAgentOptions перед запросом. По умолчанию backend голый — без
+        claude_code preset, без user settings, без встроенных тулов. Для режима
+        Claude Code передавай:
+            sdk_options={
+                'system_prompt': {'type': 'preset', 'preset': 'claude_code'},
+                'setting_sources': ['user'],
+                ...
+            }
+        """
         super().__init__(agent)
         self._sdk_options = sdk_options or {}
         skill = ClaudeAgentSkill()
@@ -286,16 +293,17 @@ class ClaudeBackend(BaseBackend):
             if self._mcp_server is None:
                 self._mcp_server = self._build_mcp_server()
 
-            # sdk_options перекрывает дефолтные ключи (например, чтобы выключить
-            # claude_code preset для голой модели). dict(**a, **b) на пересечении
-            # ключей бросает TypeError, поэтому делаем явный update.
+            # Дефолт — голый клод (без claude_code preset, setting_sources,
+            # встроенных тулов). claude_code mode добавляет всё это через
+            # sdk_options в ClaudeCodeSkill.
             options_kwargs = {
                 "permission_mode": "bypassPermissions",
                 "cwd": self._cwd,
                 "model": agent.model_name,
                 "include_partial_messages": True,
-                "setting_sources": ["user"],
-                "system_prompt": {"type": "preset", "preset": "claude_code"},
+                "system_prompt": None,
+                "setting_sources": None,
+                "tools": [],
                 "extra_args": extra_args,
                 "mcp_servers": {"slon": self._mcp_server} if self._mcp_server else {},
                 "stderr": _on_stderr,

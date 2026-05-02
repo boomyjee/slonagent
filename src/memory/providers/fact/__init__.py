@@ -3,15 +3,16 @@
 Вместо API-вызовов к серверу — напрямую вызывает локальные модули:
   retain   → src.memory.providers.fact.retain   (факты + консолидация в конце)
   recall   → src.memory.providers.fact.recall   (семантический поиск)
-  reflect  → src.memory.providers.fact.reflect  (агентный цикл для fact_reflect)
   storage  → src.memory.providers.fact.storage  (SQLite + LanceDB)
 
-Логика — 1 в 1 с HindsightProvider:
+LLM-вызовы — через `_make_sub_agent()` (factory эфемерных Agent'ов).
+Каждый параллельный вызов получает свой Agent без shared state.
+
+Логика:
   _consolidate()       накопленные ходы → retain() (факты + консолидация)
   get_context_prompt() recall() по тексту пользователя → в системный промпт
-  fact_recall          явный семантический поиск (≡ hindsight_recall)
-  fact_get_document    получить полный текст документа (≡ hindsight_get_document)
-  fact_reflect         агентный цикл: search_observations → recall → LLM (≡ hindsight_reflect)
+  fact_recall          явный семантический поиск
+  fact_get_document    получить полный текст документа
 """
 import asyncio
 import logging
@@ -35,14 +36,16 @@ class FactProvider(BaseProvider):
 
     Хранит факты в SQLite + LanceDB (без внешнего сервера).
     Встраивание — SentenceTransformer (Qwen3-Embedding-0.6B).
-    LLM — OpenAI-совместимый клиент (AsyncOpenAI).
+    LLM-вызовы — через `_make_sub_agent()` (эфемерный Agent на каждый вызов).
     """
 
     def __init__(
         self,
         model_name: str,
-        api_key: str,
-        base_url: str,
+        api_key: str = "",
+        base_url: str = "",
+        backend: str = "openai",
+        backend_params: dict | None = None,
         consolidate_tokens: int = 3_000,
         recall_max_tokens: int = 12_000,
         auto_recall: bool = False,
@@ -54,8 +57,11 @@ class FactProvider(BaseProvider):
     ):
         """
         Args:
-            model_name:           Имя LLM-модели для извлечения фактов и reflect.
-            api_key:              API-ключ.
+            model_name:           Имя LLM-модели для извлечения фактов.
+            api_key:              API-ключ (для openai-совместимых бэкендов).
+            base_url:             URL API (для openai-совместимых бэкендов).
+            backend:              "openai" | "claude" | ... — какой бэкенд у sub-Agent'а.
+            backend_params:       Доп. параметры конструктора бэкенда (например, sdk_options для claude).
             consolidate_tokens:   Порог токенов накопленных ходов для запуска retain.
             recall_max_tokens:    Мягкий лимит токенов в auto-recall (get_context_prompt).
             auto_recall:          Автоматически подмешивать recall в системный промпт.
@@ -68,6 +74,10 @@ class FactProvider(BaseProvider):
         """
         super().__init__(consolidate_tokens=consolidate_tokens)
         self._model_name          = model_name
+        self._api_key             = api_key
+        self._base_url            = base_url
+        self._backend             = backend
+        self._backend_params      = backend_params
         self._recall_max_tokens   = recall_max_tokens
         self._auto_recall         = auto_recall
         self._auto_consolidate    = auto_consolidate
@@ -75,11 +85,17 @@ class FactProvider(BaseProvider):
         self._custom_instructions = custom_instructions
         self._rerank_model        = rerank_model
 
-        self._llm = Agent.OpenAI(api_key, base_url)
-
         self._embedding_model = embedding_model
         self.storage: Storage | None = None
         self._current_recall_ids: dict[str, str] = {}  # short_id → full fact_id
+
+    def _make_sub_agent(self) -> Agent:
+        """Эфемерный Agent для одного LLM-вызова. Параллельные вызовы безопасны."""
+        return Agent(
+            id="", model_name=self._model_name,
+            api_key=self._api_key, base_url=self._base_url,
+            backend=self._backend, backend_params=self._backend_params,
+        )
 
     async def start(self):
         await super().start()
@@ -120,7 +136,7 @@ class FactProvider(BaseProvider):
                 self.agent.transport.send_memory_info(annotated, final=True)
             )
 
-        retain(items, self._llm, self._model_name, self.storage,
+        retain(items, self._make_sub_agent, self.storage,
                with_observations=self._auto_consolidate,
                done_cb=on_done)
 
@@ -249,8 +265,7 @@ class FactProvider(BaseProvider):
         "Запрос — утверждение или развёрнутый вопрос, не ключевые слова: "
         "вместо 'Анна работа' пиши 'где работает Анна и кем'. "
         "Возвращает три независимых результата: факты из разговоров, синтезированные наблюдения "
-        "и факты из загруженных документов (с document_id — используй его в get_document чтобы прочитать исходный текст). "
-        "Для сложных вопросов (анализ, сравнение, выводы из нескольких фактов) используй fact_reflect."
+        "и факты из загруженных документов (с document_id — используй его в get_document чтобы прочитать исходный текст)."
     )
     async def recall(
         self,
@@ -362,31 +377,8 @@ class FactProvider(BaseProvider):
         from src.memory.providers.fact.retain import create_observations as _create_obs, _observations_lock
         if _observations_lock.locked():
             return "Синтез наблюдений уже запущен."
-        asyncio.create_task(_create_obs(self.storage, self._llm, self._model_name))
+        asyncio.create_task(_create_obs(self.storage, self._make_sub_agent))
         return "Запущен синтез наблюдений в фоне."
-
-    @tool(
-        "Глубокий анализ памяти с рассуждением через агентный цикл поиска. "
-        "Используй когда нужно: сравнить факты, сделать вывод из нескольких событий, "
-        "ответить на 'почему', 'как изменилось', 'что общего'. "
-        "Медленнее fact_recall — не используй для простых фактических вопросов."
-    )
-    async def reflect(
-        self,
-        query: Annotated[str, "Вопрос для глубокого анализа"],
-    ) -> dict:
-        try:
-            from src.memory.providers.fact.reflect import run_reflect_agent
-            return await run_reflect_agent(
-                query=query[:1500],
-                storage=self.storage,
-                llm_client=self._llm,
-                model_name=self._model_name,
-                rerank_model=self._rerank_model,
-            )
-        except Exception as e:
-            log.warning("[FactProvider] reflect failed: %s", e, exc_info=True)
-            return {"error": str(e)}
 
     @tool("Зафиксировать в истории, какие факты из автоматического контекста повлияли на ответ.")
     async def context_used(

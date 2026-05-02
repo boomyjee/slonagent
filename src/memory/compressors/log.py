@@ -641,6 +641,8 @@ class LogCompressor(BaseProvider):
         self._base_url = base_url
         self._backend = backend
         self._backend_params = backend_params
+        self._memo_lines: list[str] = []
+        self._memo_stream_id: int = id(self._memo_lines)
 
 
     async def send_memory_info(self, delta: str = "", *, cont: bool = True, final: bool = False):
@@ -790,13 +792,7 @@ class LogCompressor(BaseProvider):
         except Exception as e:
             log.error("[LogCompressor] %s LLM failed: %s", label, e, exc_info=True)
             return ""
-        # Claude-бекенд возвращает list[turn] (по блоку на запись), OpenAI — один dict.
-        if isinstance(turn, list):
-            parts = [t.get("content") for t in turn
-                     if isinstance(t, dict) and t.get("role") == "assistant"
-                     and isinstance(t.get("content"), str)]
-            return "\n".join(parts).strip()
-        return (turn.get("content", "") or "").strip()
+        return Agent.turn_text(turn)
 
     async def _run_observer(self, turns: list, existing_observations: str) -> str:
         messages = []

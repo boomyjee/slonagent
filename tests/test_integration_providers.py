@@ -1,11 +1,22 @@
 """
 Интеграционные тесты провайдеров памяти и скиллов с реальными зависимостями.
 
-Запуск:
-    LLM_KEY=<key> venv\\Scripts\\python -m pytest tests/test_integration_providers.py -v -m integration
+LLM-тесты параметризованы по трём провайдерам:
+  - gemini  — через openai-совместимый эндпоинт ($GEMINI_KEY)
+  - kimi    — через openrouter ($OPENROUTER_KEY)
+  - claude  — через claude-cli (CLAUDE_AVAILABLE=1, нужна установленная и
+              авторизованная claude CLI)
 
-Тесты автоматически пропускаются если не заданы нужные переменные окружения или
-не установлен Podman.
+Тесты автоматически пропускаются если конкретный провайдер не настроен.
+Embeddings всегда через gemini ($GEMINI_KEY) — DB не должна меняться при
+смене LLM-бэкенда.
+
+Запуск всех:
+    GEMINI_KEY=... OPENROUTER_KEY=... CLAUDE_AVAILABLE=1 \\
+        venv\\Scripts\\python -m pytest tests/test_integration_providers.py -v -m integration
+
+Запуск только одного провайдера:
+    venv\\Scripts\\python -m pytest tests/test_integration_providers.py -v -m integration -k gemini
 """
 import asyncio
 import json
@@ -29,13 +40,74 @@ pytestmark = pytest.mark.integration
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-def get_llm_config() -> tuple[str, str, str]:
-    key = os.environ.get("LLM_KEY")
+GEMINI_URL_DEFAULT = "https://generativelanguage.googleapis.com/v1beta/openai/"
+OPENROUTER_URL_DEFAULT = "https://openrouter.ai/api/v1"
+
+
+def _get_llm_config(provider: str) -> dict:
+    """Возвращает {backend, model_name, api_key, base_url, backend_params}."""
+    if provider == "gemini":
+        key = os.environ.get("GEMINI_KEY")
+        if not key:
+            pytest.skip("GEMINI_KEY не задан")
+        return {
+            "backend": "openai",
+            "model_name": os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"),
+            "api_key": key,
+            "base_url": os.environ.get("GEMINI_URL", GEMINI_URL_DEFAULT),
+            "backend_params": None,
+        }
+    if provider == "kimi":
+        key = os.environ.get("OPENROUTER_KEY") or os.environ.get("KIMI_KEY")
+        if not key:
+            pytest.skip("OPENROUTER_KEY/KIMI_KEY не задан")
+        return {
+            "backend": "openai",
+            "model_name": os.environ.get("KIMI_MODEL", "moonshotai/kimi-k2.6"),
+            "api_key": key,
+            "base_url": os.environ.get("KIMI_URL", OPENROUTER_URL_DEFAULT),
+            "backend_params": None,
+        }
+    if provider == "claude":
+        if not os.environ.get("CLAUDE_AVAILABLE"):
+            pytest.skip("CLAUDE_AVAILABLE не задан (нужен claude-cli + auth)")
+        return {
+            "backend": "claude",
+            "model_name": os.environ.get("CLAUDE_MODEL", "sonnet"),
+            "api_key": "",
+            "base_url": "",
+            "backend_params": None,  # голый дефолт
+        }
+    raise ValueError(f"Unknown provider: {provider}")
+
+
+@pytest.fixture(params=["gemini", "kimi", "claude"])
+def llm(request) -> dict:
+    """Параметризованная LLM-конфигурация. Каждый тест прогоняется на 3 провайдерах."""
+    return _get_llm_config(request.param)
+
+
+def get_embedding_config() -> dict:
+    """Embeddings всегда через gemini — БД не зависит от LLM-провайдера."""
+    key = os.environ.get("GEMINI_KEY")
     if not key:
-        pytest.skip("LLM_KEY не задан")
-    url = os.environ.get("LLM_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
-    model = os.environ.get("LLM_MODEL", "gemini-3-flash-preview")
-    return key, url, model
+        pytest.skip("GEMINI_KEY не задан (нужен для embeddings)")
+    return {
+        "provider": "openai",
+        "model": "gemini-embedding-001",
+        "api_key": key,
+        "base_url": os.environ.get("GEMINI_URL", GEMINI_URL_DEFAULT),
+    }
+
+
+def get_default_llm_config() -> dict:
+    """Любой настроенный провайдер — для тестов которым нужен Agent но не LLM."""
+    for p in ("gemini", "kimi", "claude"):
+        try:
+            return _get_llm_config(p)
+        except pytest.skip.Exception:
+            continue
+    pytest.skip("Ни один LLM провайдер не настроен")
 
 
 def require_podman():
@@ -67,14 +139,15 @@ class CapturingTransport(BaseTransport):
         return self.messages[-1] if self.messages else ""
 
 
-def make_agent(tmp_path, providers=None) -> tuple[Agent, CapturingTransport]:
-    key, url, model = get_llm_config()
+def make_agent(tmp_path, llm: dict, providers=None) -> tuple[Agent, CapturingTransport]:
     transport = CapturingTransport()
     agent = Agent(
         id="test",
-        model_name=model,
-        api_key=key,
-        base_url=url,
+        model_name=llm["model_name"],
+        api_key=llm["api_key"],
+        base_url=llm["base_url"],
+        backend=llm["backend"],
+        backend_params=llm["backend_params"],
         agent_dir=str(tmp_path),
         memory_compressor=PassthroughCompressor(),
         memory_providers=providers or [],
@@ -87,24 +160,18 @@ def make_agent(tmp_path, providers=None) -> tuple[Agent, CapturingTransport]:
 # LogCompressor — Observer с реальным LLM
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def test_log_compressor_observer(tmp_path):
+async def test_log_compressor_observer(tmp_path, llm):
     """Observer генерирует observations из реального диалога."""
-    key, url, model = get_llm_config()
     from src.memory.compressors.log import LogCompressor
 
     compressor = LogCompressor(
-        model_name=model, api_key=key, base_url=url,
+        model_name=llm["model_name"], api_key=llm["api_key"], base_url=llm["base_url"],
+        backend=llm["backend"], backend_params=llm["backend_params"],
         compress_after_tokens=1,   # сжимать сразу
         recent_tokens=10,          # очень маленький бюджет — всё старое идёт в observe
         min_recent_turns=1,
     )
-    agent = Agent(
-        id="test",
-        model_name=model, api_key=key, base_url=url,
-        agent_dir=str(tmp_path),
-        memory_compressor=compressor,
-        transport=CapturingTransport(),
-    )
+    agent, _ = make_agent(tmp_path, llm)
     compressor.register(agent)
 
     turns = [
@@ -116,35 +183,26 @@ async def test_log_compressor_observer(tmp_path):
         {"role": "assistant", "content": "Отличное хобби!"},
     ]
 
-    result = await compressor.compress(turns)
+    await compressor._consolidate(turns)
 
-    om_turns = [t for t in result if isinstance(t, dict) and t.get("_observation_message")]
-    assert len(om_turns) == 1, "Observer должен создать один OM-turn"
-
-    raw = om_turns[0].get("_raw_observations", "")
-    assert raw, "Observations не должны быть пустыми"
+    raw = compressor._read_log()
+    assert raw, "LOG.md должен быть создан после observer'а"
     # Проверяем что LLM вернул что-то осмысленное
     raw_lower = raw.lower()
     assert any(word in raw_lower for word in ["алексей", "alexei", "alex", "программист", "developer", "moscow", "москв"]), \
         f"Observer не извлёк ключевые факты из диалога. Observations:\n{raw}"
 
 
-async def test_log_compressor_reflect(tmp_path):
+async def test_log_compressor_reflect(tmp_path, llm):
     """Reflector сжимает большой блок observations."""
-    key, url, model = get_llm_config()
-    from src.memory.compressors.log import LogCompressor, _parse_observations
+    from src.memory.compressors.log import LogCompressor
 
     compressor = LogCompressor(
-        model_name=model, api_key=key, base_url=url,
+        model_name=llm["model_name"], api_key=llm["api_key"], base_url=llm["base_url"],
+        backend=llm["backend"], backend_params=llm["backend_params"],
         reflect_after_tokens=1,  # рефлектить сразу
     )
-    agent = Agent(
-        id="test",
-        model_name=model, api_key=key, base_url=url,
-        agent_dir=str(tmp_path),
-        memory_compressor=compressor,
-        transport=CapturingTransport(),
-    )
+    agent, _ = make_agent(tmp_path, llm)
     compressor.register(agent)
 
     long_obs = "\n".join([
@@ -168,13 +226,16 @@ async def test_log_compressor_reflect(tmp_path):
 # ToolProvider — LLM-суммаризация после tool use
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def test_tool_provider_consolidate(tmp_path):
+async def test_tool_provider_consolidate(tmp_path, llm):
     """ToolProvider генерирует описание инструмента через LLM после его использования."""
-    key, url, model = get_llm_config()
     from src.memory.providers.tool import ToolProvider
 
-    provider = ToolProvider(model_name=model, api_key=key, base_url=url, consolidate_tokens=1)
-    agent, _ = make_agent(tmp_path, providers=[provider])
+    provider = ToolProvider(
+        model_name=llm["model_name"], api_key=llm["api_key"], base_url=llm["base_url"],
+        backend=llm["backend"], backend_params=llm["backend_params"],
+        consolidate_tokens=1,
+    )
+    agent, _ = make_agent(tmp_path, llm, providers=[provider])
     await agent.start()
 
     # Симулируем диалог с вызовом инструмента
@@ -216,7 +277,7 @@ async def test_sandbox_exec(tmp_path):
         default_timeout=60,
         runtime="podman",
     )
-    agent, _ = make_agent(tmp_path)
+    agent, _ = make_agent(tmp_path, get_default_llm_config())
     skill.register(agent)
     await skill.start()
 
@@ -239,7 +300,7 @@ async def test_sandbox_python(tmp_path):
         container_name=container_name,
         runtime="podman",
     )
-    agent, _ = make_agent(tmp_path)
+    agent, _ = make_agent(tmp_path, get_default_llm_config())
     skill.register(agent)
     await skill.start()
 
@@ -262,7 +323,7 @@ async def test_sandbox_timeout(tmp_path):
         container_name=container_name,
         runtime="podman",
     )
-    agent, _ = make_agent(tmp_path)
+    agent, _ = make_agent(tmp_path, get_default_llm_config())
     skill.register(agent)
     await skill.start()
 
@@ -285,7 +346,7 @@ async def test_sandbox_read_file(tmp_path):
 
     container_name = f"slonagent_test_rf_{os.getpid()}"
     skill = SandboxSkill(workspace_dir=str(workspace), container_name=container_name, runtime="podman")
-    agent, _ = make_agent(tmp_path)
+    agent, _ = make_agent(tmp_path, get_default_llm_config())
     skill.register(agent)
     await skill.start()
 
@@ -301,19 +362,18 @@ async def test_sandbox_read_file(tmp_path):
 # FactProvider — retain + recall с реальными embeddings и LLM
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def test_fact_provider_retain_and_recall(tmp_path):
+async def test_fact_provider_retain_and_recall(tmp_path, llm):
     """FactProvider сохраняет факты из диалога и находит их при recall."""
-    key, url, model = get_llm_config()
     from src.memory.providers.fact import FactProvider
 
-    embedding_cfg = {"provider": "openai", "model": "gemini-embedding-001", "api_key": key, "base_url": url}
     provider = FactProvider(
-        model_name=model, api_key=key, base_url=url,
+        model_name=llm["model_name"], api_key=llm["api_key"], base_url=llm["base_url"],
+        backend=llm["backend"], backend_params=llm["backend_params"],
         consolidate_tokens=1,
         auto_consolidate=False,
-        embedding_model=embedding_cfg,
+        embedding_model=get_embedding_config(),
     )
-    agent, _ = make_agent(tmp_path, providers=[provider])
+    agent, _ = make_agent(tmp_path, llm, providers=[provider])
     await agent.start()
 
     # Диалог с конкретным запоминаемым фактом
@@ -334,7 +394,7 @@ async def test_fact_provider_retain_and_recall(tmp_path):
         context="conversation",
         event_date=datetime(2025, 1, 1, 10, 0),
     )]
-    await _retain_impl(items, provider._llm, provider._model_name, provider.storage, with_observations=False)
+    await _retain_impl(items, provider._make_sub_agent, provider.storage, with_observations=False)
 
     # Recall по запросу о дочери
     recalled = await provider.recall("дочь Маша день рождения")
@@ -343,19 +403,18 @@ async def test_fact_provider_retain_and_recall(tmp_path):
         f"Recall не нашёл факт о дочери Маше. Результат:\n{recalled}"
 
 
-async def test_fact_provider_context_prompt(tmp_path):
+async def test_fact_provider_context_prompt(tmp_path, llm):
     """FactProvider подмешивает релевантные факты в системный промпт."""
-    key, url, model = get_llm_config()
     from src.memory.providers.fact import FactProvider
 
-    embedding_cfg = {"provider": "openai", "model": "gemini-embedding-001", "api_key": key, "base_url": url}
     provider = FactProvider(
-        model_name=model, api_key=key, base_url=url,
+        model_name=llm["model_name"], api_key=llm["api_key"], base_url=llm["base_url"],
+        backend=llm["backend"], backend_params=llm["backend_params"],
         consolidate_tokens=1,
         auto_recall=True,
-        embedding_model=embedding_cfg,
+        embedding_model=get_embedding_config(),
     )
-    agent, _ = make_agent(tmp_path, providers=[provider])
+    agent, _ = make_agent(tmp_path, llm, providers=[provider])
     await agent.start()
 
     turns = [

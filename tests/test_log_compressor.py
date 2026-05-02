@@ -419,20 +419,15 @@ class TestLogCompressorIntegrationOpenAI:
 
 @pytest.mark.integration
 class TestLogCompressorIntegrationClaude:
-    """Прогоняем реальную консолидацию через Claude-бекенд (haiku) в bare-режиме."""
+    """Прогоняем реальную консолидацию через Claude-бекенд (sonnet) в bare-режиме."""
 
     @pytest.mark.asyncio
-    async def test_consolidate_real_dialog_via_haiku(self, tmp_path):
-        model = os.environ.get("CLAUDE_HAIKU_MODEL", "haiku")
+    async def test_consolidate_real_dialog_via_claude(self, tmp_path):
+        model = os.environ.get("CLAUDE_MODEL", "sonnet")
 
         c = LogCompressor(
             model_name=model,
             backend="claude",
-            backend_params={"sdk_options": {
-                "system_prompt": None,
-                "setting_sources": None,
-                "tools": [],
-            }},
             recent_tokens=50,
             min_recent_turns=2,
             compress_after_tokens=1,

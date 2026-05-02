@@ -249,6 +249,21 @@ class Agent:
     async def llm(self, **kwargs):
         return await self.backend_impl.llm(**kwargs)
 
+    @staticmethod
+    def turn_text(turn) -> str:
+        """Извлекает текст ассистента из результата llm() — нормализует разные форматы:
+          - openai-бэкенд возвращает один dict {role, content, ...}
+          - claude-бэкенд возвращает list[turn] (по блоку на запись), сшиваем content всех assistant'ов.
+        """
+        if isinstance(turn, list):
+            parts = [t.get("content") for t in turn
+                     if isinstance(t, dict) and t.get("role") == "assistant"
+                     and isinstance(t.get("content"), str)]
+            return "\n".join(parts).strip()
+        if isinstance(turn, dict):
+            return (turn.get("content") or "").strip()
+        return ""
+
     def call_before_next_message(self, coro):
         self._message_queue.put_nowait(coro)
 

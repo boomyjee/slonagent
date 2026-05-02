@@ -10,7 +10,6 @@ from datetime import datetime
 
 from agent import Agent
 from src.memory.providers.base import BaseProvider
-from src.memory.memory import Memory
 
 log = logging.getLogger(__name__)
 
@@ -35,13 +34,17 @@ Write a concise guideline (max 200 words). Plain text, no code blocks.\
 
 
 class ToolProvider(BaseProvider):
-    def __init__(self, model_name: str, api_key: str, base_url: str, consolidate_tokens: int = 3_000):
+    def __init__(self, model_name: str, api_key: str = "", base_url: str = "",
+                 backend: str = "openai", backend_params: dict | None = None,
+                 consolidate_tokens: int = 3_000):
         super().__init__(consolidate_tokens=consolidate_tokens)
-        self.model_name = model_name
+        self._model_name = model_name
+        self._api_key = api_key
+        self._base_url = base_url
+        self._backend = backend
+        self._backend_params = backend_params
         self._tool_stats_file: str = ""
         self._tool_stats: dict = {}
-
-        self._client = Agent.OpenAI(api_key, base_url)
 
     async def start(self):
         await super().start()
@@ -140,10 +143,18 @@ class ToolProvider(BaseProvider):
                 oai_role = "assistant" if role == "assistant" else "user"
                 contents.append({"role": oai_role, "content": "\n".join(text_parts)})
 
-        contents = self.agent.strip_contents_private(contents, self.model_name)
+        contents = self.agent.strip_contents_private(contents, self._model_name)
         if tool_names:
             await asyncio.gather(*[self._summarize_tool_use(name, contents) for name in tool_names])
             log.info("[ToolProvider] thread %r: consolidated %d tools: %s", thread_id, len(tool_names), list(tool_names))
+
+    def _make_sub_agent(self) -> Agent:
+        """Эфемерный Agent для одного LLM-вызова. Параллельные вызовы безопасны."""
+        return Agent(
+            id="", model_name=self._model_name,
+            api_key=self._api_key, base_url=self._base_url,
+            backend=self._backend, backend_params=self._backend_params,
+        )
 
     async def _summarize_tool_use(self, tool_name: str, contents: list):
         entry = self._tool_stats.setdefault(tool_name, {"content": "", "total_calls": 0, "total_success": 0})
@@ -152,24 +163,22 @@ class ToolProvider(BaseProvider):
             tool_name=tool_name,
             previous_content=entry.get("content") or "(none)",
         )
-        max_retries, delay = 5, 1.0
-        for attempt in range(max_retries):
+        # Эфемерный sub-Agent — каждый параллельный вызов получает свою память
+        # и backend client, без shared state.
+        sub = self._make_sub_agent()
+        try:
+            # SUMMARIZE_PROMPT ссылается на "conversation above" — кладём его
+            # последним user-turn'ом, чтобы диалог реально был выше инструкции.
+            await sub.memory.add_turn(*contents, {"role": "user", "content": instruction})
             try:
-                response = await self._client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[*contents, {"role": "user", "content": instruction}],
-                )
-                entry["content"] = (response.choices[0].message.content or "").strip()
-                log.info("[ToolProvider] summarized %s", tool_name)
-                return
+                turn = await sub.llm()
             except Exception as e:
-                contents = self.agent.apply_error_restriction(self.model_name, e, contents)
-                if attempt + 1 == max_retries:
-                    log.warning("[ToolProvider] summarize failed for %s after %d attempts: %s", tool_name, max_retries, e, exc_info=True)
-                else:
-                    wait = delay * 2 ** attempt
-                    log.warning("[ToolProvider] summarize attempt %d/%d for %s in %.0fs: %s", attempt + 1, max_retries, tool_name, wait, e)
-                    await asyncio.sleep(wait)
+                log.warning("[ToolProvider] summarize failed for %s: %s", tool_name, e, exc_info=True)
+                return
+            entry["content"] = Agent.turn_text(turn)
+            log.info("[ToolProvider] summarized %s", tool_name)
+        finally:
+            await sub.close()
 
     async def get_tool_prompt(self, tool_name: str) -> str:
         entry = self._tool_stats.get(tool_name)

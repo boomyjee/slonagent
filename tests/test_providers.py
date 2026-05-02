@@ -36,36 +36,18 @@ def make_agent(tmp_path):
     )
 
 
-def make_llm_response(tool_name: str, args: dict):
-    """Создаёт mock OpenAI response с одним tool_call."""
-    tc = MagicMock()
-    tc.function = MagicMock()
-    tc.function.name = tool_name
-    tc.function.arguments = json.dumps(args, ensure_ascii=False)
-
-    msg = MagicMock()
-    msg.tool_calls = [tc]
-    msg.content = None
-
-    choice = MagicMock()
-    choice.message = msg
-
-    resp = MagicMock()
-    resp.choices = [choice]
-    return resp
+def make_text_turn(text: str) -> dict:
+    return {"role": "assistant", "content": text}
 
 
-def make_text_response(text: str):
-    msg = MagicMock()
-    msg.tool_calls = []
-    msg.content = text
-
-    choice = MagicMock()
-    choice.message = msg
-
-    resp = MagicMock()
-    resp.choices = [choice]
-    return resp
+def mock_sub_agent(provider, response_text: str = "ok"):
+    """Подменяет factory эфемерных Agent'ов фейком с замоканным llm()/memory."""
+    fake = MagicMock()
+    fake.memory.add_turn = AsyncMock()
+    fake.llm = AsyncMock(return_value=make_text_turn(response_text))
+    fake.close = AsyncMock()
+    provider._make_sub_agent = lambda: fake
+    return fake
 
 
 PENDING = [
@@ -112,9 +94,7 @@ class TestToolProvider:
     @pytest.mark.asyncio
     async def test_consolidate_tracks_stats(self, tmp_path):
         p = await self._make_provider(tmp_path)
-        p._client.chat.completions.create = AsyncMock(
-            return_value=make_text_response("Хороший инструмент.")
-        )
+        mock_sub_agent(p, "Хороший инструмент.")
         await p._consolidate(TOOL_PENDING)
 
         assert "calculator" in p._tool_stats
@@ -125,9 +105,7 @@ class TestToolProvider:
     @pytest.mark.asyncio
     async def test_consolidate_saves_to_disk(self, tmp_path):
         p = await self._make_provider(tmp_path)
-        p._client.chat.completions.create = AsyncMock(
-            return_value=make_text_response("Описание инструмента.")
-        )
+        mock_sub_agent(p, "Описание инструмента.")
         await p._consolidate(TOOL_PENDING)
         assert os.path.exists(p._tool_stats_file)
 
@@ -140,9 +118,7 @@ class TestToolProvider:
     @pytest.mark.asyncio
     async def test_get_tool_prompt_after_consolidation(self, tmp_path):
         p = await self._make_provider(tmp_path)
-        p._client.chat.completions.create = AsyncMock(
-            return_value=make_text_response("Используй для вычислений.")
-        )
+        mock_sub_agent(p, "Используй для вычислений.")
         await p._consolidate(TOOL_PENDING)
         prompt = await p.get_tool_prompt("calculator")
         assert "Используй" in prompt
@@ -150,18 +126,14 @@ class TestToolProvider:
     @pytest.mark.asyncio
     async def test_consolidate_error_not_in_response_is_success(self, tmp_path):
         p = await self._make_provider(tmp_path)
-        p._client.chat.completions.create = AsyncMock(
-            return_value=make_text_response("ok")
-        )
+        mock_sub_agent(p, "ok")
         await p._consolidate(TOOL_PENDING)
         assert p._tool_stats["calculator"]["total_success"] == 1
 
     @pytest.mark.asyncio
     async def test_consolidate_error_in_response_is_failure(self, tmp_path):
         p = await self._make_provider(tmp_path)
-        p._client.chat.completions.create = AsyncMock(
-            return_value=make_text_response("ok")
-        )
+        mock_sub_agent(p, "ok")
         error_pending = [
             {"role": "user", "content": "сломай"},
             {
@@ -180,7 +152,7 @@ class TestToolProvider:
     async def test_consolidate_groups_by_thread(self, tmp_path):
         """Pending мешает 2 треда — саммари запускается по разу на каждый тред где использовался тул."""
         p = await self._make_provider(tmp_path)
-        p._client.chat.completions.create = AsyncMock(return_value=make_text_response("ok"))
+        fake = mock_sub_agent(p, "ok")
         # тред A использует tool_a, тред B использует tool_b
         mixed_pending = [
             {"role": "user", "content": "a", "_thread_id": "thr_a"},
@@ -199,17 +171,20 @@ class TestToolProvider:
         assert p._tool_stats["tool_a"]["total_calls"] == 1
         assert p._tool_stats["tool_b"]["total_calls"] == 1
         # Саммари — по одному на тред
-        assert p._client.chat.completions.create.call_count == 2
+        assert fake.llm.call_count == 2
 
     @pytest.mark.asyncio
     async def test_consolidate_summary_contents_per_thread(self, tmp_path):
         """Контент саммари для каждого треда содержит реплики только этого треда."""
         p = await self._make_provider(tmp_path)
         captured = []
-        async def capture(**kwargs):
-            captured.append(kwargs.get("messages"))
-            return make_text_response("ok")
-        p._client.chat.completions.create = AsyncMock(side_effect=capture)
+        async def capture_turns(*turns):
+            captured.append(list(turns))
+        fake = MagicMock()
+        fake.memory.add_turn = AsyncMock(side_effect=capture_turns)
+        fake.llm = AsyncMock(return_value=make_text_turn("ok"))
+        fake.close = AsyncMock()
+        p._make_sub_agent = lambda: fake
         mixed = [
             {"role": "user", "content": "марсиане", "_thread_id": "thr_a"},
             {"role": "assistant", "content": None, "_thread_id": "thr_a",
@@ -223,9 +198,9 @@ class TestToolProvider:
             {"role": "assistant", "content": "done", "_thread_id": "thr_b"},
         ]
         await p._consolidate(mixed)
-        # Каждый набор messages содержит реплики ровно одного треда
+        # Каждый add_turn содержит реплики ровно одного треда
         assert len(captured) == 2
-        joined = ["\n".join(m.get("content", "") for m in msgs if isinstance(m.get("content"), str)) for msgs in captured]
+        joined = ["\n".join(t.get("content", "") for t in turns if isinstance(t.get("content"), str)) for turns in captured]
         assert any("марсиане" in j and "лошадки" not in j for j in joined)
         assert any("лошадки" in j and "марсиане" not in j for j in joined)
 

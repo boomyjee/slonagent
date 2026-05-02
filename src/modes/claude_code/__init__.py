@@ -43,19 +43,23 @@ class ClaudeCodeSkill(Skill):
             skills=[SandboxSkill(workspace_dir=sandbox.workspace_dir), ConfigSkill()],
             model_name=self._model,
             backend="claude",
-            backend_params={"sdk_options": {"disallowed_tools": [
-                "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit",
-                "Read", "Grep", "Glob", "KillShell",
-            ]}},
+            backend_params={"sdk_options": {
+                # Включаем claude_code preset — нужен встроенный набор тулов клода
+                # (Task/TodoWrite/WebFetch/...). Хост-ФС/шелл отбираем — у нас свои
+                # MCP-обёртки над SandboxSkill (mcp__slon__exec/read/write/...).
+                "system_prompt": {"type": "preset", "preset": "claude_code"},
+                "setting_sources": ["user"],
+                "tools": None,  # SDK default — полный набор claude_code тулов
+                "disallowed_tools": [
+                    "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit",
+                    "Read", "Grep", "Glob", "KillShell",
+                ],
+            }},
             memory_compressor={
                 "__class__": "src.memory.compressors.log.LogCompressor",
-                "model_name": "haiku",
+                "model_name": "sonnet",
                 "backend": "claude",
-                "backend_params": {"sdk_options": {
-                    "system_prompt": None,
-                    "setting_sources": None,
-                    "tools": [],
-                }},
+                # backend_params не передаём — ClaudeBackend по умолчанию голый.
                 "recent_tokens": 80_000,
                 "min_recent_turns": 100,
                 "max_recent_turns_tokens": 150_000,

@@ -4,6 +4,10 @@
 
 Pipeline:
   текст → chunk_text → [LLM параллельно] → Fact list → embeddings → LanceDB
+
+LLM-вызовы — через `make_agent: Callable[[], Agent]`. Каждый параллельный
+вызов создаёт свой эфемерный sub-Agent (без shared state) и закрывает его
+после ответа. JSON-режим обеспечивается промптом + retry на bad JSON.
 """
 import asyncio
 import json
@@ -13,6 +17,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Literal, Optional
+
+from src.agent.agent import Agent, BadFinishReason
 
 log = logging.getLogger(__name__)
 
@@ -172,14 +178,25 @@ Example: "Lost job → couldn't pay rent → moved apartment"
 _OUTPUT_FORMAT_SECTION = """
 
 ══════════════════════════════════════════════════════════════════════════
-OUTPUT FORMAT
+OUTPUT FORMAT — STRICT JSON ONLY
 ══════════════════════════════════════════════════════════════════════════
 
 ALWAYS return valid JSON in this exact structure:
 {"facts": [...]}
 
 If no significant facts found, return: {"facts": []}
-NEVER return plain text. NEVER omit the JSON wrapper."""
+
+CRITICAL OUTPUT RULES — these are HARD requirements, not preferences:
+- The FIRST character of your response MUST be `{`
+- The LAST character of your response MUST be `}`
+- NO markdown headings (no `#`, `##`, `###`)
+- NO markdown tables (no `|---|---|`)
+- NO code fences (no ```json or ```)
+- NO prose before or after the JSON
+- NO bullet points, NO numbered lists
+- NO explanations or commentary
+
+Your ENTIRE output is a single JSON object. Nothing else."""
 
 def _build_extraction_prompt(retain_mission: str = "", custom_instructions: str = "") -> str:
     """Строит промпт извлечения фактов с опциональными mission и custom_instructions."""
@@ -443,8 +460,7 @@ async def _extract_from_chunk(
     total_chunks: int,
     event_date: datetime,
     context: str,
-    client,
-    model_name: str,
+    make_agent: Callable,
     retain_mission: str = "",
     custom_instructions: str = "",
     metadata: Optional[dict] = None,
@@ -455,58 +471,49 @@ async def _extract_from_chunk(
     mentioned_at = effective_date.isoformat()
     system_prompt = _build_extraction_prompt(retain_mission, custom_instructions)
 
-    max_retries, delay = 5, 1.0
+    # Транспортные ошибки уже ретраит OpenAIBackend; здесь ретраим только
+    # парсинг (пустой ответ / невалидный JSON / >20% malformed).
+    max_retries = 3
     for attempt in range(max_retries):
+        sub = make_agent()
         try:
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "user", "content": system_prompt},
-                    {"role": "assistant", "content": "Understood. I will extract significant facts from the text you provide."},
-                    {"role": "user", "content": user_message},
-                ],
-                max_tokens=RETAIN_MAX_OUTPUT_TOKENS,
-                response_format={"type": "json_object"},
+            # system_prompt идёт через kwarg (system role у openai, append-system у claude),
+            # user-сообщение содержит только данные. Иначе claude игнорит инструкции
+            # "return JSON only" и отвечает markdown-таблицей.
+            await sub.memory.add_turn({"role": "user", "content": user_message})
+            try:
+                turn = await sub.llm(
+                    system_prompt=system_prompt,
+                    max_tokens=RETAIN_MAX_OUTPUT_TOKENS,
+                )
+            except BadFinishReason as e:
+                if str(e.reason).lower() in ("length", "max_tokens"):
+                    raise _OutputTooLongError(f"finish_reason={e.reason}")
+                log.warning("[retain] chunk %d bad finish_reason=%s", chunk_index, e.reason)
+                return []
+            except Exception as e:
+                log.warning("[retain] chunk %d extraction failed: %s", chunk_index, e, exc_info=True)
+                return []
+        finally:
+            await sub.close()
+
+        raw = Agent.turn_text(turn)
+        m = re.search(r"\{", raw)
+        if not m:
+            log.warning("[retain] chunk %d no JSON in response (attempt %d): %r", chunk_index, attempt + 1, raw[:300])
+            continue
+
+        data, _ = json.JSONDecoder().raw_decode(raw, m.start())
+        facts, has_malformed = _parse_facts_from_json(data, effective_date, mentioned_at)
+        raw_count = len(data.get("facts", []))
+        if has_malformed and raw_count > 0 and len(facts) < raw_count * 0.8 and attempt < max_retries - 1:
+            log.warning(
+                "[retain] chunk %d: %d/%d facts valid on attempt %d, retrying...",
+                chunk_index, len(facts), raw_count, attempt + 1,
             )
-
-            choice = response.choices[0]
-            if str(getattr(choice, "finish_reason", "")).lower() in ("length", "max_tokens"):
-                raise _OutputTooLongError(f"finish_reason={choice.finish_reason}")
-
-            if choice.message is None:
-                log.warning(
-                    "[retain] chunk %d attempt %d: empty message (finish_reason=%s)",
-                    chunk_index, attempt + 1, getattr(choice, "finish_reason", "?"),
-                )
-                continue
-
-            raw = choice.message.content or ""
-            m = re.search(r"\{", raw)
-            if not m:
-                log.warning("[retain] no JSON object in response (attempt %d): %r", attempt + 1, raw[:300])
-                continue
-
-            data, _ = json.JSONDecoder().raw_decode(raw, m.start())
-            facts, has_malformed = _parse_facts_from_json(data, effective_date, mentioned_at)
-            raw_count = len(data.get("facts", []))
-            if has_malformed and raw_count > 0 and len(facts) < raw_count * 0.8 and attempt < max_retries - 1:
-                log.warning(
-                    "[retain] chunk %d: %d/%d facts valid on attempt %d, retrying...",
-                    chunk_index, len(facts), raw_count, attempt + 1,
-                )
-                continue
-            log.info("[retain] chunk %d/%d: extracted %d facts", chunk_index + 1, total_chunks, len(facts))
-            return facts
-
-        except _OutputTooLongError:
-            raise  # пробрасываем наверх для auto-split
-        except Exception as e:
-            if attempt + 1 == max_retries:
-                log.warning("[retain] chunk %d extraction failed after %d attempts: %s", chunk_index, max_retries, e, exc_info=True)
-            else:
-                wait = delay * 2 ** attempt
-                log.warning("[retain] chunk %d extraction attempt %d/%d in %.0fs: %s", chunk_index, attempt + 1, max_retries, wait, e)
-                await asyncio.sleep(wait)
+            continue
+        log.info("[retain] chunk %d/%d: extracted %d facts", chunk_index + 1, total_chunks, len(facts))
+        return facts
 
     return []
 
@@ -534,8 +541,7 @@ async def _extract_from_chunk_auto_split(
     total_chunks: int,
     event_date: datetime,
     context: str,
-    client,
-    model_name: str,
+    make_agent: Callable,
     retain_mission: str = "",
     custom_instructions: str = "",
     metadata: Optional[dict] = None,
@@ -543,7 +549,7 @@ async def _extract_from_chunk_auto_split(
     """Обёртка с рекурсивным авто-сплитом при OutputTooLong."""
     try:
         return await _extract_from_chunk(
-            chunk, chunk_index, total_chunks, event_date, context, client, model_name,
+            chunk, chunk_index, total_chunks, event_date, context, make_agent,
             retain_mission, custom_instructions, metadata,
         )
     except _OutputTooLongError:
@@ -558,11 +564,11 @@ async def _extract_from_chunk_auto_split(
         )
         sub_results = await asyncio.gather(
             _extract_from_chunk_auto_split(
-                first,  chunk_index, total_chunks, event_date, context, client, model_name,
+                first,  chunk_index, total_chunks, event_date, context, make_agent,
                 retain_mission, custom_instructions, metadata,
             ),
             _extract_from_chunk_auto_split(
-                second, chunk_index, total_chunks, event_date, context, client, model_name,
+                second, chunk_index, total_chunks, event_date, context, make_agent,
                 retain_mission, custom_instructions, metadata,
             ),
         )
@@ -571,8 +577,7 @@ async def _extract_from_chunk_auto_split(
 
 async def extract_facts(
     items: list[RetainItem],
-    client,
-    model_name: str,
+    make_agent: Callable,
     chunk_fn: Callable[[str], list[str]] | None = None,
 ) -> tuple[list[Fact], list[tuple[str, int, str]]]:
     """
@@ -606,7 +611,7 @@ async def extract_facts(
             continue
         for chunk_idx, chunk in enumerate(chunks):
             tasks.append(_limited(_extract_from_chunk_auto_split(
-                chunk, chunk_idx, len(chunks), item.event_date, item.context, client, model_name,
+                chunk, chunk_idx, len(chunks), item.event_date, item.context, make_agent,
                 item.retain_mission, item.custom_instructions, item.metadata,
             )))
             task_meta.append((item_idx, chunk_idx, chunk))
@@ -1013,7 +1018,7 @@ def _build_observations_for_prompt(union_obs: list, storage) -> list[dict]:
     return obs_list
 
 
-async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, model_name: str) -> _BatchResponse:
+async def _consolidate_llm_batch(batch: list, union_obs: list, storage, make_agent: Callable) -> _BatchResponse:
     """Single LLM call: batch of facts + recalled observations → creates/updates/deletes."""
     facts_text = "\n".join(
         " | ".join(filter(None, [
@@ -1028,45 +1033,46 @@ async def _consolidate_llm_batch(batch: list, union_obs: list, storage, client, 
     observations_text = json.dumps(obs_list, ensure_ascii=False, indent=2)
     prompt = _CONSOLIDATION_PROMPT.format(facts_text=facts_text, observations_text=observations_text)
 
-    max_retries, delay = 5, 1.0
-    for attempt in range(max_retries):
+    sub = make_agent()
+    try:
+        await sub.memory.add_turn({"role": "user", "content": prompt})
         try:
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-            )
-            raw = (response.choices[0].message and response.choices[0].message.content) or ""
-            if not raw:
-                raise ValueError("empty response from LLM")
-            data = json.loads(raw.strip())
-            result = _BatchResponse(
-                creates=[
-                    _CreateAction(text=c["text"], source_fact_ids=c.get("source_fact_ids", []))
-                    for c in data.get("creates", []) if isinstance(c, dict) and c.get("text")
-                ],
-                updates=[
-                    _UpdateAction(text=u["text"], observation_id=u["observation_id"], source_fact_ids=u.get("source_fact_ids", []))
-                    for u in data.get("updates", []) if isinstance(u, dict) and u.get("text") and u.get("observation_id")
-                ],
-                deletes=[
-                    _DeleteAction(observation_id=d["observation_id"])
-                    for d in data.get("deletes", []) if isinstance(d, dict) and d.get("observation_id")
-                ],
-            )
-            log.info(
-                "[consolidate] LLM decision: +%d create / %d update / %d delete",
-                len(result.creates), len(result.updates), len(result.deletes),
-            )
-            return result
+            turn = await sub.llm()
         except Exception as e:
-            if attempt + 1 == max_retries:
-                log.warning("[consolidate] LLM call failed after %d attempts: %s", max_retries, e, exc_info=True)
-            else:
-                wait = delay * 2 ** attempt
-                log.warning("[consolidate] LLM call attempt %d/%d in %.0fs: %s", attempt + 1, max_retries, wait, e)
-                await asyncio.sleep(wait)
-    return _BatchResponse()
+            log.warning("[consolidate] LLM call failed: %s", e, exc_info=True)
+            return _BatchResponse()
+    finally:
+        await sub.close()
+
+    raw = Agent.turn_text(turn)
+    if not raw:
+        log.warning("[consolidate] empty response from LLM")
+        return _BatchResponse()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.warning("[consolidate] invalid JSON from LLM: %s; raw=%r", e, raw[:300])
+        return _BatchResponse()
+
+    result = _BatchResponse(
+        creates=[
+            _CreateAction(text=c["text"], source_fact_ids=c.get("source_fact_ids", []))
+            for c in data.get("creates", []) if isinstance(c, dict) and c.get("text")
+        ],
+        updates=[
+            _UpdateAction(text=u["text"], observation_id=u["observation_id"], source_fact_ids=u.get("source_fact_ids", []))
+            for u in data.get("updates", []) if isinstance(u, dict) and u.get("text") and u.get("observation_id")
+        ],
+        deletes=[
+            _DeleteAction(observation_id=d["observation_id"])
+            for d in data.get("deletes", []) if isinstance(d, dict) and d.get("observation_id")
+        ],
+    )
+    log.info(
+        "[consolidate] LLM decision: +%d create / %d update / %d delete",
+        len(result.creates), len(result.updates), len(result.deletes),
+    )
+    return result
 
 
 def _min_str_date(dates) -> Optional[str]:
@@ -1163,7 +1169,7 @@ def _delete_observation(observation_id: str, storage) -> None:
 
 
 _observations_lock = asyncio.Lock()
-async def create_observations(storage, client, model_name: str) -> int:
+async def create_observations(storage, make_agent: Callable) -> int:
     """Consolidation loop: обрабатывает все неконсолидированные факты батчами по CONSOLIDATION_LLM_BATCH_SIZE.
 
     1:1 с Hindsight: для каждого батча делает recall существующих observations,
@@ -1173,10 +1179,10 @@ async def create_observations(storage, client, model_name: str) -> int:
         log.debug("[consolidate] skip: already running")
         return 0
     async with _observations_lock:
-        return await _create_observations_impl(storage, client, model_name)
+        return await _create_observations_impl(storage, make_agent)
 
 
-async def _create_observations_impl(storage, client, model_name: str) -> int:
+async def _create_observations_impl(storage, make_agent: Callable) -> int:
     total = await asyncio.to_thread(storage.get_pending_consolidation_count)
     if total == 0:
         log.debug("[consolidate] skip: no unconsolidated facts")
@@ -1214,7 +1220,7 @@ async def _create_observations_impl(storage, client, model_name: str) -> int:
                         seen_ids.add(o.fact_id)
                         union_obs.append(o)
 
-            result = await _consolidate_llm_batch(group, union_obs, storage, client, model_name)
+            result = await _consolidate_llm_batch(group, union_obs, storage, make_agent)
             valid_fact_ids = {r["fact_id"] for r in group}
 
             for create in result.creates:
@@ -1252,8 +1258,7 @@ async def _create_observations_impl(storage, client, model_name: str) -> int:
 
 async def _retain_impl(
     items: list[RetainItem],
-    client,
-    model_name: str,
+    make_agent: Callable,
     storage,
     with_observations: bool = True,
     done_cb=None,
@@ -1262,7 +1267,7 @@ async def _retain_impl(
     Полный retain pipeline: LLM → dedup → store → graph links → create_observations.
     """
     log.info("[retain] started: %d items", len(items))
-    facts, chunk_meta = await extract_facts(items, client, model_name)
+    facts, chunk_meta = await extract_facts(items, make_agent)
     if not facts:
         if done_cb: await done_cb("Фактов не извлечено")
         return []
@@ -1282,7 +1287,7 @@ async def _retain_impl(
     )
 
     if with_observations:
-        await create_observations(storage, client, model_name)
+        await create_observations(storage, make_agent)
 
     if done_cb:
         facts_list = "\n".join(f"  • {f.fact}" for f in new_facts)
@@ -1295,12 +1300,12 @@ async def _retain_impl(
 
 # ── Background scheduling ───────────────────────────────────────────────────────
 _retain_lock = asyncio.Lock()
-def retain(items: list[RetainItem], client, model_name: str, storage,
+def retain(items: list[RetainItem], make_agent: Callable, storage,
            with_observations: bool = True, done_cb=None) -> None:
     async def _run() -> None:
         async with _retain_lock:
             try:
-                await _retain_impl(items, client, model_name, storage, with_observations, done_cb)
+                await _retain_impl(items, make_agent, storage, with_observations, done_cb)
             except Exception as e:
                 log.warning("[retain] background task failed: %s", e, exc_info=True)
     asyncio.get_event_loop().create_task(_run())
