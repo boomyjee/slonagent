@@ -124,9 +124,10 @@ def load_turns_json(path):
 
 
 class Memory:
-    def __init__(self, compressor, providers: list = None, memory_dir: str = None):
+    def __init__(self, compressor, providers: list = None, memory_dir: str = None, thread_id: str = ""):
         self.providers = providers or []
         self.compressor = compressor
+        self.thread_id = thread_id
         if memory_dir is None:
             memory_dir = os.path.join(os.getcwd(), "memory")
         self.memory_dir = memory_dir
@@ -135,7 +136,8 @@ class Memory:
             self._turns = []
         else:
             os.makedirs(self.memory_dir, exist_ok=True)
-            self._state_file = os.path.join(self.memory_dir, "CONTEXT.json")
+            fname = f"CONTEXT_{thread_id}.json" if thread_id else "CONTEXT.json"
+            self._state_file = os.path.join(self.memory_dir, fname)
             self._turns = load_turns_json(self._state_file)
 
     def save(self):

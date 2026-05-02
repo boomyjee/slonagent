@@ -4,7 +4,7 @@ import { Resizer } from './components/common/Resizer.js';
 import { FileTree, refreshTree, setTreeScope, isInGitRepo } from './components/FileTree.js';
 import { openChangeRootDialog } from './components/ChangeRootDialog.js';
 import { Editor } from './components/Editor.js';
-import { Tabs } from './components/Tabs.js';
+import { Tabs } from './components/common/Tabs.js';
 import { Logs } from './components/Logs.js';
 import { Git } from './components/Git.js';
 import { WebView } from './components/WebView.js';

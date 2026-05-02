@@ -1,4 +1,4 @@
-import { html, Component, css } from '../lib.js';
+import { html, Component, css } from '../../lib.js';
 
 const cl = {};
 

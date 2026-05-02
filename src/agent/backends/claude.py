@@ -159,7 +159,9 @@ class ClaudeBackend(BaseBackend):
     def _state_file(self) -> str | None:
         if not self.agent.memory.memory_dir:
             return None
-        return os.path.join(self.agent.memory.memory_dir, "claude_code.json")
+        tid = self.agent.thread_id
+        fname = f"CLAUDE_{tid}.json" if tid else "CLAUDE.json"
+        return os.path.join(self.agent.memory.memory_dir, fname)
 
     def _load_state(self) -> dict:
         if self._state_file is None:

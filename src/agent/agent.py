@@ -103,8 +103,9 @@ class Agent:
         weakref.finalize(agent, task.cancel)
         return agent
 
-    def __init__(self, id: str, model_name: str, api_key: str = "", base_url: str = "", backend: str = "openai", backend_params: dict | None = None, agent_dir: str | None = None, memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
+    def __init__(self, id: str, model_name: str, api_key: str = "", base_url: str = "", backend: str = "openai", backend_params: dict | None = None, agent_dir: str | None = None, thread_id: str = "", memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
         self.id = id
+        self.thread_id = thread_id
         self.model_name = model_name
         self.api_key = api_key
         self.base_url = base_url
@@ -113,7 +114,7 @@ class Agent:
         if isinstance(memory_providers, dict):
             memory_providers = list(memory_providers.values())
         memory_dir = os.path.join(agent_dir, "memory") if agent_dir else ""
-        self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [], memory_dir=memory_dir)
+        self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [], memory_dir=memory_dir, thread_id=thread_id)
         self.skills = ([memory_compressor] if memory_compressor else []) + self.memory.providers + (skills or []) + [AgentSkill()]
         self.max_iterations = max_iterations
         for skill in self.skills:

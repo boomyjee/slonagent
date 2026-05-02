@@ -152,7 +152,6 @@ class WebTransport(BaseTransport):
         self._last_active_ws: WebSocket | None = None
         self._replay_transport: deque = deque(maxlen=100)
         self._replay_other: deque = deque(maxlen=400)
-        self._routes: list = []
         self._mount_id: str | None = None
         # Monotonic id stamped on every outgoing event. Clients track the
         # highest id they've seen and ask for "give me everything since X"
@@ -337,8 +336,12 @@ class WebTransport(BaseTransport):
 
     def register_route(self, method, path, handler):
         url = f"/{self.agent.id}{self._prefix}{path}"
-        getattr(self._app, method)(url)(handler)
-        self._routes.append(self._app.router.routes[-1])
+        entry = WebTransport._mounted.get(url)
+        if entry is None:
+            getattr(self._app, method)(url)(handler)
+            entry = WebTransport._mounted[url] = {"refcount": 0, "route": self._app.router.routes[-1]}
+        entry["refcount"] += 1
+        self._registered_urls.append(url)
 
     def register_json_route(self, method, path, handler):
         """Register a handler with contract (query, body, path_params) -> dict|list."""
@@ -354,11 +357,19 @@ class WebTransport(BaseTransport):
         wrapped.__name__ = f"json_{handler.__name__ if hasattr(handler, '__name__') else id(handler)}"
         self.register_route(method, path, wrapped)
 
+    # url → {"refcount": int, "route": Route}
+    # Несколько инстансов могут зарегистрировать один и тот же URL
+    # (общие fork-уровневые роуты тредов одного форка) — монтируем при
+    # первом, снимаем при последнем. Уникальные URL (например с thread_id
+    # в пути) живут со своим refcount=1.
+    _mounted: dict[str, dict] = {}
+
     def set_agent(self, agent):
         super().set_agent(agent)
-        if not self._mount or self._routes: return
+        if not self._mount or self._mount_id is not None: return
         self._mount_id = agent.id
         self._ensure_server()
+        self._registered_urls: list[str] = []
         self.register_routes()
 
     def register_routes(self):
@@ -387,9 +398,18 @@ class WebTransport(BaseTransport):
         return JSONResponse(cmds)
 
     def remove_routes(self):
-        for r in self._routes:
-            self._app.router.routes.remove(r)
-        self._routes = []
+        if self._mount_id is None:
+            return
+        for url in self._registered_urls:
+            entry = WebTransport._mounted.get(url)
+            if entry is None: continue
+            entry["refcount"] -= 1
+            if entry["refcount"] <= 0:
+                try: self._app.router.routes.remove(entry["route"])
+                except ValueError: pass
+                WebTransport._mounted.pop(url, None)
+        self._registered_urls = []
+        self._mount_id = None
 
     def cleanup(self):
         self.remove_routes()
@@ -583,7 +603,7 @@ class WebTransport(BaseTransport):
 
     async def send(self, event: dict, replay=False):
         self._message_id_counter += 1
-        event = {**event, "id": self._message_id_counter}
+        event = {**event, "id": self._message_id_counter, "thread_id": self.agent.thread_id}
         if replay:
             buf = self._replay_transport if event.get("type") == "transport" else self._replay_other
             buf.append(event)
@@ -605,7 +625,7 @@ class WebTransport(BaseTransport):
         if target is None or target not in self._clients:
             raise RuntimeError("no active dashboard client")
         self._message_id_counter += 1
-        event = {**event, "id": self._message_id_counter}
+        event = {**event, "id": self._message_id_counter, "thread_id": self.agent.thread_id}
         try:
             await target.send_text(json.dumps(event, ensure_ascii=False))
         except Exception as e:
