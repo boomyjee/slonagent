@@ -133,7 +133,7 @@ class FactProvider(BaseProvider):
         async def on_done(summary: str):
             annotated = f"[треды: {threads}]\n{summary}"
             self.agent.call_before_next_message(
-                self.agent.transport.send_memory_info(annotated, final=True)
+                self.agent.transport.send_memory_info(annotated)
             )
 
         retain(items, self._make_sub_agent, self.storage,

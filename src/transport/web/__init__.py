@@ -65,8 +65,8 @@ class WebTransport(BaseTransport):
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
         await self._transport_event("send_thinking", replay=final, text=text, stream_id=stream_id, final=final)
 
-    async def send_memory_info(self, text: str, stream_id=None, final: bool = False):
-        await self._transport_event("send_memory_info", replay=final, text=text, stream_id=stream_id, final=final)
+    async def send_memory_info(self, text: str):
+        await self._transport_event("send_memory_info", replay=True, text=text)
 
     async def send_system_prompt(self, text: str):
         if not self._verbose:

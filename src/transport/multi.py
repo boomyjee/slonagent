@@ -37,9 +37,9 @@ class MultiTransport(BaseTransport):
         for t in self.transports:
             await t.send_thinking(text, stream_id, final=final)
 
-    async def send_memory_info(self, text, stream_id=None, final=False):
+    async def send_memory_info(self, text):
         for t in self.transports:
-            await t.send_memory_info(text, stream_id, final=final)
+            await t.send_memory_info(text)
 
     async def send_system_prompt(self, text):
         for t in self.transports:

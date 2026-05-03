@@ -253,7 +253,7 @@ class ClaudeBackend(BaseBackend):
                 self._client = None
                 self._client_append = None
             await agent.transport.send_memory_info(
-                f"Синхронизировал claude-сессию: вычистил {pruned} старых записей", final=True,
+                f"Синхронизировал claude-сессию: вычистил {pruned} старых записей",
             )
 
         parts = []

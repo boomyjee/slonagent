@@ -503,9 +503,8 @@ class TelegramTransport(BaseTransport):
         messages = self._stream_messages.setdefault(stream_id, []) if stream_id else None
         await self._answer(text, expandable=True, final=final, prefix="🧠 ", messages=messages)
 
-    async def send_memory_info(self, text: str, stream_id=None, final: bool = False):
-        messages = self._stream_messages.setdefault(stream_id, []) if stream_id else None
-        await self._answer(text, expandable=True, final=final, prefix="💾 ", messages=messages)
+    async def send_memory_info(self, text: str):
+        await self._answer(text, expandable=True, final=True, prefix="💾 ")
 
     async def send_code(self, lang: str, code: str):
         await self._answer(f"```{lang}\n{code}\n```")

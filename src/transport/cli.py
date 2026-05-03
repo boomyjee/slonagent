@@ -24,8 +24,8 @@ class CliTransport(BaseTransport):
     async def send_thinking(self, text: str, stream_id=None, final: bool = False):
         self._stream_print(text, stream_id, "[думает...]\n")
 
-    async def send_memory_info(self, text: str, stream_id=None, final: bool = False):
-        self._stream_print(text, stream_id, "[память]\n")
+    async def send_memory_info(self, text: str):
+        print(f"[память]\n{text}\n")
 
     async def on_tool_call(self, name: str, args: dict):
         print(f"[{name}] {args}")
