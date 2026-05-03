@@ -180,31 +180,30 @@ class TestWebTransportForkSharing:
 
 class TestWebTransportStart:
 
-    def test_start_plumbs_make_agent(self, monkeypatch):
-        captured = {}
-        def fake_start(cls, config, make_agent=None):
-            captured["config"] = config
-            captured["make_agent"] = make_agent
-        monkeypatch.setattr(WebTransportServer, "start", classmethod(fake_start))
+    def test_start_stashes_make_agent_on_transport(self, monkeypatch):
+        # WebTransportServer.start не должен зависеть от фабрики — её WebTransport
+        # держит у себя как class-attr и читает в WebFork.ws_handle_message.
+        monkeypatch.setattr(WebTransportServer, "start",
+                            classmethod(lambda cls, config: None))
+        WebTransport.make_agent = None
 
         async def factory(*a, **kw): return None
         WebTransport.start({"port": 1234}, factory)
-        assert captured["config"] == {"port": 1234}
-        assert captured["make_agent"] is factory
+        assert WebTransport.make_agent is factory
 
-    def test_start_without_factory(self, monkeypatch):
-        captured = {}
-        def fake_start(cls, config, make_agent=None):
-            captured["make_agent"] = make_agent
-        monkeypatch.setattr(WebTransportServer, "start", classmethod(fake_start))
-        WebTransport.start({"port": 1234})
-        assert captured["make_agent"] is None
+    def test_start_without_factory_keeps_existing(self, monkeypatch):
+        monkeypatch.setattr(WebTransportServer, "start",
+                            classmethod(lambda cls, config: None))
+        async def existing(*a, **kw): return None
+        WebTransport.make_agent = staticmethod(existing)
+        WebTransport.start({"port": 1234})  # без make_agent
+        assert WebTransport.make_agent is existing
 
 
 class TestWebForkInbound:
 
     def setup_method(self):
-        WebTransportServer.make_agent = None
+        WebTransport.make_agent = None
 
     @pytest.mark.asyncio
     async def test_thread_rename_inbound_calls_agent(self):
@@ -218,40 +217,72 @@ class TestWebForkInbound:
         agent.thread_rename.assert_awaited_once_with("u1", "N")
 
     @pytest.mark.asyncio
-    async def test_process_message_routes_to_thread_agent(self, monkeypatch):
+    async def test_process_message_routes_to_thread_transport(self):
         main = MagicMock(id="forkX", thread_id="")
-        main.process_message = AsyncMock()
         fork = _NoMountFork(ref_agent=main)
-
-        thread_agent = MagicMock()
-        thread_agent.process_message = AsyncMock()
-
-        async def factory(agent_id, thread_id):
-            assert agent_id == "forkX"
-            assert thread_id == "abc"
-            return thread_agent
-        monkeypatch.setattr(WebTransportServer, "make_agent", staticmethod(factory))
+        main_t = MagicMock(); main_t.process_message = AsyncMock()
+        thread_t = MagicMock(); thread_t.process_message = AsyncMock()
+        fork.transports[""] = main_t
+        fork.transports["abc"] = thread_t
 
         await fork.ws_handle_message({
             "type": "transport", "method": "process_message",
             "thread_id": "abc",
             "content_parts": [{"type": "text", "text": "hi"}],
         })
-        thread_agent.process_message.assert_awaited_once()
-        main.process_message.assert_not_awaited()
+        thread_t.process_message.assert_awaited_once()
+        main_t.process_message.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_process_message_main_thread_goes_to_ref_agent(self):
+    async def test_process_message_main_thread_routes_via_main_transport(self):
         main = MagicMock(id="forkX", thread_id="")
-        main.process_message = AsyncMock()
         fork = _NoMountFork(ref_agent=main)
+        main_t = MagicMock(); main_t.process_message = AsyncMock()
+        fork.transports[""] = main_t
 
         await fork.ws_handle_message({
             "type": "transport", "method": "process_message",
             "thread_id": "",
             "content_parts": [{"type": "text", "text": "hi"}],
         })
-        main.process_message.assert_awaited_once()
+        main_t.process_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unknown_thread_invokes_make_agent_then_routes(self, monkeypatch):
+        # Если транспорта для треда нет — фабрика поднимает агента, его
+        # set_agent прописывает себя в fork.transports, дальше уже есть кому
+        # отправить process_message.
+        main = MagicMock(id="forkX", thread_id="")
+        fork = _NoMountFork(ref_agent=main)
+        new_t = MagicMock(); new_t.process_message = AsyncMock()
+
+        async def factory(agent_id, thread_id):
+            assert (agent_id, thread_id) == ("forkX", "newtab")
+            fork.transports[thread_id] = new_t  # имитация set_agent побочки
+            return MagicMock()
+        monkeypatch.setattr(WebTransport, "make_agent", staticmethod(factory))
+
+        await fork.ws_handle_message({
+            "type": "transport", "method": "process_message",
+            "thread_id": "newtab",
+            "content_parts": [{"type": "text", "text": "hi"}],
+        })
+        new_t.process_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unknown_thread_no_factory_drops_message(self):
+        main = MagicMock(id="forkX", thread_id="")
+        fork = _NoMountFork(ref_agent=main)
+        # Никакой регистрации, никакой фабрики — сообщение должно безопасно
+        # дропнуться с warning'ом, а не упасть.
+        WebTransport.make_agent = None
+
+        await fork.ws_handle_message({
+            "type": "transport", "method": "process_message",
+            "thread_id": "ghost",
+            "content_parts": [{"type": "text", "text": "hi"}],
+        })
+        # Доехали без исключения — этого достаточно.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

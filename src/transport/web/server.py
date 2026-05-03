@@ -37,7 +37,6 @@ class WebTransportServer:
     app: FastAPI | None = None
     port: int = 8765
     password_hash: str = ""
-    make_agent = None
 
     _tunnel_url: str | None = None
     _tunnel_ready: asyncio.Event | None = None
@@ -73,12 +72,9 @@ class WebTransportServer:
         return url
 
     @classmethod
-    def start(cls, config: dict, make_agent=None):
+    def start(cls, config: dict):
         """Поднимает uvicorn-сервер процесса. Должен вызываться один раз из
-        main.py до создания WebTransport-инстансов. `make_agent` —
-        опциональная фабрика тред-агентов: `(agent_id, thread_id) -> Agent`."""
-        if make_agent is not None:
-            cls.make_agent = staticmethod(make_agent)
+        main.py до создания WebTransport-инстансов."""
         if cls.app is not None:
             return
         cls.port = config.get("port", 8765)

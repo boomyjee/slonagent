@@ -15,10 +15,13 @@ log = logging.getLogger(__name__)
 
 class WebTransport(BaseTransport):
     _forks: dict[str, WebFork] = {}
+    make_agent = None
 
     @classmethod
     def start(cls, config: dict, make_agent=None):
-        WebTransportServer.start(config, make_agent)
+        WebTransportServer.start(config)
+        if make_agent is not None:
+            WebTransport.make_agent = staticmethod(make_agent)
 
     def __init__(self, verbose: bool = True):
         super().__init__()
@@ -36,9 +39,11 @@ class WebTransport(BaseTransport):
                 self._forks[agent.id] = self.create_fork(agent)
             self.fork = self._forks[agent.id]
             self.fork.refcount += 1
+            self.fork.transports[self.agent.thread_id] = self
 
     def cleanup(self):
         if self.fork is None: return
+        self.fork.transports.pop(self.agent.thread_id,None)
         self.fork.refcount -= 1
         if self.fork.refcount <= 0:
             self.fork.cleanup()

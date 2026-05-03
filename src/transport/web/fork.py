@@ -44,6 +44,7 @@ class WebFork:
         self.ref_agent = ref_agent
         self.refcount = 0
         self.clients: set = set()
+        self.transports: dict = {}
         self.last_active_ws: WebSocket | None = None
         self.replay_transport: deque = deque(maxlen=100)
         self.replay_other: deque = deque(maxlen=400)
@@ -215,23 +216,20 @@ class WebFork:
             # replayed on reconnect. Chat.js no longer adds user messages
             # to local state — it renders them when this event comes in.
             await self.send(msg, replay=True)
-            # Если tid совпадает с тредом ref_agent (по умолчанию main, "") —
-            # шлём прямо в него; иначе разрешаем тред-специфичный agent через
-            # фабрику. Без фабрики треды не маршрутизируются — всё уходит в main.
-            target = self.ref_agent
-            tid = msg.get("thread_id", "")
-            if tid != self.ref_agent.thread_id and WebTransportServer.make_agent:
-                resolved = await WebTransportServer.make_agent(self.ref_agent.id, tid)
-                if resolved is not None:
-                    target = resolved
+
             try:
-                await target.process_message(
+                tid = msg.get("thread_id", "")
+                if tid not in self.transports:
+                    from src.transport.web import WebTransport
+                    await WebTransport.make_agent(self.ref_agent.id, tid)
+
+                await self.transports[tid].process_message(
                     content_parts=content_parts,
                     user_message_id=msg.get("user_message_id"),
                     trigger_answer=msg.get("trigger_answer", True),
                 )
             except Exception:
-                log.exception("[ws] process_message FAILED")
+                log.exception("[ws] process_message FAILED",exc_info=True)
             return
         if msg.get("type") == "transport" and msg.get("method") == "thread_rename":
             uuid_, name = msg.get("uuid"), msg.get("name")
