@@ -207,7 +207,6 @@ class TestWebTransportInbound:
         from src.transport.dashboard import DashboardTransport
         t = DashboardTransport()
         t._mount_id = "forkX"
-        t._thread_id = ""
         WebTransport._mount_states["forkX"] = MountState()
 
         main_agent = MagicMock()

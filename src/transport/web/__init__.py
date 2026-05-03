@@ -162,7 +162,6 @@ class WebTransport(BaseTransport):
         self._prefix = prefix
         self.verbose = verbose
         self._mount_id: str | None = None
-        self._thread_id: str | None = None
         self._web_skill = WebTransportSkill(self)
 
     @property
@@ -371,7 +370,6 @@ class WebTransport(BaseTransport):
     def set_agent(self, agent):
         super().set_agent(agent)
         if self._mount_id is not None: return
-        self._thread_id = agent.thread_id
         self._mount_id = agent.id
         WebTransport._mount_states.setdefault(self._mount_id, MountState())
         if self._mount:
@@ -626,7 +624,7 @@ class WebTransport(BaseTransport):
 
     async def send(self, event: dict, replay=False):
         self._mount_state.message_id_counter += 1
-        event = {**event, "id": self._mount_state.message_id_counter, "thread_id": self._thread_id}
+        event = {**event, "id": self._mount_state.message_id_counter}
         if replay:
             buf = self._mount_state.replay_transport if event.get("type") == "transport" else self._mount_state.replay_other
             buf.append(event)
@@ -648,7 +646,7 @@ class WebTransport(BaseTransport):
         if target is None or target not in self._mount_state.clients:
             raise RuntimeError("no active dashboard client")
         self._mount_state.message_id_counter += 1
-        event = {**event, "id": self._mount_state.message_id_counter, "thread_id": self._thread_id}
+        event = {**event, "id": self._mount_state.message_id_counter}
         try:
             await target.send_text(json.dumps(event, ensure_ascii=False))
         except Exception as e:
@@ -659,7 +657,11 @@ class WebTransport(BaseTransport):
     # --- BaseTransport interface ---
 
     async def _transport_event(self, method: str, replay=True, **kwargs):
-        await self.send({"type": "transport", "method": method, **kwargs}, replay=replay)
+        # thread_id берётся от текущего агента — sub-агенты переустанавливают
+        # себя через set_agent, поэтому self.agent.thread_id отражает того кто
+        # инициировал событие.
+        tid = self.agent.thread_id if self.agent is not None else ""
+        await self.send({"type": "transport", "method": method, "thread_id": tid, **kwargs}, replay=replay)
 
     async def send_message(self, text: str, stream_id=None, final: bool = True):
         await self._transport_event("send_message", replay=final, text=text, stream_id=stream_id, final=final)
