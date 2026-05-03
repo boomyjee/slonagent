@@ -48,10 +48,10 @@ def workspace(tmp_path):
 def transport(workspace, monkeypatch):
     # Pre-build the FastAPI app so WebTransportServer.start short-circuits
     # and never tries to spawn uvicorn / a tunnel.
-    WebTransportServer.app = FastAPI()
-    # Non-empty password_hash so the WS-auth gate has a value to compare;
+    WebTransportServer._app = FastAPI()
+    # Non-empty _password_hash so the WS-auth wrapper has a value to compare;
     # tests pass `auth` cookie matching it, which mimics the prod login.
-    WebTransportServer.password_hash = "test"
+    WebTransportServer._password_hash = "test"
     WebTransport._forks.clear()
 
     # DashboardFork._sandbox looks for a SandboxSkill in ref_agent.skills;
@@ -64,13 +64,13 @@ def transport(workspace, monkeypatch):
     t.set_agent(_Agent(workspace))
     yield t
     t.cleanup()
-    WebTransportServer.app = None
+    WebTransportServer._app = None
 
 
 @pytest.fixture
 def client(transport):
-    c = TestClient(WebTransportServer.app, base_url="http://localhost")
-    c.cookies.set("auth", WebTransportServer.password_hash)
+    c = TestClient(WebTransportServer._app, base_url="http://localhost")
+    c.cookies.set("auth", WebTransportServer._password_hash)
     return c
 
 

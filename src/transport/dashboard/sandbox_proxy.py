@@ -238,13 +238,11 @@ class SandboxProxy:
         return True
 
     async def _worker_url(self) -> str:
-        # fork.ref_agent.id — id того агента, который форк создал; routes
-        # зарегистрированы под этим id в register_route. Subagent (sub-thread)
-        # шарит fork с родителем — у sub agent.id может выглядеть как
-        # main:claude_code, но fork один на main, поэтому берём ref_agent.id.
-        from src.transport.web import WebTransportServer
-        return (f"ws://{await self._host_address()}:{WebTransportServer.port}"
-                f"/{self.fork.ref_agent.id}/dashboard/sandbox-tunnel")
+        return await self.fork.get_url(
+            "/sandbox-tunnel",
+            host=await self._host_address(),
+            scheme="ws",
+        )
 
     async def _host_address(self) -> str:
         """Hostname/IP the container can use to reach the host's uvicorn.

@@ -71,7 +71,7 @@ async def dash():
     port = _free_port()
 
     # Reset process-wide WebTransportServer state in case prior tests touched it.
-    WebTransportServer.app = None
+    WebTransportServer._app = None
     WebTransportServer._tunnel_url = None
     WebTransportServer._tunnel_ready = None
     WebTransport._forks.clear()

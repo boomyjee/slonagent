@@ -54,10 +54,8 @@ class WebFork:
             self.register_routes()
 
     def register_route(self, method, path, handler):
-        app = WebTransportServer.app
         url = f"/{self.ref_agent.id}{self.prefix}{path}"
-        getattr(app, method)(url)(handler)
-        self._routes.append(app.router.routes[-1])
+        self._routes.append(WebTransportServer.register_route(method, url, handler))
 
     def register_json_route(self, method, path, handler):
         """Register a handler with contract (query, body, path_params) -> dict|list."""
@@ -74,16 +72,17 @@ class WebFork:
         self.register_route(method, path, wrapped)
 
     def cleanup(self):
-        app = WebTransportServer.app
         for route in self._routes:
-            try: app.router.routes.remove(route)
-            except ValueError: pass
+            WebTransportServer.remove_route(route)
         self._routes = []
 
     # ─── URL helpers ─────────────────────────────────────────────────────
 
-    async def get_url(self, sub_path: str = "", force_localhost: bool = False) -> str:
-        return await WebTransportServer.get_url(self._path(sub_path), force_localhost=force_localhost)
+    async def get_url(self, sub_path: str = "", force_localhost: bool = False,
+                      host: str | None = None, scheme: str = "http") -> str:
+        return await WebTransportServer.get_url(
+            self._path(sub_path), force_localhost=force_localhost, host=host, scheme=scheme,
+        )
 
     async def get_auth_url(self, sub_path: str = "") -> str:
         return await WebTransportServer.get_auth_url(self._path(sub_path))
@@ -148,13 +147,6 @@ class WebFork:
     # ─── WebSocket endpoint ──────────────────────────────────────────────
 
     async def _ws(self, ws: WebSocket):
-        # HTTP middleware doesn't run on WebSocket handshakes — enforce auth here.
-        host = ws.headers.get("host", "").split(":")[0]
-        if host not in ("localhost", "127.0.0.1"):
-            pw = WebTransportServer.password_hash
-            if not pw or ws.cookies.get("auth") != pw:
-                await ws.close(code=4401)
-                return
         await ws.accept()
         await self.ws_connect(ws)
 
