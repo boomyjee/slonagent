@@ -2,7 +2,7 @@
 загруженные файлы. Несколько WebTransport-ов одного форка (main + thread
 агенты) делят форк через WebTransport._forks с refcount."""
 
-import asyncio, base64, heapq, inspect, json, logging, mimetypes, os, re, shutil, time, uuid
+import asyncio, base64, glob, heapq, inspect, json, logging, mimetypes, os, re, shutil, time, uuid
 from collections import deque
 from pathlib import Path
 
@@ -17,6 +17,8 @@ _TEXT_EXT_RE = re.compile(
     r"\.(txt|md|py|js|ts|tsx|jsx|json|yaml|yml|xml|html|css|scss|sh|bash|sql|csv|log|toml|ini|conf|cfg|env)$",
     re.I,
 )
+_WEB_FILE_RE = re.compile(r"^WEB(?:_(.+))?\.json$")
+_HISTORY_TAIL = 50
 
 class WebFork:
     """Per-agent.id fork: shared HTTP routes, ws clients, replay buffers,
@@ -46,9 +48,11 @@ class WebFork:
         self.clients: set = set()
         self.transports: dict = {}
         self.last_active_ws: WebSocket | None = None
+        # Replay-буферы — для catch-up на ws-реконнекте (юзер был дисконнект'нут).
         self.replay_transport: deque = deque(maxlen=100)
         self.replay_other: deque = deque(maxlen=400)
-        self.message_id_counter = 0
+        # Монотон от epoch-ms — переживает рестарты, новые id всегда > старых.
+        self.message_id_counter = int(time.time() * 1000)
         self._routes: list = []
         if self.mount:
             self.register_routes()
@@ -95,6 +99,7 @@ class WebFork:
     def register_routes(self):
         self.register_route("get", "/uploads/{filename:path}", self._serve_upload)
         self.register_route("get", "/api/commands", self._api_commands)
+        self.register_route("get", "/api/history", self._api_history)
         self.register_route("get", "/{filename:path}", self._static)
         self.register_route("websocket", "/ws", self._ws)
 
@@ -107,6 +112,9 @@ class WebFork:
             return PlainTextResponse("Not found", status_code=404)
         mime, _ = mimetypes.guess_type(path)
         return FileResponse(path, media_type=mime or "application/octet-stream")
+
+    async def _api_history(self, thread_id: str = ""):
+        return JSONResponse({"events": self._load_history_tail(thread_id)})
 
     async def _api_commands(self):
         cmds = {
@@ -236,6 +244,12 @@ class WebFork:
         if replay:
             buf = self.replay_transport if event.get("type") == "transport" else self.replay_other
             buf.append(event)
+        # History на диске — параллельный механизм, для первичной загрузки таба
+        # через GET /api/history. Не stream-partial, не processing.
+        if (event.get("type") == "transport"
+                and event.get("final") is not False
+                and event.get("method") != "send_processing"):
+            self._append_history(event)
         if not self.clients: return
         data = json.dumps(event, ensure_ascii=False)
         dead = set()
@@ -245,6 +259,33 @@ class WebFork:
             except Exception:
                 dead.add(ws)
         self.clients -= dead
+
+    # ─── Persisted transport history (WEB_<thread_id>.json) ─────────────────
+
+    def _history_path(self, thread_id: str) -> str:
+        fname = f"WEB_{thread_id}.json" if thread_id else "WEB.json"
+        return os.path.join(self.ref_agent.memory.memory_dir, fname)
+
+    def _append_history(self, event: dict):
+        path = self._history_path(event.get("thread_id", ""))
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception as e:
+            log.warning("[fork] persist %s failed: %s", path, e, exc_info=True)
+
+    def _load_history_tail(self, thread_id: str) -> list[dict]:
+        """Последние _HISTORY_TAIL событий из WEB_<thread_id>.json."""
+        path = self._history_path(thread_id)
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()[-_HISTORY_TAIL:]
+            return [json.loads(line) for line in lines if line.strip()]
+        except Exception as e:
+            log.warning("[fork] load %s failed: %s", path, e, exc_info=True)
+            return []
 
     async def send_targeted(self, event: dict):
         """Шлёт только клиенту, который последним прислал user-message.
@@ -386,13 +427,21 @@ class WebFork:
         return result
 
     def _gc_uploads(self):
-        """Удаляет файлы старше суток, на которые нет ссылок в replay-буфере.
-        Если событие с URL ещё в буфере — реконнектящийся клиент получит его
-        и попробует загрузить, поэтому файл нужен."""
+        """Удаляет файлы старше суток, на которые нет ссылок в replay-буферах
+        или в файлах истории. Если событие с URL ещё кто-то отдаст клиенту —
+        файл должен быть на месте."""
         cutoff = time.time() - 24 * 3600
         referenced: set[str] = set()
         for buf in (self.replay_transport, self.replay_other):
             for ev in buf:
+                self._collect_upload_names(ev, referenced)
+        # Tail из всех history-файлов треда — то что отдаём через /api/history.
+        pattern = os.path.join(self.ref_agent.memory.memory_dir, "WEB*.json")
+        for path in glob.glob(pattern):
+            m = _WEB_FILE_RE.match(os.path.basename(path))
+            if not m:
+                continue
+            for ev in self._load_history_tail(m.group(1) or ""):
                 self._collect_upload_names(ev, referenced)
         for entry in os.scandir(self.uploads_dir):
             try:

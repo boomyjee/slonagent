@@ -286,6 +286,96 @@ class TestWebForkInbound:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# WebFork: persistence transport-истории в memory_dir/WEB_<thread>.json
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _real_agent(tmp_path, thread_id=""):
+    """Настоящий Agent (не MagicMock) — нужен для memory.memory_dir."""
+    return Agent(
+        id="forkX", model_name="m", api_key="k", base_url="http://t",
+        agent_dir=str(tmp_path), thread_id=thread_id,
+        memory_compressor=PassthroughCompressor(),
+    )
+
+
+class TestWebForkPersistence:
+
+    @pytest.mark.asyncio
+    async def test_transport_event_appended_to_file(self, tmp_path):
+        agent = _real_agent(tmp_path)
+        fork = _NoMountFork(ref_agent=agent)
+        await fork.send({"type": "transport", "method": "send_message", "thread_id": "", "text": "hi"}, replay=True)
+        with open(agent.memory.memory_dir + "/WEB.json") as f:
+            lines = f.readlines()
+        assert len(lines) == 1
+        ev = json.loads(lines[0])
+        assert ev["text"] == "hi"
+        assert ev["method"] == "send_message"
+
+    @pytest.mark.asyncio
+    async def test_send_processing_not_persisted(self, tmp_path):
+        agent = _real_agent(tmp_path)
+        fork = _NoMountFork(ref_agent=agent)
+        await fork.send({"type": "transport", "method": "send_processing", "thread_id": "", "active": True}, replay=True)
+        assert not os.path.exists(agent.memory.memory_dir + "/WEB.json")
+
+    @pytest.mark.asyncio
+    async def test_non_transport_event_goes_to_replay_other(self, tmp_path):
+        agent = _real_agent(tmp_path)
+        fork = _NoMountFork(ref_agent=agent)
+        await fork.send({"type": "log", "category": "agent", "text": "..."}, replay=True)
+        assert not os.path.exists(agent.memory.memory_dir + "/WEB.json")
+        assert len(fork.replay_other) == 1
+
+    @pytest.mark.asyncio
+    async def test_per_thread_files(self, tmp_path):
+        agent = _real_agent(tmp_path)
+        fork = _NoMountFork(ref_agent=agent)
+        await fork.send({"type": "transport", "method": "send_message", "thread_id": "", "text": "main"}, replay=True)
+        await fork.send({"type": "transport", "method": "send_message", "thread_id": "abc", "text": "from-abc"}, replay=True)
+        main_path = agent.memory.memory_dir + "/WEB.json"
+        thread_path = agent.memory.memory_dir + "/WEB_abc.json"
+        with open(main_path) as f: assert "main" in f.read()
+        with open(thread_path) as f: assert "from-abc" in f.read()
+
+    @pytest.mark.asyncio
+    async def test_history_survives_fork_recreation(self, tmp_path):
+        # Симулирует рестарт slonagent: пишем события, форк уничтожаем, новый
+        # форк должен отдать ту же историю через /api/history (загрузка с диска).
+        agent = _real_agent(tmp_path)
+        fork1 = _NoMountFork(ref_agent=agent)
+        await fork1.send({"type": "transport", "method": "send_message", "thread_id": "", "text": "before-restart"}, replay=True)
+
+        agent2 = _real_agent(tmp_path)
+        fork2 = _NoMountFork(ref_agent=agent2)
+        events = fork2._load_history_tail("")
+        texts = [e.get("text") for e in events]
+        assert "before-restart" in texts
+
+    @pytest.mark.asyncio
+    async def test_history_per_thread(self, tmp_path):
+        agent = _real_agent(tmp_path)
+        fork = _NoMountFork(ref_agent=agent)
+        await fork.send({"type": "transport", "method": "send_message", "thread_id": "", "text": "main-msg"}, replay=True)
+        await fork.send({"type": "transport", "method": "send_message", "thread_id": "abc", "text": "thread-msg"}, replay=True)
+
+        main_events = fork._load_history_tail("")
+        thread_events = fork._load_history_tail("abc")
+        assert [e["text"] for e in main_events] == ["main-msg"]
+        assert [e["text"] for e in thread_events] == ["thread-msg"]
+
+    def test_message_id_counter_is_epoch_ms(self, tmp_path):
+        # Счётчик стартует от текущего unix-времени в мс, чтоб переживать
+        # рестарты без чтения файлов.
+        import time
+        agent = _real_agent(tmp_path)
+        before = int(time.time() * 1000)
+        fork = _NoMountFork(ref_agent=agent)
+        after = int(time.time() * 1000)
+        assert before <= fork.message_id_counter <= after
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # EchoBackend
 # ═══════════════════════════════════════════════════════════════════════════════
 

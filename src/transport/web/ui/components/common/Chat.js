@@ -40,6 +40,24 @@ export class Chat extends Component {
         this._streams = {};        // `${tid}:${k}` → index in messagesByThread[tid]
     }
 
+    componentDidMount() {
+        // На старте подгружаем историю всех уже открытых табов с диска бекенда.
+        // Это первичный показ — реплей по WS догоняет только события во время
+        // дисконнекта, а тут юзер только что зашёл и хочет видеть прошлое.
+        for (const t of this.state.tabs) this._fetchHistory(t.id);
+    }
+
+    async _fetchHistory(tid) {
+        try {
+            const r = await fetch(`api/history?thread_id=${encodeURIComponent(tid)}`);
+            if (!r.ok) return;
+            const { events } = await r.json();
+            for (const ev of events || []) this.handleMessage(ev);
+        } catch (e) {
+            console.warn('history fetch failed', e);
+        }
+    }
+
     _persist() {
         if (this.props.threadsEnabled === false) return;
         persist.set('chat:tabs', { tabs: this.state.tabs, active: this.state.activeTab });
@@ -81,7 +99,7 @@ export class Chat extends Component {
         this.setState({
             tabs: [...this.state.tabs, { id, label }],
             activeTab: id,
-        }, () => this._persist());
+        }, () => { this._persist(); this._fetchHistory(id); });
         Dialog.close();
     };
 
