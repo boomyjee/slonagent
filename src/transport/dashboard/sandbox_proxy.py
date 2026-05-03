@@ -23,8 +23,8 @@ class SandboxProxy:
     START_TIMEOUT = 30.0
     HTTP_TIMEOUT = 120.0
 
-    def __init__(self, transport):
-        self.transport = transport
+    def __init__(self, fork):
+        self.fork = fork
         self.tunnel: WebSocket | None = None
         self.tunnel_ready = asyncio.Event()
         self._ids = itertools.count(1)
@@ -219,7 +219,7 @@ class SandboxProxy:
         return self.tunnel is not None
 
     async def _start_worker(self) -> bool:
-        sandbox = self.transport._sandbox
+        sandbox = self.fork._sandbox
         if sandbox is None:
             return False
         url = await self._worker_url()
@@ -238,14 +238,13 @@ class SandboxProxy:
         return True
 
     async def _worker_url(self) -> str:
-        # _mount_id — id агента, под которым реально зарегистрированы routes
-        # (в WebTransport.set_agent на первом set_agent). Subagent шарит
-        # transport с родителем, set_agent перенаправляет self.agent на
-        # subagent, но routes остаются на parent'е. Если взять agent.id, URL
-        # уйдёт на /main:claude_code/... которого нет в роутере → 403.
-        from src.transport.web import WebTransport
-        return (f"ws://{await self._host_address()}:{WebTransport._port}"
-                f"/{self.transport._mount_id}/dashboard/sandbox-tunnel")
+        # fork.ref_agent.id — id того агента, который форк создал; routes
+        # зарегистрированы под этим id в register_route. Subagent (sub-thread)
+        # шарит fork с родителем — у sub agent.id может выглядеть как
+        # main:claude_code, но fork один на main, поэтому берём ref_agent.id.
+        from src.transport.web import WebTransportServer
+        return (f"ws://{await self._host_address()}:{WebTransportServer.port}"
+                f"/{self.fork.ref_agent.id}/dashboard/sandbox-tunnel")
 
     async def _host_address(self) -> str:
         """Hostname/IP the container can use to reach the host's uvicorn.
@@ -262,7 +261,7 @@ class SandboxProxy:
         """
         if self._host_ip:
             return self._host_ip
-        sandbox = self.transport._sandbox
+        sandbox = self.fork._sandbox
         runtime = sandbox.runtime if sandbox else "podman"
         if runtime == "podman":
             ip = await self._podman_machine_gateway()

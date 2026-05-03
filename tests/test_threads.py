@@ -1,6 +1,6 @@
 """
 Тесты thread-функциональности: Agent.thread_name/rename, auto-регистрация в start,
-MultiTransport fan-out, WebTransport mount-state шаринг и роутинг.
+MultiTransport fan-out, WebTransport/WebFork шаринг и роутинг.
 """
 import json
 import os
@@ -16,8 +16,18 @@ os.chdir(ROOT)
 from agent import Agent
 from src.transport.base import BaseTransport
 from src.transport.multi import MultiTransport
-from src.transport.web import WebTransport, MountState
+from src.transport.web import WebTransport, WebFork, WebTransportServer
 from src.memory.providers.base import BaseProvider
+
+
+# WebFork без HTTP-роутов — для unit-тестов без поднятия FastAPI/uvicorn.
+class _NoMountFork(WebFork):
+    mount = False
+
+
+class _NoMountTransport(WebTransport):
+    def create_fork(self, agent):
+        return _NoMountFork(ref_agent=agent)
 
 
 class PassthroughCompressor(BaseProvider):
@@ -131,88 +141,87 @@ class TestMultiTransportFanOut:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WebTransport: MountState shared per-mount, ws inbound, агент-фабрика, start()
+# WebTransport ↔ WebFork: разделение форка по agent.id, refcount, start()
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestWebTransportMountState:
+class TestWebTransportForkSharing:
 
     def setup_method(self):
-        WebTransport._mount_states.clear()
-        WebTransport._agent_factory = None
+        WebTransport._forks.clear()
 
-    def test_mount_state_raises_before_set_agent(self):
-        from src.transport.dashboard import DashboardTransport
-        t = DashboardTransport()
-        with pytest.raises(KeyError):
-            t._mount_state
+    def test_two_transports_share_fork(self):
+        t1 = _NoMountTransport(); t1.set_agent(MagicMock(id="forkX"))
+        t2 = _NoMountTransport(); t2.set_agent(MagicMock(id="forkX"))
+        assert t1.fork is t2.fork
+        # State (clients, counter) тоже один общий — это и был смысл шаринга.
+        t1.fork.clients.add("ws1")
+        assert "ws1" in t2.fork.clients
+        t1.fork.message_id_counter = 5
+        assert t2.fork.message_id_counter == 5
 
-    def test_two_instances_share_mount_state(self):
-        WebTransport._mount_states["forkX"] = MountState()
-        from src.transport.dashboard import DashboardTransport
-        t1 = DashboardTransport(); t1._mount_id = "forkX"
-        t2 = DashboardTransport(); t2._mount_id = "forkX"
-        t1._mount_state.clients.add("ws1")
-        assert "ws1" in t2._mount_state.clients
-        t1._mount_state.message_id_counter = 5
-        assert t2._mount_state.message_id_counter == 5
+    def test_different_forks_isolated(self):
+        t1 = _NoMountTransport(); t1.set_agent(MagicMock(id="a"))
+        t2 = _NoMountTransport(); t2.set_agent(MagicMock(id="b"))
+        assert t1.fork is not t2.fork
+        t1.fork.clients.add("ws1")
+        assert "ws1" not in t2.fork.clients
 
-    def test_different_mounts_isolated(self):
-        WebTransport._mount_states["a"] = MountState()
-        WebTransport._mount_states["b"] = MountState()
-        from src.transport.dashboard import DashboardTransport
-        t1 = DashboardTransport(); t1._mount_id = "a"
-        t2 = DashboardTransport(); t2._mount_id = "b"
-        t1._mount_state.clients.add("ws1")
-        assert "ws1" not in t2._mount_state.clients
+    def test_refcount_lifecycle(self):
+        a = MagicMock(id="forkX")
+        t1 = _NoMountTransport(); t1.set_agent(a)
+        t2 = _NoMountTransport(); t2.set_agent(MagicMock(id="forkX"))
+        assert t1.fork.refcount == 2
+        t1.cleanup()
+        assert t2.fork.refcount == 1
+        assert "forkX" in WebTransport._forks
+        t2.cleanup()
+        assert "forkX" not in WebTransport._forks
 
 
 class TestWebTransportStart:
 
-    @pytest.mark.asyncio
-    async def test_start_without_factory(self):
-        WebTransport._agent_factory = None
+    def test_start_plumbs_make_agent(self, monkeypatch):
+        captured = {}
+        def fake_start(cls, config, make_agent=None):
+            captured["config"] = config
+            captured["make_agent"] = make_agent
+        monkeypatch.setattr(WebTransportServer, "start", classmethod(fake_start))
+
+        async def factory(*a, **kw): return None
+        WebTransport.start({"port": 1234}, factory)
+        assert captured["config"] == {"port": 1234}
+        assert captured["make_agent"] is factory
+
+    def test_start_without_factory(self, monkeypatch):
+        captured = {}
+        def fake_start(cls, config, make_agent=None):
+            captured["make_agent"] = make_agent
+        monkeypatch.setattr(WebTransportServer, "start", classmethod(fake_start))
         WebTransport.start({"port": 1234})
-        assert WebTransport._port == 1234
-        assert WebTransport._agent_factory is None
-
-    @pytest.mark.asyncio
-    async def test_start_with_factory(self):
-        async def fake_factory(*a, **kw): return None
-        WebTransport.start({}, fake_factory)
-        assert WebTransport._agent_factory is not None
+        assert captured["make_agent"] is None
 
 
-class TestWebTransportInbound:
+class TestWebForkInbound:
 
     def setup_method(self):
-        WebTransport._mount_states.clear()
-        WebTransport._agent_factory = None
+        WebTransportServer.make_agent = None
 
     @pytest.mark.asyncio
     async def test_thread_rename_inbound_calls_agent(self):
-        from src.transport.dashboard import DashboardTransport
-        t = DashboardTransport()
-        t._mount_id = "forkX"
-        WebTransport._mount_states["forkX"] = MountState()
-        agent = MagicMock()
-        agent.id = "forkX"
-        agent.thread_id = ""
+        agent = MagicMock(id="forkX", thread_id="")
         agent.thread_rename = AsyncMock()
-        t.agent = agent
-        await t.ws_handle_message({"type": "transport", "method": "thread_rename", "uuid": "u1", "name": "N"})
+        fork = _NoMountFork(ref_agent=agent)
+        await fork.ws_handle_message({
+            "type": "transport", "method": "thread_rename",
+            "uuid": "u1", "name": "N",
+        })
         agent.thread_rename.assert_awaited_once_with("u1", "N")
 
     @pytest.mark.asyncio
-    async def test_process_message_routes_to_thread_agent(self):
-        from src.transport.dashboard import DashboardTransport
-        t = DashboardTransport()
-        t._mount_id = "forkX"
-        WebTransport._mount_states["forkX"] = MountState()
-
-        main_agent = MagicMock()
-        main_agent.id = "forkX"; main_agent.thread_id = ""
-        main_agent.process_message = AsyncMock()
-        t.agent = main_agent
+    async def test_process_message_routes_to_thread_agent(self, monkeypatch):
+        main = MagicMock(id="forkX", thread_id="")
+        main.process_message = AsyncMock()
+        fork = _NoMountFork(ref_agent=main)
 
         thread_agent = MagicMock()
         thread_agent.process_message = AsyncMock()
@@ -221,16 +230,28 @@ class TestWebTransportInbound:
             assert agent_id == "forkX"
             assert thread_id == "abc"
             return thread_agent
+        monkeypatch.setattr(WebTransportServer, "make_agent", staticmethod(factory))
 
-        WebTransport._agent_factory = staticmethod(factory)
-
-        await t.ws_handle_message({
+        await fork.ws_handle_message({
             "type": "transport", "method": "process_message",
             "thread_id": "abc",
             "content_parts": [{"type": "text", "text": "hi"}],
         })
         thread_agent.process_message.assert_awaited_once()
-        main_agent.process_message.assert_not_awaited()
+        main.process_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_process_message_main_thread_goes_to_ref_agent(self):
+        main = MagicMock(id="forkX", thread_id="")
+        main.process_message = AsyncMock()
+        fork = _NoMountFork(ref_agent=main)
+
+        await fork.ws_handle_message({
+            "type": "transport", "method": "process_message",
+            "thread_id": "",
+            "content_parts": [{"type": "text", "text": "hi"}],
+        })
+        main.process_message.assert_awaited_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

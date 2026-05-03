@@ -20,11 +20,11 @@ from fastapi.responses import FileResponse, JSONResponse
 
 
 class FilesAPI:
-    def __init__(self, transport):
-        self.transport = transport
+    def __init__(self, fork):
+        self.fork = fork
 
     def register(self):
-        t = self.transport
+        t = self.fork
         t.register_route("get", "/api/files", self.list)
         t.register_route("get", "/api/file", self.read)
         t.register_route("get", "/api/file/raw", self.read_raw)
@@ -37,7 +37,7 @@ class FilesAPI:
         t.register_route("get", "/api/dirs", self.list_dirs)
 
     def default_root(self) -> str | None:
-        return self.transport.default_root
+        return self.fork.default_root
 
     def resolve(self, root: str | None, path: str) -> str | None:
         actual = root or self.default_root()
@@ -54,7 +54,7 @@ class FilesAPI:
             return JSONResponse({"error": "No root resolvable"}, 400)
         if not os.path.isdir(host):
             return JSONResponse({"error": f"Not a directory: {path}"}, 400)
-        sandbox = self.transport._sandbox
+        sandbox = self.fork._sandbox
         web_root = os.path.join(sandbox.workspace_dir, "web") if sandbox else None
         entries = []
         for name in sorted(os.listdir(host)):
@@ -77,7 +77,7 @@ class FilesAPI:
                     rel = ".."
                 if not rel.startswith(".."):
                     sub = "" if rel == "." else rel.replace(os.sep, "/")
-                    entry["url"] = await self.transport.get_url("/web/" + sub)
+                    entry["url"] = await self.fork.get_url("/web/" + sub)
             entries.append(entry)
         return JSONResponse({"entries": entries})
 

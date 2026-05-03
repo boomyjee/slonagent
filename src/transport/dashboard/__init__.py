@@ -3,12 +3,12 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 
 from typing import Annotated
 
 from agent import Skill, tool
-from src.transport.web import WebTransport
+from src.transport.web import WebTransport, WebFork
 from src.transport.dashboard.files import FilesAPI
 from src.transport.dashboard.git import GitAPI
 from src.transport.dashboard.sandbox_proxy import SandboxProxy
@@ -20,7 +20,11 @@ agent_context: ContextVar[str] = ContextVar("agent_id", default="main")
 
 
 class _LogHandler(logging.Handler):
-    _instances: dict[str, "DashboardTransport"] = {}
+    """Process-wide stdlib log handler — fan-out to per-fork dashboards.
+    Routing key — `agent_context` (ContextVar set in DashboardTransport.set_agent).
+    Без активного фока с этим id запись игнорируется."""
+    _instances: dict[str, "DashboardFork"] = {}
+    _installed: "logging.Handler | None" = None
 
     def _category(self, name: str) -> str:
         if name.startswith(("src.memory", "memory")):
@@ -33,8 +37,8 @@ class _LogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             agent_id = agent_context.get()
-            transport = self._instances.get(agent_id)
-            if not transport:
+            fork = self._instances.get(agent_id)
+            if not fork:
                 return
             category = self._category(record.name)
             record.agent_id = agent_id
@@ -48,25 +52,25 @@ class _LogHandler(logging.Handler):
             # already shutting down doesn't leave an un-awaited coroutine
             # behind ("RuntimeWarning: coroutine ... was never awaited").
             loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(transport.send(event, replay=True))
+                lambda: asyncio.ensure_future(fork.send(event, replay=True))
             )
         except Exception:
             self.handleError(record)
 
 
 class DashboardSkill(Skill):
-    """Dashboard-specific context: web hosting под /web/, /web-hook,
-    /sandbox/PORT/-проксирование. Скачивание файлов и /web bypass — на
-    общем WebTransportSkill, у Dashboard-only функционала тут не нужны."""
+    """Per-agent skill with dashboard-only knowledge: open_tab tool and
+    web-hosting context prompt. Reaches the shared fork via `transport.fork`."""
 
     def __init__(self, transport: "DashboardTransport"):
         self.transport = transport
         super().__init__()
 
     async def get_context_prompt(self, user_text: str = "") -> str:
-        if not self.transport._sandbox:
+        fork = self.transport.fork
+        if not fork._sandbox:
             return ""
-        url = await self.transport.get_url("")
+        url = await fork.get_url("")
         return (
             f"У тебя есть веб-хостинг: файлы в /workspace/web/ доступны по URL {url}/web/. "
             "Файлы с расширением .py исполняются как CGI-скрипты в песочнице — "
@@ -95,42 +99,53 @@ class DashboardSkill(Skill):
         uri: Annotated[str, "URI вкладки по схеме выше."],
     ) -> str:
         try:
-            await self.transport.send_targeted({"type": "open_tab", "uri": uri})
+            await self.transport.fork.send_targeted({"type": "open_tab", "uri": uri})
         except RuntimeError as e:
             return f"Не получилось: {e}"
         return f"Открыта вкладка {uri}"
 
 
-class DashboardTransport(WebTransport):
-    """Full agent dashboard: chat + logs tab, mounted at /{agent_id}/dashboard/."""
+class DashboardFork(WebFork):
+    """Per-agent.id fork: chat + logs + IDE-like file/git/web-hosting/sandbox-proxy.
+    Mounted под /{agent_id}/dashboard/."""
 
-    _log_handler: _LogHandler | None = None
+    prefix = "/dashboard"
 
-    def __init__(self, verbose: bool = True):
-        super().__init__(prefix="/dashboard", verbose=verbose)
-        self._skill = DashboardSkill(self)
+    _WEB_INDEX_NAMES = ("index.html", "index.htm", "index.py")
+
+    def __init__(self, ref_agent):
         self._proxy = SandboxProxy(self)
         self._files = FilesAPI(self)
         self._git = GitAPI(self)
         self._watchers = WatcherPool(self._files)
         self._default_root: str | None = None
+        super().__init__(ref_agent)
+        # Singleton stdlib log handler — install once, register fork in
+        # _instances so emit() can route by agent_context.
+        if _LogHandler._installed is None:
+            handler = _LogHandler()
+            handler.setFormatter(logging.Formatter("%(asctime)s %(name)s - %(levelname)s - %(message)s"))
+            logging.getLogger().addHandler(handler)
+            _LogHandler._installed = handler
+        _LogHandler._instances[ref_agent.id] = self
+
+    # ─── lookup helpers ────────────────────────────────────────────────────
 
     @property
     def _sandbox(self):
         from src.skills.sandbox import SandboxSkill
-        return next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
+        return next((s for s in self.ref_agent.skills if isinstance(s, SandboxSkill)), None)
 
     @property
     def default_root(self) -> str:
         if self._default_root is None:
             sandbox = self._sandbox
             self._default_root = sandbox.workspace_dir if sandbox \
-                else os.path.join(self.agent.memory.memory_dir, "workspace")
+                else os.path.join(self.ref_agent.memory.memory_dir, "workspace")
             os.makedirs(self._default_root, exist_ok=True)
         return self._default_root
 
-    def get_skills(self):
-        return [*super().get_skills(), self._skill]
+    # ─── routes ────────────────────────────────────────────────────────────
 
     def register_routes(self):
         self._files.register()
@@ -148,16 +163,6 @@ class DashboardTransport(WebTransport):
         for m in ("get", "post", "put", "patch", "delete", "options", "head"):
             self.register_route(m, "/sandbox/{port:int}/{filepath:path}", self._proxy.handle_http)
         super().register_routes()
-
-
-    async def ws_handle_message(self, msg: dict, ws=None):
-        await self._watchers.ws_handle_message(msg, ws)
-        await super().ws_handle_message(msg, ws)
-
-    def on_ws_close(self, ws):
-        self._watchers.on_ws_close(ws)
-
-    _WEB_INDEX_NAMES = ("index.html", "index.htm", "index.py")
 
     async def _serve_web(self, filepath: str, request: Request):
         sandbox = self._sandbox
@@ -189,21 +194,47 @@ class DashboardTransport(WebTransport):
     async def _web_hook(self, request: Request):
         body = (await request.body()).decode()
         text = f"[web-hook] {body}"
-        await self.inject_message(text)
-        await self.process_message(
+        # Inject как transport-event на main-thread, и сразу прокидываем в
+        # ref_agent (main): web-hook'и адресуют именно главного агента форка.
+        await self.send({
+            "type": "transport", "method": "inject_message",
+            "thread_id": "", "text": text,
+        }, replay=True)
+        await self.ref_agent.process_message(
             content_parts=[{"type": "text", "text": text}],
             trigger_answer=True,
         )
         return Response("ok")
 
+    # ─── ws extensions ─────────────────────────────────────────────────────
+
+    async def ws_handle_message(self, msg: dict, ws=None):
+        await self._watchers.ws_handle_message(msg, ws)
+        await super().ws_handle_message(msg, ws)
+
+    def on_ws_close(self, ws):
+        self._watchers.on_ws_close(ws)
+
+
+class DashboardTransport(WebTransport):
+    """Thin BaseTransport adapter — owns DashboardSkill (per-agent), spawns
+    a DashboardFork on first set_agent of a given agent.id."""
+
+    _fork_cls = DashboardFork
+
+    def __init__(self, verbose: bool = True):
+        super().__init__(verbose=verbose)
+        self._skill = DashboardSkill(self)
+
+    def create_fork(self, agent):
+        return DashboardFork(ref_agent=agent)
+
+    def get_skills(self):
+        return [*super().get_skills(), self._skill]
+
     def set_agent(self, agent):
         super().set_agent(agent)
-
-        if DashboardTransport._log_handler is None:
-            handler = _LogHandler()
-            handler.setFormatter(logging.Formatter("%(asctime)s %(name)s - %(levelname)s - %(message)s"))
-            logging.getLogger().addHandler(handler)
-            DashboardTransport._log_handler = handler
-
-        _LogHandler._instances[agent.id] = self
+        # ContextVar-binding — лог-категории и таргетинг _LogHandler идут
+        # по agent_context (read in emit()). Set per-agent set_agent чтобы
+        # каждый task внутри этого агента нашёл своё значение.
         agent_context.set(agent.id)

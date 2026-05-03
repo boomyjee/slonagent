@@ -16,8 +16,8 @@ from fastapi.testclient import TestClient
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from src.transport.web import WebTransport
-from src.transport.dashboard import DashboardTransport
+from src.transport.web import WebTransport, WebTransportServer
+from src.transport.dashboard import DashboardTransport, DashboardFork
 
 
 class _Sandbox:
@@ -28,7 +28,11 @@ class _Sandbox:
 class _Agent:
     def __init__(self, workspace_dir: str):
         self.id = "test"
+        self.thread_id = ""
         self.skills = [_Sandbox(workspace_dir)]
+
+    def thread_list(self):
+        return {}
 
     async def process_message(self, *args, **kwargs):
         # BaseTransport binds this on attach; tests don't drive chat.
@@ -42,31 +46,32 @@ def workspace(tmp_path):
 
 @pytest.fixture
 def transport(workspace, monkeypatch):
-    # Pre-build the FastAPI app so _ensure_server short-circuits and never
-    # tries to spawn uvicorn / a tunnel.
-    WebTransport._app = FastAPI()
-    WebTransport._loop = asyncio.new_event_loop()
-    WebTransport._sish_domain = ""
-    WebTransport._password_hash = ""
-    WebTransport._tunnel_url = None
-    WebTransport._tunnel_ready = None
+    # Pre-build the FastAPI app so WebTransportServer.start short-circuits
+    # and never tries to spawn uvicorn / a tunnel.
+    WebTransportServer.app = FastAPI()
+    # Non-empty password_hash so the WS-auth gate has a value to compare;
+    # tests pass `auth` cookie matching it, which mimics the prod login.
+    WebTransportServer.password_hash = "test"
+    WebTransport._forks.clear()
 
-    # The real DashboardTransport._sandbox property looks for a SandboxSkill
-    # instance in agent.skills; for tests we just inject our stub.
+    # DashboardFork._sandbox looks for a SandboxSkill in ref_agent.skills;
+    # tests just stub the property to a fixed object.
     sandbox_obj = _Sandbox(workspace)
-    monkeypatch.setattr(DashboardTransport, "_sandbox",
+    monkeypatch.setattr(DashboardFork, "_sandbox",
                         property(lambda self: sandbox_obj))
 
     t = DashboardTransport()
     t.set_agent(_Agent(workspace))
     yield t
     t.cleanup()
-    WebTransport._app = None
+    WebTransportServer.app = None
 
 
 @pytest.fixture
 def client(transport):
-    return TestClient(WebTransport._app)
+    c = TestClient(WebTransportServer.app, base_url="http://localhost")
+    c.cookies.set("auth", WebTransportServer.password_hash)
+    return c
 
 
 # ─── HTTP file API ────────────────────────────────────────────────────────────
@@ -187,7 +192,7 @@ def test_watcher_default_root_when_empty(client, workspace):
 
 
 def test_watcher_cleanup_on_disconnect(transport, client, workspace):
-    pool = transport._watchers
+    pool = transport.fork._watchers
     with client.websocket_connect("/test/dashboard/ws") as ws:
         ws.send_json({"type": "watch", "root": workspace})
         time.sleep(0.3)

@@ -1,667 +1,58 @@
-import asyncio, base64, contextlib, hashlib, inspect, json, logging, mimetypes, os, re, shutil, time, uuid
-from collections import deque
-from dataclasses import dataclass, field
-from datetime import date, timedelta
-from pathlib import Path
-from typing import Annotated
+"""Тонкий BaseTransport-адаптер: per-agent привязка + thread_id stamping.
+Вся фактическая работа (HTTP/WS, replay, uploads, dispatch) — в WebFork."""
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
+import logging
 
-from agent import Skill, bypass, tool
 from src.transport.base import BaseTransport
+from src.transport.web.server import WebTransportServer
+from src.transport.web.skill import WebTransportSkill
+from src.transport.web.fork import WebFork
+
+__all__ = ["WebTransport", "WebFork", "WebTransportServer", "WebTransportSkill"]
 
 log = logging.getLogger(__name__)
 
 
-_TEXT_EXT_RE = re.compile(r"\.(txt|md|py|js|ts|tsx|jsx|json|yaml|yml|xml|html|css|scss|sh|bash|sql|csv|log|toml|ini|conf|cfg|env)$", re.I)
-
-
-class WebTransportSkill(Skill):
-    """Скиллы общие для любого WebTransport: ссылка на веб-интерфейс и
-    скачивание файлов, пришедших от пользователя через чат."""
-
-    def __init__(self, transport: "WebTransport"):
-        self.transport = transport
-        self.sandbox = None
-        super().__init__()
-
-    async def start(self):
-        from src.skills.sandbox import SandboxSkill
-        self.sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
-
-    @bypass("web", "Ссылка на веб-интерфейс", standalone=True)
-    async def web_command(self, args: str) -> str:
-        return f"🖥 {await self.transport.get_url('/')}"
-
-    @tool(lambda self: (
-        "Скачать файл, прикреплённый пользователем в чате. "
-        "dest_path — путь внутри контейнера (напр. /workspace/file.jpg)."
-        if self.sandbox
-        else "Скачать файл, прикреплённый пользователем в чате. "
-        "dest_path — абсолютный путь на хост-машине."
-    ))
-    async def download_file(
-        self,
-        file_id: Annotated[str, "id из метаданных attached_file."],
-        dest_path: Annotated[str, "Путь назначения для сохранения файла."],
-    ):
-        uploads = self.transport.uploads_dir
-        # Файл сохранён как <uuid>.<ext> или просто <uuid> (если без расширения).
-        matches = [e.path for e in os.scandir(uploads)
-                   if e.is_file() and (e.name == file_id or e.name.startswith(file_id + "."))]
-        if not matches:
-            return {"error": f"Файл с id={file_id} не найден (возможно, удалён по TTL=24h)"}
-        src = matches[0]
-
-        if self.sandbox:
-            host_dest = self.sandbox.resolve_path(dest_path)
-            if host_dest is None:
-                return {"error": f"Путь запрещён или недоступен: {dest_path}"}
-        else:
-            host_dest = os.path.abspath(dest_path)
-        dest_dir = os.path.dirname(host_dest)
-        if not os.path.isdir(dest_dir):
-            return {"error": f"Директория не существует: {dest_dir}"}
-
-        await asyncio.to_thread(shutil.copy, src, host_dest)
-        log.info("[web] download_file: %s → %s", src, host_dest)
-        return {"status": "ok", "saved_to": dest_path}
-
-
-async def start_tunnel(port: int, subdomain: str, sish_domain: str, sish_port: int, sish_key: str):
-    """Start SSH tunnel via sish using asyncssh. Returns (public_url, connection)."""
-    import asyncssh
-    key = asyncssh.import_private_key(sish_key)
-    conn = await asyncssh.connect(
-        sish_domain, sish_port, known_hosts=None, client_keys=[key], username="tunnel",
-        keepalive_interval=15, keepalive_count_max=4,
-    )
-    # Force IPv4 — passing "localhost" makes asyncssh try ::1 first; if
-    # uvicorn binds to 0.0.0.0 (v4 only), the v6 connect hangs for ~2s
-    # before falling back, which is the exact cold-start TTFB we kept
-    # papering over with HTTP-level keepalives.
-    await conn.forward_remote_port(subdomain, 80, "127.0.0.1", port)
-    url = f"https://{subdomain}.{sish_domain}:8443"
-    log.info("[tunnel] %s -> localhost:%d", url, port)
-    return url, conn
-
-
-@dataclass
-class MountState:
-    clients: set = field(default_factory=set)
-    last_active_ws: WebSocket | None = None
-    replay_transport: deque = field(default_factory=lambda: deque(maxlen=100))
-    replay_other: deque = field(default_factory=lambda: deque(maxlen=400))
-    message_id_counter: int = 0
-
-
 class WebTransport(BaseTransport):
-    """Base for transports that serve a chat UI over a shared HTTP server.
+    _forks: dict[str, WebFork] = {}
 
-    Class-level: lazily starts one uvicorn server per process.
+    @classmethod
+    def start(cls, config: dict, make_agent=None):
+        WebTransportServer.start(config, make_agent)
 
-    Instance-level: each subclass gets, under /{agent_id}{prefix}/ —
-    - static files with cascading lookup: subclass `ui/` first, then
-      `WebTransport/ui/` (shared lib.js, Chat.js, etc.),
-    - a WebSocket endpoint at `/ws` speaking the chat wire protocol,
-    - buffered event replay on new client connections.
-
-    Concrete subclasses pass `prefix` (empty for root mount). Anything
-    specific to the subclass (extra skills, log handlers, additional routes)
-    goes in the subclass's own `set_agent`.
-    """
-
-    _app: FastAPI | None = None
-    _server_task: asyncio.Task | None = None
-    _port: int = 8765
-    _tunnel_conn = None
-    _tunnel_url: str | None = None
-    _tunnel_ready: asyncio.Event | None = None
-    _sish_domain: str = ""
-    _sish_port: int = 2222
-    _sish_key: str = ""
-    _password_hash: str = ""
-    # Loop on which the uvicorn server lives. Captured in WebTransport.start()
-    # so _ensure_server can schedule its server/tunnel tasks here regardless
-    # of which thread first triggers it (e.g. an RPC worker calling into a
-    # sandbox-bridge factory).
-    _loop: asyncio.AbstractEventLoop | None = None
-
-    @staticmethod
-    def make_auth_token(day: date = None) -> str:
-        d = day or date.today()
-        return hashlib.sha256(f"{d.isoformat()}{WebTransport._password_hash}".encode()).hexdigest()[:16]
-
-    @staticmethod
-    def check_auth_token(token: str) -> bool:
-        today = date.today()
-        return token in (WebTransport.make_auth_token(today), WebTransport.make_auth_token(today - timedelta(days=1)))
-
-    # Subclasses bound to a pre-accepted WebSocket (e.g. PageTransport, which
-    # WebAgentTransport hands a ws on each new bookmarklet connection) set this
-    # to False to skip HTTP-route registration in set_agent.
-    _mount: bool = True
-
-    _MIME = {"js": "application/javascript", "css": "text/css", "html": "text/html",
-             "json": "application/json", "svg": "image/svg+xml"}
-    _STATIC_HEADERS = {
-        "Cache-Control": "no-store",
-        # Needed when a bookmarklet loads run.js cross-origin into a third-party page.
-        "Access-Control-Allow-Origin": "*",
-    }
-
-    # Shared state per mount (fork): clients/replay/last_active/counter.
-    # Multiple WebTransport instances (one per thread agent) of the same fork
-    # all bind to the same WS endpoint and share the same connected clients.
-    _mount_states: dict[str, "MountState"] = {}
-    _agent_factory = None  # main.py устанавливает в WebTransport.start()
-
-    def __init__(self, prefix: str = "", verbose: bool = True):
+    def __init__(self, verbose: bool = True):
         super().__init__()
-        self._prefix = prefix
-        self.verbose = verbose
-        self._mount_id: str | None = None
+        self._verbose = verbose
+        self.fork: WebFork | None = None
         self._web_skill = WebTransportSkill(self)
 
-    @property
-    def _mount_state(self) -> "MountState":
-        return WebTransport._mount_states[self._mount_id]
+    def create_fork(self, agent):
+        return WebFork(ref_agent=agent)
+
+    def set_agent(self, agent):
+        super().set_agent(agent)
+        if not self.fork:
+            if not agent.id in self._forks:
+                self._forks[agent.id] = self.create_fork(agent)
+            self.fork = self._forks[agent.id]
+            self.fork.refcount += 1
+
+    def cleanup(self):
+        if self.fork is None: return
+        self.fork.refcount -= 1
+        if self.fork.refcount <= 0:
+            self.fork.cleanup()
+            self._forks.pop(self.fork.ref_agent.id, None)
+        self.fork = None
 
     def get_skills(self):
         return [self._web_skill]
 
-    @classmethod
-    def start(cls, config: dict, make_agent=None):
-        """Configure the shared uvicorn server and stash the agent factory.
-        Call once from main.py before constructing any web transports."""
-        WebTransport._port = config.get("port", 8765)
-        WebTransport._sish_domain = config.get("sish_domain", "")
-        WebTransport._sish_port = config.get("sish_port", 2222)
-        WebTransport._sish_key = config.get("sish_key", "")
-        WebTransport._password_hash = config.get("password_hash", "")
-        WebTransport._loop = asyncio.get_running_loop()
-        if make_agent is not None:
-            WebTransport._agent_factory = staticmethod(make_agent)
-
-    async def get_auth_url(self, sub_path: str = "") -> str:
-        """URL with a daily auth token appended (for sharing in Telegram etc)."""
-        url = await self.get_url(sub_path)
-        if self._password_hash:
-            sep = "&" if "?" in url else "?"
-            url += f"{sep}token={self.make_auth_token()}"
-        return url
-
-    async def get_url(self, sub_path: str = "", force_localhost: bool = False) -> str:
-        """Return a fully-qualified URL inside this transport's namespace
-        (`/{agent_id}{prefix}{sub_path}`). Uses the tunnel URL if one is
-        available; pass `force_localhost=True` to skip it. Awaits tunnel
-        startup if it's still in progress."""
-        if self._mount_id is None:
-            raise RuntimeError("get_url called before set_agent (or transport has _mount=False and no URL)")
-        path = f"/{self._mount_id}{self._prefix}{sub_path}"
-        if not force_localhost and WebTransport._tunnel_ready is not None:
-            await WebTransport._tunnel_ready.wait()
-        if not force_localhost and WebTransport._tunnel_url:
-            return f"{WebTransport._tunnel_url}{path}"
-        return f"http://localhost:{WebTransport._port}{path}"
-
-    @staticmethod
-    def _ensure_server():
-        # May be called from any thread (e.g. an RPC worker building a
-        # sandbox-bridge transport). All loop-bound operations are scheduled
-        # onto WebTransport._loop, captured in WebTransport.start(), so this
-        # function has no thread affinity of its own.
-        if WebTransport._app is not None:
-            return
-        if WebTransport._loop is None:
-            raise RuntimeError("WebTransport._loop not set; call WebTransport.start() from the main loop first")
-        WebTransport._app = FastAPI()
-
-        _REALM = "SlonAgent"
-        _401 = Response(status_code=401, headers={"WWW-Authenticate": f'Basic realm="{_REALM}"'})
-        _NO_PASSWORD = PlainTextResponse(
-            "No password configured. Set password_hash in config.", status_code=503,
+    async def _transport_event(self, method: str, replay: bool = True, **kwargs):
+        await self.fork.send(
+            {"type": "transport", "method": method, "thread_id": self.agent.thread_id, **kwargs},
+            replay=replay,
         )
-
-        @WebTransport._app.middleware("http")
-        async def auth_middleware(request: Request, call_next):
-            # Local access never needs auth (direct browser on the host).
-            if request.url.hostname in ("localhost", "127.0.0.1"):
-                return await call_next(request)
-            if not WebTransport._password_hash:
-                return _NO_PASSWORD
-            # Static assets that can't carry credentials are public:
-            # - .js: bookmarklets import scripts cross-origin (no cookie).
-            # - manifest.json / icons: <link rel="manifest"> fetches without
-            #   credentials by default, blocking PWA install behind auth.
-            # The actual gate for sensitive data is the WebSocket.
-            if request.url.path.endswith((".js", ".json", ".svg", ".png", ".ico")):
-                return await call_next(request)
-            # Cookie from a previous successful auth.
-            if request.cookies.get("auth") == WebTransport._password_hash:
-                return await call_next(request)
-            # Daily token in query string (for Telegram WebApp etc).
-            token = request.query_params.get("token", "")
-            if token and WebTransport.check_auth_token(token):
-                response = await call_next(request)
-                response.set_cookie(
-                    "auth", WebTransport._password_hash,
-                    max_age=30 * 24 * 3600,
-                    httponly=True, secure=True, samesite="none", path="/",
-                )
-                return response
-            auth = request.headers.get("authorization", "")
-            if auth.startswith("Basic "):
-                try:
-                    decoded = base64.b64decode(auth[6:]).decode()
-                    password = decoded.split(":", 1)[1]
-                    if hashlib.sha256(password.encode()).hexdigest() == WebTransport._password_hash:
-                        response = await call_next(request)
-                        response.set_cookie(
-                            "auth", WebTransport._password_hash,
-                            max_age=30 * 24 * 3600,
-                            httponly=True, secure=True, samesite="none", path="/",
-                        )
-                        return response
-                except Exception:
-                    pass
-            return _401
-
-        @WebTransport._app.get("/")
-        async def root():
-            return RedirectResponse("/main/dashboard/")
-
-        async def _run():
-            import uvicorn
-            uv_config = uvicorn.Config(
-                WebTransport._app,
-                host="0.0.0.0",
-                port=WebTransport._port,
-                ws="wsproto",
-                log_config=None,
-            )
-            server = uvicorn.Server(uv_config)
-            server.install_signal_handlers = lambda: None
-            server.capture_signals = lambda: contextlib.nullcontext()
-            log.info("WebTransport server: http://localhost:%d", WebTransport._port)
-            await server.serve()
-
-        logging.getLogger("asyncssh").setLevel(logging.WARNING)
-        logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-
-        def _spawn_server():
-            WebTransport._server_task = asyncio.create_task(_run())
-        WebTransport._loop.call_soon_threadsafe(_spawn_server)
-
-        if WebTransport._sish_domain:
-            import uuid, sys, os
-            # Stable per-(machine, entry script) subdomain so bookmarklets
-            # survive restarts, but two checkouts on the same box don't
-            # collide on the same tunnel hostname.
-            key = f"{uuid.getnode()}:{os.path.abspath(sys.argv[0])}"
-            subdomain = "web-" + hashlib.sha1(key.encode()).hexdigest()[:6]
-            WebTransport._tunnel_ready = asyncio.Event()
-            async def _tunnel():
-                # Ретраи только на стартовых ошибках. Успешный коннект
-                # (даже если сразу разорвался) сбрасывает счётчик, поэтому
-                # сетевые мерцания не выжирают бюджет, а реальная поломка
-                # (sish мёртв, auth не пускает) останавливается на 5-й
-                # подряд неудачной попытке.
-                fails, MAX_FAILS = 0, 5
-                while True:
-                    try:
-                        url, WebTransport._tunnel_conn = await start_tunnel(
-                            WebTransport._port, subdomain, WebTransport._sish_domain,
-                            WebTransport._sish_port, WebTransport._sish_key,
-                        )
-                        WebTransport._tunnel_url = url
-                        fails = 0
-                    except Exception as e:
-                        fails += 1
-                        log.warning("Tunnel start failed (%d/%d): %s", fails, MAX_FAILS, e)
-                        WebTransport._tunnel_ready.set()
-                        if fails >= MAX_FAILS:
-                            log.warning("Giving up on tunnel after %d consecutive failures", MAX_FAILS)
-                            return
-                        await asyncio.sleep(5)
-                        continue
-                    WebTransport._tunnel_ready.set()
-                    try:
-                        await WebTransport._tunnel_conn.wait_closed()
-                    except Exception as e:
-                        log.warning("Tunnel watcher error: %s", e)
-                    log.warning("Tunnel closed: was %s", WebTransport._tunnel_url)
-                    WebTransport._tunnel_url = None
-                    WebTransport._tunnel_conn = None
-                    await asyncio.sleep(5)
-            WebTransport._loop.call_soon_threadsafe(asyncio.create_task, _tunnel())
-
-    def register_route(self, method, path, handler):
-        url = f"/{self.agent.id}{self._prefix}{path}"
-        entry = WebTransport._mounted.get(url)
-        if entry is None:
-            getattr(self._app, method)(url)(handler)
-            entry = WebTransport._mounted[url] = {"refcount": 0, "route": self._app.router.routes[-1]}
-        entry["refcount"] += 1
-        self._registered_urls.append(url)
-
-    def register_json_route(self, method, path, handler):
-        """Register a handler with contract (query, body, path_params) -> dict|list."""
-        async def wrapped(request: Request):
-            body = None
-            if request.method in ("POST", "PUT", "PATCH"):
-                try: body = await request.json()
-                except Exception: pass
-            result = await handler(dict(request.query_params),body,dict(request.path_params))
-            if isinstance(result, str):
-                return PlainTextResponse(result)
-            return JSONResponse(result)
-        wrapped.__name__ = f"json_{handler.__name__ if hasattr(handler, '__name__') else id(handler)}"
-        self.register_route(method, path, wrapped)
-
-    # url → {"refcount": int, "route": Route}
-    # Несколько инстансов могут зарегистрировать один и тот же URL
-    # (общие fork-уровневые роуты тредов одного форка) — монтируем при
-    # первом, снимаем при последнем. Уникальные URL (например с thread_id
-    # в пути) живут со своим refcount=1.
-    _mounted: dict[str, dict] = {}
-
-    def set_agent(self, agent):
-        super().set_agent(agent)
-        if self._mount_id is not None: return
-        self._mount_id = agent.id
-        WebTransport._mount_states.setdefault(self._mount_id, MountState())
-        if self._mount:
-            self._registered_urls: list[str] = []
-            self._ensure_server()
-            self.register_routes()
-
-    def register_routes(self):
-        self.register_route("websocket", "/ws", self._ws)
-        self.register_route("get", "/api/commands", self._api_commands)
-        self.register_route("get", "/uploads/{filename:path}", self._serve_upload)
-        self.register_route("get", "/{filename:path}", self._static)
-
-    async def _serve_upload(self, filename: str):
-        from fastapi.responses import FileResponse
-        path = os.path.join(self.uploads_dir, filename)
-        # Path traversal guard
-        if not os.path.realpath(path).startswith(os.path.realpath(self.uploads_dir)):
-            return PlainTextResponse("Not found", status_code=404)
-        if not os.path.isfile(path):
-            return PlainTextResponse("Not found", status_code=404)
-        mime, _ = mimetypes.guess_type(path)
-        return FileResponse(path, media_type=mime or "application/octet-stream")
-
-    async def _api_commands(self):
-        cmds = {
-            cmd: desc
-            for skill in self.agent.skills
-            for cmd, desc in skill.get_bypass_commands(standalone_only=True).items()
-        }
-        return JSONResponse(cmds)
-
-    def remove_routes(self):
-        if self._mount_id is None:
-            return
-        for url in self._registered_urls:
-            entry = WebTransport._mounted.get(url)
-            if entry is None: continue
-            entry["refcount"] -= 1
-            if entry["refcount"] <= 0:
-                try: self._app.router.routes.remove(entry["route"])
-                except ValueError: pass
-                WebTransport._mounted.pop(url, None)
-        self._registered_urls = []
-        self._mount_id = None
-
-    def cleanup(self):
-        self.remove_routes()
-
-    # --- static serving ---
-
-    _BASE_UI = Path(__file__).resolve().parent / "ui"
-
-    @property
-    def _ui_dirs(self) -> list[Path]:
-        """Directories to search for static files, most-specific first.
-
-        Subclass's `ui/` (next to the subclass source file) is checked first;
-        `WebTransport/ui/` is the fallback with shared components (lib.js,
-        Chat.js, etc.). Subclasses override individual files by placing them
-        in their own `ui/` directory.
-        """
-        own = Path(inspect.getfile(type(self))).resolve().parent / "ui"
-        dirs = []
-        if own != self._BASE_UI and own.is_dir():
-            dirs.append(own)
-        dirs.append(self._BASE_UI)
-        return dirs
-
-    async def _static(self, filename: str = "index.html"):
-        filename = filename or "index.html"
-        for ui_dir in self._ui_dirs:
-            path = ui_dir / filename
-            if path.is_file() and path.resolve().is_relative_to(ui_dir.resolve()):
-                mime = self._MIME.get(path.suffix.lstrip("."), "text/plain")
-                return PlainTextResponse(
-                    path.read_text(encoding="utf-8"),
-                    media_type=mime,
-                    headers=self._STATIC_HEADERS,
-                )
-        return PlainTextResponse("Not found", status_code=404)
-    
-    async def _ws(self, ws: WebSocket):
-        # HTTP middleware doesn't run on WebSocket handshakes — enforce auth here.
-        host = ws.headers.get("host", "").split(":")[0]
-        if host not in ("localhost", "127.0.0.1"):
-            if not WebTransport._password_hash or \
-                    ws.cookies.get("auth") != WebTransport._password_hash:
-                await ws.close(code=4401)
-                return
-        await ws.accept()
-        await self.ws_connect(ws)    
-
-    async def ws_connect(self, ws: WebSocket):
-        # No auto-replay — clients ask for it explicitly via a "replay"
-        # message after they connect (so reconnects on a live page can
-        # specify last_seen_id and skip what they already have).
-        self._mount_state.clients.add(ws)
-        for uuid_, info in self.agent.thread_list().items():
-            await ws.send_text(json.dumps({
-                "type": "transport", "method": "thread_rename",
-                "uuid": uuid_, "name": info.get("name", ""),
-            }, ensure_ascii=False))
-        try:
-            while True:
-                data = await ws.receive_text()
-                try:
-                    msg = json.loads(data)
-                except json.JSONDecodeError:
-                    log.warning("ws: invalid JSON: %s", data[:200])
-                    continue
-                await self.ws_handle_message(msg, ws)
-        except WebSocketDisconnect:
-            pass
-        finally:
-            self._mount_state.clients.discard(ws)
-            if self._mount_state.last_active_ws is ws:
-                self._mount_state.last_active_ws = None
-            self.on_ws_close(ws)
-
-    def on_ws_close(self, ws):
-        """Hook for subclasses to clean up per-connection state. Base no-op."""
-        pass
-
-    async def ws_handle_message(self, msg: dict, ws=None):
-        if msg.get("type") == "replay" and ws is not None:
-            last_seen = msg.get("last_seen_id", -1)
-            import heapq
-            stream = heapq.merge(self._mount_state.replay_transport, self._mount_state.replay_other,key=lambda e: e.get("id", 0))
-            for event in stream:
-                if event.get("id", 0) > last_seen:
-                    await ws.send_text(json.dumps(event, ensure_ascii=False))
-            return
-        if msg.get("type") == "transport" and msg.get("method") == "process_message":
-            # Запоминаем клиента который последним прислал user message — туда
-            # уйдут адресные команды от агента (например, dashboard.open_tab).
-            if ws is not None:
-                self._mount_state.last_active_ws = ws
-            new_parts = []
-            for p in msg.get("content_parts", []):
-                if isinstance(p, dict) and p.get("type") == "file":
-                    new_parts.extend(await self._process_file(p))
-                else:
-                    new_parts.append(p)
-            msg = {**msg, "content_parts": new_parts}
-            content_parts = new_parts
-
-            # Echo back through send() so it lands in the buffer and gets
-            # replayed on reconnect. Chat.js no longer adds user messages
-            # to local state — it renders them when this event comes in.
-            await self.send(msg, replay=True)
-            target = self.agent
-            tid = msg.get("thread_id", "")
-            if tid != self.agent.thread_id and WebTransport._agent_factory:
-                resolved = await WebTransport._agent_factory(self.agent.id, tid)
-                if resolved is not None:
-                    target = resolved
-            try:
-                await target.process_message(
-                    content_parts=content_parts,
-                    user_message_id=msg.get("user_message_id"),
-                    trigger_answer=msg.get("trigger_answer", True),
-                )
-            except Exception:
-                log.exception("[ws] process_message FAILED")
-            return
-        if msg.get("type") == "transport" and msg.get("method") == "thread_rename":
-            uuid, name = msg.get("uuid"), msg.get("name")
-            if uuid is not None and name is not None:
-                await self.agent.thread_rename(uuid, name)
-
-    @property
-    def uploads_dir(self) -> str:
-        """<memory_dir>/uploads/ — место хранения присланных юзером файлов.
-        Внутри memory/, а значит под .gitignore."""
-        d = os.path.join(self.agent.memory.memory_dir, "uploads")
-        os.makedirs(d, exist_ok=True)
-        return d
-
-    async def _save_upload(self, data: bytes, ext: str) -> str:
-        file_id = uuid.uuid4().hex
-        out_path = os.path.join(self.uploads_dir, f"{file_id}{ext}")
-        await asyncio.to_thread(self._save_with_gc, out_path, data)
-        return file_id
-
-    @staticmethod
-    def _attached_file_part(file_id: str, filename: str, field: str, mime: str, size: int,
-                            content: str | None) -> dict:
-        attrs = (f'file_id="{file_id}" filename="{filename}" type="{field}" '
-                 f'mime_type="{mime}" size_bytes="{size}"')
-        if content:
-            text = f"<attached_file {attrs}>\n<content>\n{content}\n</content>\n</attached_file>"
-        else:
-            text = f"<attached_file {attrs} />"
-        part = {"type": "text", "text": text}
-        if content and field == "document":
-            part["_document_id"] = f"{file_id}_{filename}"
-        return part
-
-    async def _process_file(self, p: dict) -> list[dict]:
-        """Единственный диспатч аттача: сохраняет байты, возвращает 1+ content_part'ов
-        в зависимости от mime — image/* отдаёт также image_url для vision, voice/video
-        транскрибируются/описываются, текстовые инлайнятся в <content>, остальное —
-        self-closing мета."""
-        filename = p.get("name") or "file"
-        mime = p.get("mime") or "application/octet-stream"
-        size = p.get("size") or 0
-        try:
-            data = base64.b64decode(p.get("data", ""))
-        except Exception as e:
-            return [{"type": "text", "text": f"⚠️ Не удалось декодировать файл {filename}: {e}"}]
-        ext = os.path.splitext(filename)[1].lower()[:16] or (mimetypes.guess_extension(mime) or "")
-        try:
-            file_id = await self._save_upload(data, ext)
-        except Exception as e:
-            log.exception("file save failed")
-            return [{"type": "text", "text": f"⚠️ Не удалось сохранить файл {filename}: {e}"}]
-
-        content = None
-        field = "document"
-        extra: list[dict] = []
-        if mime.startswith("image/"):
-            field = "photo"
-            extra.append({"type": "image_url",
-                          "image_url": {"url": f"data:{mime};base64,{p['data']}"}})
-        elif mime.startswith("video/"):
-            field = "video"
-            try:
-                content = await self.agent.describe_video(data, mime)
-            except Exception:
-                log.exception("video describe failed")
-        elif mime.startswith("audio/"):
-            field = "voice"
-            try:
-                content = await self.agent.transcribe_audio(data, mime)
-            except Exception as e:
-                log.exception("voice transcription failed")
-                content = f"⚠️ Не удалось распознать: {e}"
-        elif (mime.startswith("text/") or _TEXT_EXT_RE.search(filename)) and size < 1_048_576:
-            try:
-                content = data.decode("utf-8", errors="replace")
-            except Exception:
-                log.exception("text file inline failed")
-        return extra + [self._attached_file_part(file_id, filename, field, mime, size, content)]
-
-    def _save_with_gc(self, out_path: str, data: bytes):
-        """Пишет файл и заодно прогоняет GC через _gc_uploads — replay-aware,
-        не удалит outbound-файлы на которые ещё есть ссылки в буфере событий."""
-        with open(out_path, "wb") as f:
-            f.write(data)
-        self._gc_uploads()
-
-    async def send(self, event: dict, replay=False):
-        self._mount_state.message_id_counter += 1
-        event = {**event, "id": self._mount_state.message_id_counter}
-        if replay:
-            buf = self._mount_state.replay_transport if event.get("type") == "transport" else self._mount_state.replay_other
-            buf.append(event)
-        if not self._mount_state.clients: return
-        data = json.dumps(event, ensure_ascii=False)
-        dead = set()
-        for ws in list(self._mount_state.clients):
-            try:
-                await ws.send_text(data)
-            except Exception:
-                dead.add(ws)
-        self._mount_state.clients -= dead
-
-    async def send_targeted(self, event: dict):
-        """Шлёт только клиенту, который последним прислал user-message.
-        Если такого нет (никто не подключён или disconnected) — кидает,
-        чтобы вызывающий tool вернул ошибку в ллм."""
-        target = self._mount_state.last_active_ws
-        if target is None or target not in self._mount_state.clients:
-            raise RuntimeError("no active dashboard client")
-        self._mount_state.message_id_counter += 1
-        event = {**event, "id": self._mount_state.message_id_counter}
-        try:
-            await target.send_text(json.dumps(event, ensure_ascii=False))
-        except Exception as e:
-            self._mount_state.clients.discard(target)
-            self._mount_state.last_active_ws = None
-            raise RuntimeError(f"target client send failed: {e}")
-
-    # --- BaseTransport interface ---
-
-    async def _transport_event(self, method: str, replay=True, **kwargs):
-        # thread_id берётся от текущего агента — sub-агенты переустанавливают
-        # себя через set_agent, поэтому self.agent.thread_id отражает того кто
-        # инициировал событие.
-        tid = self.agent.thread_id if self.agent is not None else ""
-        await self.send({"type": "transport", "method": method, "thread_id": tid, **kwargs}, replay=replay)
 
     async def send_message(self, text: str, stream_id=None, final: bool = True):
         await self._transport_event("send_message", replay=final, text=text, stream_id=stream_id, final=final)
@@ -673,7 +64,8 @@ class WebTransport(BaseTransport):
         await self._transport_event("send_memory_info", replay=final, text=text, stream_id=stream_id, final=final)
 
     async def send_system_prompt(self, text: str):
-        if not self.verbose: return
+        if not self._verbose:
+            return
         await self._transport_event("send_system_prompt", text=text)
 
     async def on_tool_call(self, name: str, args: dict):
@@ -691,92 +83,16 @@ class WebTransport(BaseTransport):
     async def thread_rename(self, uuid: str, name: str):
         await self._transport_event("thread_rename", uuid=uuid, name=name)
 
-    # ─── Outbound media — копируем файл в uploads_dir, фронт получает URL ────
-
-    def _publish_file(self, host_path: str, compress_image: bool = False) -> dict:
-        """Копирует файл в uploads_dir с уникальным именем, возвращает dict
-        с метаданными для WS-события. URL относительный — сам сервер где
-        смонтирован, такой и будет работать (./uploads/...).
-
-        compress_image=True жмёт картинку до 1920×1920 JPEG q85. Симметрично
-        компрессии на инбаунде (Chat.js compressImage)."""
-        import shutil
-        token = uuid.uuid4().hex
-        if compress_image:
-            try:
-                from PIL import Image
-                img = Image.open(host_path)
-                img.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
-                if img.mode not in ("RGB", "L"):
-                    img = img.convert("RGB")
-                out_name = f"{token}.jpg"
-                out_path = os.path.join(self.uploads_dir, out_name)
-                img.save(out_path, format="JPEG", quality=85, optimize=True)
-                display_name = os.path.splitext(os.path.basename(host_path))[0] + ".jpg"
-                mime = "image/jpeg"
-            except Exception as e:
-                log.warning("[publish] image compress failed for %s: %s — sending as-is", host_path, e)
-                compress_image = False
-        if not compress_image:
-            ext = os.path.splitext(host_path)[1]
-            out_name = f"{token}{ext}"
-            out_path = os.path.join(self.uploads_dir, out_name)
-            shutil.copyfile(host_path, out_path)
-            display_name = os.path.basename(host_path)
-            mime, _ = mimetypes.guess_type(host_path)
-            mime = mime or "application/octet-stream"
-        result = {
-            "url": f"./uploads/{out_name}",
-            "name": display_name,
-            "size": os.path.getsize(out_path),
-            "mime": mime,
-        }
-        self._gc_uploads()
-        return result
-
-    def _gc_uploads(self):
-        """Удаляет файлы старше суток, на которые нет ссылок в replay-буфере.
-        Если событие с URL ещё в буфере — реконнектящийся клиент получит его
-        и попробует загрузить, поэтому файл нужен."""
-        cutoff = time.time() - 24 * 3600
-        referenced = set()
-        for buf in (self._mount_state.replay_transport, self._mount_state.replay_other):
-            for ev in buf:
-                self._collect_upload_names(ev, referenced)
-        for entry in os.scandir(self.uploads_dir):
-            try:
-                if not entry.is_file(): continue
-                if entry.stat().st_mtime >= cutoff: continue
-                if entry.name in referenced: continue
-                os.remove(entry.path)
-            except OSError:
-                pass
-
-    @staticmethod
-    def _collect_upload_names(obj, out: set):
-        """Рекурсивно собирает basename'ы файлов uploads из URL'ов вида './uploads/<name>'."""
-        if isinstance(obj, dict):
-            url = obj.get("url")
-            if isinstance(url, str) and "/uploads/" in url:
-                out.add(url.rsplit("/uploads/", 1)[1].split("?", 1)[0].split("#", 1)[0])
-            for v in obj.values():
-                WebTransport._collect_upload_names(v, out)
-        elif isinstance(obj, list):
-            for v in obj:
-                WebTransport._collect_upload_names(v, out)
-
     async def send_images(self, paths: list[str]):
-        # Картинки сжимаются до 1920×1920 JPEG. Если нужно сохранить качество —
-        # отправляй через send_files.
-        items = [self._publish_file(p, compress_image=True) for p in paths]
+        items = [self.fork.publish_file(p, compress_image=True) for p in paths]
         await self._transport_event("send_images", items=items)
 
     async def send_files(self, paths: list[str]):
-        items = [self._publish_file(p) for p in paths]
+        items = [self.fork.publish_file(p) for p in paths]
         await self._transport_event("send_files", items=items)
 
     async def send_voice(self, audio_path: str):
-        item = self._publish_file(audio_path)
+        item = self.fork.publish_file(audio_path)
         await self._transport_event("send_voice", item=item)
 
     async def send_suggestions(self, text: str, options: list[str]):

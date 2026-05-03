@@ -24,7 +24,7 @@ from src.memory.providers.base import BaseProvider
 from src.skills.config import ConfigSkill
 from src.skills.sandbox import SandboxSkill
 from src.transport.dashboard import DashboardTransport
-from src.transport.web import WebTransport
+from src.transport.web import WebTransport, WebTransportServer
 
 
 pytestmark = pytest.mark.integration
@@ -70,11 +70,11 @@ async def dash():
     workdir = _SHARED_WORKDIR
     port = _free_port()
 
-    # Reset class-level WebTransport state in case prior tests touched it.
-    WebTransport._app = None
-    WebTransport._server_task = None
-    WebTransport._tunnel_url = None
-    WebTransport._tunnel_ready = None
+    # Reset process-wide WebTransportServer state in case prior tests touched it.
+    WebTransportServer.app = None
+    WebTransportServer._tunnel_url = None
+    WebTransportServer._tunnel_ready = None
+    WebTransport._forks.clear()
     WebTransport.start({"port": port, "password_hash": ""})
 
     sb = SandboxSkill()
@@ -116,12 +116,9 @@ async def dash():
     }
 
     transport.cleanup()
-    if WebTransport._server_task is not None:
-        WebTransport._server_task.cancel()
-        try:
-            await WebTransport._server_task
-        except (asyncio.CancelledError, Exception):
-            pass
+    # uvicorn-task живёт под прикрытием loop.call_soon_threadsafe — отдельной
+    # ссылки на него теперь нет, отменять некого. На pytest-уровне loop
+    # закрывается после теста и сервер уходит вместе с ним.
     # Контейнер и образ оставляем — следующий тест переиспользует через тот же
     # _SHARED_WORKDIR, экономим pip install websockets и старт sandbox_proxy.
 
@@ -288,23 +285,14 @@ class TestPortForward:
 
 class TestWorkerURL:
 
-    async def test_uses_mount_id_not_agent_id(self, dash):
-        """Subagent шарит parent's transport. transport.agent на subagent,
-        но routes остались зарегистрированы на parent'е (по _mount_id).
-        worker URL обязан использовать _mount_id, иначе WebSocket-роут не
-        совпадёт и тоннель отвергнут с 403."""
+    async def test_uses_fork_ref_agent_id_not_subagent_id(self, dash):
+        """Subagent шарит fork с родителем. transport.agent у субагента может
+        быть переустановлен (id вроде 'main:claude_code'), но fork — один,
+        по ref_agent.id (id главного агента форка). worker URL обязан брать
+        fork.ref_agent.id, иначе WebSocket-роут не совпадёт → 403."""
         transport = dash["transport"]
-        original_id = transport.agent.id
-        original_agent = transport.agent
-        # Эмулируем подменённый agent (как при set_agent от subagent),
-        # сохраняем skills чтобы _host_address мог найти SandboxSkill.
-        class _FakeAgent:
-            id = "main:claude_code"
-            skills = original_agent.skills
-        transport.agent = _FakeAgent()
-        try:
-            url = await transport._proxy._worker_url()
-            assert f"/{original_id}/dashboard/sandbox-tunnel" in url
-            assert "main:claude_code" not in url
-        finally:
-            transport.agent = original_agent
+        fork = transport.fork
+        original_ref_id = fork.ref_agent.id
+        url = await fork._proxy._worker_url()
+        assert f"/{original_ref_id}/dashboard/sandbox-tunnel" in url
+        assert "main:claude_code" not in url

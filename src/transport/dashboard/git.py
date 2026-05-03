@@ -210,11 +210,11 @@ class Git:
 
 
 class GitAPI:
-    def __init__(self, transport):
-        self.transport = transport
+    def __init__(self, fork):
+        self.fork = fork
 
     def register(self):
-        t = self.transport
+        t = self.fork
         t.register_route("get", "/api/git/status", self.status)
         t.register_route("get", "/api/git/diff", self.diff)
         t.register_route("get", "/api/git/diff_between", self.diff_between)
@@ -231,7 +231,7 @@ class GitAPI:
         t.register_route("post", "/api/git/switch_branch", self.switch_branch)
 
     def _git(self, root: str, path: str):
-        host = self.transport._files.resolve(root, path)
+        host = self.fork._files.resolve(root, path)
         if host is None:
             return None, JSONResponse({"error": f"Invalid path: {path}"}, 400)
         if not os.path.isdir(host):
@@ -275,7 +275,7 @@ class GitAPI:
     async def blame_at(self, root: str = Query(""), path: str = Query(...)):
         """Blame for a file at the given root-relative path. Auto-discovers
         the owning repo via `git rev-parse --show-toplevel`."""
-        host = self.transport._files.resolve(root, path)
+        host = self.fork._files.resolve(root, path)
         if host is None:
             return JSONResponse({"error": f"Invalid path: {path}"}, 400)
         if not os.path.isfile(host):
