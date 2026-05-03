@@ -197,13 +197,14 @@ class DashboardFork(WebFork):
     async def _web_hook(self, request: Request):
         body = (await request.body()).decode()
         text = f"[web-hook] {body}"
-        # Inject как transport-event на main-thread, и сразу прокидываем в
-        # ref_agent (main): web-hook'и адресуют именно главного агента форка.
         await self.send({
             "type": "transport", "method": "inject_message",
             "thread_id": "", "text": text,
         }, replay=True)
-        await self.ref_agent.process_message(
+        if "" not in self.transports:
+            from src.transport.web import WebTransport
+            await WebTransport.make_agent(self.ref_agent.id, "")
+        await self.transports[""].process_message(
             content_parts=[{"type": "text", "text": text}],
             trigger_answer=True,
         )
