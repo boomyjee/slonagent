@@ -25,10 +25,13 @@ class PassthroughCompressor(BaseProvider):
     async def compress(self, turns): return turns
 
 
-def make_agent(tmp_path, thread_id=""):
+def make_agent(tmp_path, thread_id="", agent_id="main"):
     from agent import Agent
+    # id="main" по умолчанию: совпадает с тем, что _discover_files infer'ит
+    # для tmp_path/memory/CRON*.json. Иначе тесты с CronSkill._tick не
+    # резолвят реестр-fallback правильно.
     return Agent(
-        id="test",
+        id=agent_id,
         model_name="test",
         api_key="test",
         base_url="http://test",
@@ -47,14 +50,16 @@ def make_cron(tmp_path, thread_id=""):
 
 @pytest.fixture(autouse=True)
 def reset_cron_class_state():
-    """Class-level cron loop state живёт на CronSkill — между тестами сбрасываем."""
+    """Class-level cron daemon state живёт на CronSkill — между тестами сбрасываем."""
     CronSkill._root_dir = None
     CronSkill._make_agent = None
     CronSkill._loop_task = None
+    CronSkill._agents = {}
     yield
     CronSkill._root_dir = None
     CronSkill._make_agent = None
     CronSkill._loop_task = None
+    CronSkill._agents = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -214,19 +219,39 @@ class TestCronTick:
         assert next_dt > datetime.now()
 
     @pytest.mark.asyncio
-    async def test_tick_drops_task_if_make_agent_unavailable(self, tmp_path):
+    async def test_unresolved_agent_keeps_task_for_retry(self, tmp_path):
+        # _make_agent=None, агент не зарегистрирован в реестре → task должен
+        # остаться в файле и попробовать снова на следующем тике.
         cron = make_cron(tmp_path)
-        # _root_dir выставлен, но _make_agent=None → агент не резолвится
         CronSkill._root_dir = str(tmp_path)
         CronSkill._make_agent = None
+        CronSkill._agents = {}  # пустой реестр
 
         past = (datetime.now() - timedelta(minutes=5)).isoformat()
         await cron.schedule_task("ghost", past, "once")
         await CronSkill._tick()
 
-        # task должен быть удалён, ничего не падает
         remaining = await cron.list_tasks()
-        assert remaining["tasks"] == []
+        assert len(remaining["tasks"]) == 1
+        assert remaining["tasks"][0]["message"] == "ghost"
+
+    @pytest.mark.asyncio
+    async def test_tick_uses_registered_agent_without_factory(self, tmp_path):
+        # CLI-режим: нет factory, агент loaded и зарегистрирован в _agents
+        # через Skill.start. Cron должен сработать на нём.
+        cron = make_cron(tmp_path)
+        cron.agent.transport = MagicMock()
+        cron.agent.transport.inject_message = AsyncMock()
+        cron.agent.transport.process_message = AsyncMock()
+        await cron.start()  # регистрирует cron.agent в _agents
+        CronSkill._root_dir = str(tmp_path)
+        CronSkill._make_agent = None
+
+        past = (datetime.now() - timedelta(minutes=5)).isoformat()
+        await cron.schedule_task("from registry", past, "once")
+        await CronSkill._tick()
+
+        cron.agent.transport.inject_message.assert_called_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

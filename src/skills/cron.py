@@ -23,6 +23,9 @@ class CronSkill(Skill):
     _root_dir: str | None = None
     _make_agent = None
     _loop_task: asyncio.Task | None = None
+    # Loaded агенты (registered через Skill.start). Lookup до фабрики:
+    # CLI mode без factory работает через этот реестр.
+    _agents: dict[tuple[str, str], object] = {}
 
     @classmethod
     def start_daemon(cls, root_dir: str | None = None, make_agent=None):
@@ -34,6 +37,7 @@ class CronSkill(Skill):
         cls._loop_task = asyncio.create_task(cls._loop())
 
     async def start(self):
+        CronSkill._agents[(self.agent.id, self.agent.thread_id)] = self.agent
         CronSkill.start_daemon()
 
     @classmethod
@@ -65,9 +69,9 @@ class CronSkill(Skill):
                     continue
                 agent = await cls._resolve_agent(agent_id, thread_id)
                 if agent is None:
-                    log.warning("[cron] task %s: no agent for %s/%s, dropping",
+                    log.warning("[cron] task %s: no agent for %s/%s, retrying next tick",
                                 task.get("id"), agent_id, thread_id)
-                    changed = True
+                    remaining.append(task)
                     continue
                 log.info("[cron] firing task %s in %s/%s: %r",
                          task["id"], agent_id, thread_id, task["message"])
@@ -90,6 +94,9 @@ class CronSkill(Skill):
 
     @classmethod
     async def _resolve_agent(cls, agent_id: str, thread_id: str):
+        cached = cls._agents.get((agent_id, thread_id))
+        if cached is not None:
+            return cached
         if cls._make_agent is None:
             return None
         try:
