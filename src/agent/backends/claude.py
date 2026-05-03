@@ -382,7 +382,7 @@ class ClaudeBackend(BaseBackend):
                         dtype = delta.get("type")
                         if dtype == "text_delta":
                             text_buf += delta.get("text", "")
-                            await agent.transport.send_message(text_buf, stream_id=text_stream_id)
+                            await agent.transport.send_message(text_buf, stream_id=text_stream_id, final=False)
                         elif dtype == "thinking_delta":
                             chunk = delta.get("thinking", "")
                             if chunk:
