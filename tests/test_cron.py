@@ -25,7 +25,7 @@ class PassthroughCompressor(BaseProvider):
     async def compress(self, turns): return turns
 
 
-def make_agent(tmp_path):
+def make_agent(tmp_path, thread_id=""):
     from agent import Agent
     return Agent(
         id="test",
@@ -33,12 +33,13 @@ def make_agent(tmp_path):
         api_key="test",
         base_url="http://test",
         agent_dir=str(tmp_path),
+        thread_id=thread_id,
         memory_compressor=PassthroughCompressor(),
     )
 
 
-def make_cron(tmp_path):
-    agent = make_agent(tmp_path)
+def make_cron(tmp_path, thread_id=""):
+    agent = make_agent(tmp_path, thread_id=thread_id)
     cron = CronSkill()
     cron.register(agent)
     return cron
@@ -192,6 +193,77 @@ class TestCronTick:
         # Следующий запуск — в будущем
         next_dt = datetime.fromisoformat(remaining["tasks"][0]["scheduled_at"]).replace(tzinfo=None)
         assert next_dt > datetime.now()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Изоляция по thread_id — main и треды одного форка не видят друг-друга
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestCronThreadIsolation:
+
+    def test_tasks_path_differs_per_thread(self, tmp_path):
+        main = make_cron(tmp_path, thread_id="")
+        thread_a = make_cron(tmp_path, thread_id="abc")
+        thread_b = make_cron(tmp_path, thread_id="xyz")
+        assert main._tasks_path.endswith("CRON.json")
+        assert thread_a._tasks_path.endswith("CRON_abc.json")
+        assert thread_b._tasks_path.endswith("CRON_xyz.json")
+        # Все три — разные файлы
+        paths = {main._tasks_path, thread_a._tasks_path, thread_b._tasks_path}
+        assert len(paths) == 3
+
+    @pytest.mark.asyncio
+    async def test_thread_tasks_invisible_to_main(self, tmp_path):
+        main = make_cron(tmp_path, thread_id="")
+        thread = make_cron(tmp_path, thread_id="abc")
+        future = (datetime.now() + timedelta(hours=1)).isoformat()
+        await thread.schedule_task("task in thread", future, "once")
+        # main не должен видеть таску треда
+        main_list = await main.list_tasks()
+        assert main_list["tasks"] == []
+        # тред видит свою
+        thread_list = await thread.list_tasks()
+        assert len(thread_list["tasks"]) == 1
+        assert thread_list["tasks"][0]["message"] == "task in thread"
+
+    @pytest.mark.asyncio
+    async def test_main_tasks_invisible_to_thread(self, tmp_path):
+        main = make_cron(tmp_path, thread_id="")
+        thread = make_cron(tmp_path, thread_id="abc")
+        future = (datetime.now() + timedelta(hours=1)).isoformat()
+        await main.schedule_task("task in main", future, "once")
+        thread_list = await thread.list_tasks()
+        assert thread_list["tasks"] == []
+        main_list = await main.list_tasks()
+        assert len(main_list["tasks"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_threads_isolated_from_each_other(self, tmp_path):
+        a = make_cron(tmp_path, thread_id="abc")
+        b = make_cron(tmp_path, thread_id="xyz")
+        future = (datetime.now() + timedelta(hours=1)).isoformat()
+        await a.schedule_task("only in A", future, "once")
+        await b.schedule_task("only in B", future, "once")
+        a_msgs = [t["message"] for t in (await a.list_tasks())["tasks"]]
+        b_msgs = [t["message"] for t in (await b.list_tasks())["tasks"]]
+        assert a_msgs == ["only in A"]
+        assert b_msgs == ["only in B"]
+
+    @pytest.mark.asyncio
+    async def test_thread_tick_does_not_fire_main_task(self, tmp_path):
+        main = make_cron(tmp_path, thread_id="")
+        thread = make_cron(tmp_path, thread_id="abc")
+        thread.agent.transport = MagicMock()
+        thread.agent.transport.inject_message = AsyncMock()
+        thread.agent.transport.process_message = AsyncMock()
+
+        past = (datetime.now() - timedelta(minutes=5)).isoformat()
+        await main.schedule_task("main due", past, "once")
+        # тред тикает — не должен трогать main-задачу
+        await thread._tick()
+        thread.agent.transport.inject_message.assert_not_called()
+        # main-задача всё ещё в файле main
+        assert len((await main.list_tasks())["tasks"]) == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

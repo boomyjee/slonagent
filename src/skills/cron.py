@@ -37,7 +37,9 @@ class CronSkill(Skill):
 
     @property
     def _tasks_path(self) -> str:
-        return os.path.join(self.agent.memory.memory_dir, "CRON.json")
+        tid = self.agent.thread_id
+        fname = f"CRON_{tid}.json" if tid else "CRON.json"
+        return os.path.join(self.agent.memory.memory_dir, fname)
 
     def _load_tasks(self) -> list[dict]:
         if not os.path.exists(self._tasks_path):
