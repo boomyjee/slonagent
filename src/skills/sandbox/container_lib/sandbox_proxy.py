@@ -29,20 +29,16 @@ except ImportError:
 log = logging.getLogger("sandbox_proxy")
 
 
-CGI_WEB_DIR = "/workspace/web"
-
-
 async def handle_cgi(tunnel, frame):
-    """Exec /workspace/web/<path>.py с подменённым stdout. Скрипт top-to-bottom
-    исполняется в изолированных globals, печатаемое уходит в body, заголовки
-    набираются через header(name, value)."""
+    """Exec абсолютного container-пути <path>.py с подменённым stdout. Скрипт
+    top-to-bottom исполняется в изолированных globals, печатаемое уходит в body,
+    заголовки набираются через header(name, value)."""
     id_ = frame["id"]
-    rel = (frame.get("path") or "").lstrip("/")
-    fpath = f"{CGI_WEB_DIR}/{rel}"
+    fpath = frame.get("path") or ""
 
     request = types.SimpleNamespace(
         method=frame.get("method", "GET"),
-        path="/" + rel,
+        path=fpath,
         query=frame.get("query") or {},
         headers=frame.get("headers") or {},
         cookies=frame.get("cookies") or {},

@@ -55,7 +55,6 @@ class FilesAPI:
         if not os.path.isdir(host):
             return JSONResponse({"error": f"Not a directory: {path}"}, 400)
         sandbox = self.fork._sandbox
-        web_root = os.path.join(sandbox.workspace_dir, "web") if sandbox else None
         entries = []
         for name in sorted(os.listdir(host)):
             full = os.path.join(host, name)
@@ -67,17 +66,12 @@ class FilesAPI:
             }
             if is_dir and os.path.isdir(os.path.join(full, ".git")):
                 entry["has_git"] = True
-            # Всё что лежит под workspace/web/ (и сам web_dir) доступно через
-            # дашборд — даём URL без проверок, сервер сам разберётся
-            # (директории резолвятся на index.{html,htm,py}, иначе 404).
-            if web_root:
-                try:
-                    rel = os.path.relpath(full, web_root)
-                except ValueError:
-                    rel = ".."
-                if not rel.startswith(".."):
-                    sub = "" if rel == "." else rel.replace(os.sep, "/")
-                    entry["url"] = await self.fork.get_url("/web/" + sub)
+            # Если файл доступен песочнице — даём URL вида /~<container_path>.
+            # Дашборд сам разрулит: статика → отдача, .py → CGI через worker.
+            if sandbox:
+                cp = sandbox.resolve_host_path(full)
+                if cp:
+                    entry["url"] = await self.fork.get_url("/~" + cp)
             entries.append(entry)
         return JSONResponse({"entries": entries})
 

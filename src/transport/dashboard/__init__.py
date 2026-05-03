@@ -72,10 +72,12 @@ class DashboardSkill(Skill):
             return ""
         url = await fork.get_url("")
         return (
-            f"У тебя есть веб-хостинг: файлы в /workspace/web/ доступны по URL {url}/web/. "
-            "Файлы с расширением .py исполняются как CGI-скрипты в песочнице — "
+            f"У тебя есть веб-доступ к файлам песочницы по схеме {url}/~<container-path>: "
+            f"например {url}/~/workspace/index.html отдаст /workspace/index.html, "
+            f"{url}/~/mnt/ro/foo.txt — файл из ro-маунта /mnt/ro/foo.txt. "
+            "Любой .py-файл по такому URL исполняется как CGI-скрипт в песочнице — "
             "доступны globals `request` (.method/.path/.query/.headers/.cookies/.body), "
-            "`header(name, value)` для ответных заголовков, всё что попадает в `print()` уходит в body. "
+            "`header(name, value)` для ответных заголовков, всё из `print()` уходит в body. "
             f"Там же есть вебхук {url}/web-hook — POST-запрос на него придёт тебе как сообщение. "
             "Используй это для создания интерактивных веб-приложений. "
             f"Если запустишь внутри сандбокса свой сервер на 127.0.0.1:PORT "
@@ -153,7 +155,7 @@ class DashboardFork(WebFork):
         # Все методы — для CGI (.py) скриптов могут понадобиться POST/PUT/etc.
         # Не-.py файлы вне GET отвечают 405 внутри хендлера.
         for m in ("get", "post", "put", "patch", "delete", "options", "head"):
-            self.register_route(m, "/web/{filepath:path}", self._serve_web)
+            self.register_route(m, "/~/{filepath:path}", self._serve_sandbox_fs)
         self.register_route("post", "/web-hook", self._web_hook)
         # Reverse-tunnel proxy for ports bound inside the sandbox container.
         # Tunnel endpoint must be registered before the generic /sandbox/{port}
@@ -167,27 +169,28 @@ class DashboardFork(WebFork):
             self.register_route(m, "/sandbox/{port:int}/{filepath:path}", self._proxy.handle_http)
         super().register_routes()
 
-    async def _serve_web(self, filepath: str, request: Request):
+    async def _serve_sandbox_fs(self, filepath: str, request: Request):
         sandbox = self._sandbox
         if not sandbox:
             return Response("No sandbox", status_code=404)
-        web_dir = Path(sandbox.workspace_dir) / "web"
-        path = (web_dir / filepath).resolve()
-        if not path.is_relative_to(web_dir.resolve()):
-            return Response("Not found", status_code=404)
+        container_path = "/" + filepath.rstrip("/")
+        host_path = sandbox.resolve_path(container_path)
+        if host_path is None:
+            return Response("Not allowed", status_code=403)
+        path = Path(host_path)
         if path.is_dir():
             for name in self._WEB_INDEX_NAMES:
                 cand = path / name
                 if cand.is_file():
                     path = cand
-                    filepath = (filepath.rstrip("/") + "/" + name).lstrip("/")
+                    container_path = container_path.rstrip("/") + "/" + name
                     break
             else:
                 return Response("Not found", status_code=404)
         if not path.is_file():
             return Response("Not found", status_code=404)
         if path.suffix == ".py":
-            return await self._proxy.handle_cgi(filepath, request)
+            return await self._proxy.handle_cgi(container_path, request)
         if request.method != "GET":
             return Response("Method not allowed", status_code=405)
         mime = self._MIME.get(path.suffix.lstrip("."), "text/plain")

@@ -136,7 +136,7 @@ class TestStatic:
     async def test_serves_html(self, dash, http_client):
         with open(os.path.join(dash["web_dir"], "static_html.html"), "w", encoding="utf-8") as f:
             f.write("<h1>hello-static</h1>")
-        r = await http_client.get(f"{dash['base']}/web/static_html.html")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/static_html.html")
         assert r.status_code == 200
         assert "hello-static" in r.text
         assert r.headers["content-type"].startswith("text/html")
@@ -144,17 +144,17 @@ class TestStatic:
     async def test_serves_json(self, dash, http_client):
         with open(os.path.join(dash["web_dir"], "static_data.json"), "w", encoding="utf-8") as f:
             f.write('{"x": 1}')
-        r = await http_client.get(f"{dash['base']}/web/static_data.json")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/static_data.json")
         assert r.status_code == 200
         assert r.json() == {"x": 1}
 
     async def test_404_for_missing(self, dash, http_client):
-        r = await http_client.get(f"{dash['base']}/web/does_not_exist.html")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/does_not_exist.html")
         assert r.status_code == 404
 
     async def test_blocks_path_traversal(self, dash, http_client):
         # Попытка вылезти из web/ — должна 404'ить, не отдать чужой файл.
-        r = await http_client.get(f"{dash['base']}/web/../../../etc/passwd")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/../../../etc/passwd")
         assert r.status_code == 404
 
 
@@ -165,7 +165,7 @@ class TestCGI:
     async def test_basic_print(self, dash, http_client):
         with open(os.path.join(dash["web_dir"], "cgi_basic.py"), "w", encoding="utf-8") as f:
             f.write("print('hi-from-cgi')\n")
-        r = await http_client.get(f"{dash['base']}/web/cgi_basic.py")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/cgi_basic.py")
         assert r.status_code == 200
         assert "hi-from-cgi" in r.text
 
@@ -177,7 +177,7 @@ class TestCGI:
         )
         with open(os.path.join(dash["web_dir"], "cgi_query.py"), "w", encoding="utf-8") as f:
             f.write(script)
-        r = await http_client.get(f"{dash['base']}/web/cgi_query.py?name=Slon")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/cgi_query.py?name=Slon")
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("application/json")
         assert r.json() == {"name": "Slon", "method": "GET"}
@@ -189,7 +189,7 @@ class TestCGI:
         )
         with open(os.path.join(dash["web_dir"], "cgi_post.py"), "w", encoding="utf-8") as f:
             f.write(script)
-        r = await http_client.post(f"{dash['base']}/web/cgi_post.py",
+        r = await http_client.post(f"{dash['base']}/~/workspace/web/cgi_post.py",
                                    content=b"hello-body")
         assert r.status_code == 200
         assert "got: hello-body" in r.text
@@ -202,7 +202,7 @@ class TestCGI:
         )
         with open(os.path.join(dash["web_dir"], "cgi_header.py"), "w", encoding="utf-8") as f:
             f.write(script)
-        r = await http_client.get(f"{dash['base']}/web/cgi_header.py")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/cgi_header.py")
         assert r.status_code == 200
         assert r.headers.get("x-custom") == "totally-custom"
 
@@ -210,19 +210,19 @@ class TestCGI:
         path = os.path.join(dash["web_dir"], "cgi_live.py")
         with open(path, "w", encoding="utf-8") as f:
             f.write("print('v1')\n")
-        r1 = await http_client.get(f"{dash['base']}/web/cgi_live.py")
+        r1 = await http_client.get(f"{dash['base']}/~/workspace/web/cgi_live.py")
         assert "v1" in r1.text
 
         with open(path, "w", encoding="utf-8") as f:
             f.write("print('v2')\n")
-        r2 = await http_client.get(f"{dash['base']}/web/cgi_live.py")
+        r2 = await http_client.get(f"{dash['base']}/~/workspace/web/cgi_live.py")
         assert "v2" in r2.text
         assert "v1" not in r2.text
 
     async def test_script_exception_returns_500(self, dash, http_client):
         with open(os.path.join(dash["web_dir"], "cgi_boom.py"), "w", encoding="utf-8") as f:
             f.write("raise ValueError('nope')\n")
-        r = await http_client.get(f"{dash['base']}/web/cgi_boom.py")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/cgi_boom.py")
         assert r.status_code == 500
         assert "ValueError" in r.text
         assert "nope" in r.text
@@ -231,7 +231,7 @@ class TestCGI:
         os.makedirs(os.path.join(dash["web_dir"], "subdir_html"), exist_ok=True)
         with open(os.path.join(dash["web_dir"], "subdir_html", "index.html"), "w", encoding="utf-8") as f:
             f.write("<h1>html-index</h1>")
-        r = await http_client.get(f"{dash['base']}/web/subdir_html")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/subdir_html")
         assert r.status_code == 200
         assert "html-index" in r.text
 
@@ -239,7 +239,7 @@ class TestCGI:
         os.makedirs(os.path.join(dash["web_dir"], "subdir_py"), exist_ok=True)
         with open(os.path.join(dash["web_dir"], "subdir_py", "index.py"), "w", encoding="utf-8") as f:
             f.write("print('py-index')\n")
-        r = await http_client.get(f"{dash['base']}/web/subdir_py")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/subdir_py")
         assert r.status_code == 200
         assert "py-index" in r.text
 
@@ -279,6 +279,35 @@ class TestPortForward:
         # Несуществующий порт внутри контейнера → proxy worker возвращает 502.
         r = await http_client.get(f"{dash['base']}/sandbox/19999/whatever")
         assert r.status_code == 502
+
+
+# ─── Worker recovery — host-side respawn after worker died ────────────────────
+
+class TestWorkerRecovery:
+
+    async def test_respawns_worker_killed_inside_container(self, dash, http_client):
+        """Воркер умер (например, host долго был оффлайн → 10 фейлов реконнекта,
+        worker сдался). Следующий CGI-запрос должен поднять нового воркера через
+        _start_worker, не падать с 502."""
+        sb = dash["sandbox"]
+        # Сначала убедимся что воркер вообще поднялся хотя бы раз — простая
+        # CGI-команда форсит handle_cgi → _ensure_tunnel → _start_worker.
+        with open(os.path.join(dash["web_dir"], "recover_warmup.py"), "w", encoding="utf-8") as f:
+            f.write("print('warmup')\n")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/recover_warmup.py")
+        assert r.status_code == 200
+
+        # Убиваем воркер прямо в контейнере, имитируя ситуацию "процесс сдох".
+        await sb.exec("pkill -9 -f /slonagent/sandbox_proxy.py", timeout=5)
+        # Дать host'у заметить разрыв туннеля (handle_tunnel finally → tunnel=None).
+        await asyncio.sleep(1.0)
+
+        # Следующий CGI-запрос должен авто-перестартовать воркера.
+        with open(os.path.join(dash["web_dir"], "recover_after.py"), "w", encoding="utf-8") as f:
+            f.write("print('after-recovery')\n")
+        r = await http_client.get(f"{dash['base']}/~/workspace/web/recover_after.py")
+        assert r.status_code == 200
+        assert "after-recovery" in r.text
 
 
 # ─── _worker_url: subagent inheritance regression ─────────────────────────────

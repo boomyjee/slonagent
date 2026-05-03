@@ -188,6 +188,24 @@ class SandboxSkill(Skill):
                 return os.path.join(host, container_path[len(prefix):].replace("/", os.sep))
         return None
 
+    def resolve_host_path(self, host_path: str) -> str | None:
+        """Обратный маппинг resolve_path: host_path → container_path или
+        None если файл вне всех маунтов песочницы."""
+        rp = os.path.realpath(host_path)
+        candidates = [(self.workspace_dir, "/workspace")]
+        for host, container, _ro in self._mounts():
+            candidates.append((host, container))
+        for host, container in candidates:
+            if not host:
+                continue
+            h = os.path.realpath(host)
+            if rp == h:
+                return container
+            if rp.startswith(h + os.sep):
+                rel = rp[len(h) + 1:].replace(os.sep, "/")
+                return container.rstrip("/") + "/" + rel
+        return None
+
     async def get_context_prompt(self, user_text: str = "") -> str:
         lines = [
             "## Sandbox",

@@ -223,12 +223,12 @@ class SandboxProxy:
         if sandbox is None:
             return False
         url = await self._worker_url()
-        # Always respawn: the URL (host IP, agent id) can change between
-        # slonagent restarts, and an already-running worker may be stuck in
-        # a reconnect loop against a stale URL.
+        # pkill -f ловит воркер по cmdline-pattern, не по PID-файлу — pid-файл
+        # может быть рассинхрон (зомби, не записался, переживёт рестарт). Sleep
+        # после pkill чтоб процесс успел сняться до того, как мы стартанём новый.
         cmd = (
-            "if [ -f /tmp/sandbox_proxy.pid ]; then "
-            "kill $(cat /tmp/sandbox_proxy.pid) 2>/dev/null; fi; "
+            "pkill -f /slonagent/sandbox_proxy.py 2>/dev/null; "
+            "sleep 0.5; "
             "nohup python3 -u /slonagent/sandbox_proxy.py "
             f"--url {shlex.quote(url)} > /tmp/sandbox_proxy.log 2>&1 & "
             "echo $! > /tmp/sandbox_proxy.pid"

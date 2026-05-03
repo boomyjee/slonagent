@@ -24,6 +24,17 @@ class _Sandbox:
     def __init__(self, workspace_dir: str):
         self.workspace_dir = workspace_dir
 
+    def resolve_host_path(self, host_path: str):
+        # Простой стаб: всё под workspace_dir → /workspace/...
+        rp = os.path.realpath(host_path)
+        ws = os.path.realpath(self.workspace_dir)
+        if rp == ws:
+            return "/workspace"
+        if rp.startswith(ws + os.sep):
+            rel = rp[len(ws) + 1:].replace(os.sep, "/")
+            return "/workspace/" + rel
+        return None
+
 
 class _Agent:
     def __init__(self, workspace_dir: str):
