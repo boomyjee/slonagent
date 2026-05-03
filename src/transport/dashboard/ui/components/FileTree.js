@@ -88,8 +88,8 @@ function DirNode({ entry, depth, onOpen, onContextMenu, onFileClick, selected, d
     return html`<div>
         <div class="${cl.node}${dirHover}"
              style=${{paddingLeft: pad}}
-             draggable=${depth > 0 ? "true" : undefined}
-             onDragStart=${ev => depth > 0 && dnd.start(ev, entry)}
+             draggable="true"
+             onDragStart=${ev => depth > 0 ? dnd.start(ev, entry) : ev.preventDefault()}
              onDragOver=${ev => dnd.over(ev, entry)}
              onDragLeave=${ev => dnd.leave(ev, entry)}
              onDrop=${ev => dnd.drop(ev, entry)}
@@ -305,7 +305,7 @@ export class FileTree extends Component {
             start: this._onDragStart, over: this._onDragOver,
             leave: this._onDragLeave, drop: this._onDrop,
         };
-        return html`<div>
+        return html`<div class=${cl.treeRoot}>
             <${DirNode} entry=${root} depth=${0} onOpen=${onOpen}
                         onContextMenu=${this._onContextMenu}
                         onFileClick=${this._onFileClick}
@@ -357,6 +357,9 @@ export function isInGitRepo(path) {
     return false;
 }
 
+cl.treeRoot = css`
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+`;
 cl.node = css`
   display: flex; align-items: center; padding: 2px 8px; cursor: pointer;
   white-space: nowrap; font-size: 13px;
