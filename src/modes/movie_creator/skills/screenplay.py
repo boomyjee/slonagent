@@ -3,13 +3,13 @@ from typing import Annotated
 
 from agent import Skill, tool
 from src.modes.movie_creator.project import dump
-from src.modes.movie_creator.transport import MovieTransport
+from src.modes.movie_creator.transport import MovieFork
 
 
 class ScreenplaySkill(Skill):
     """AI tools available in the Screenplay tab."""
 
-    def __init__(self, movie: MovieTransport):
+    def __init__(self, movie: MovieFork):
         super().__init__()
         self.movie = movie
 

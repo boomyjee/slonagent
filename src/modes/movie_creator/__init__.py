@@ -53,22 +53,27 @@ class MovieCreatorSkill(Skill):
         project_name: Annotated[str, "Имя проекта"] = "default",
     ) -> dict:
         movie = MovieTransport()
-        movie.generator = Generator(movie, self._gemini_key, self._muapi_key, self._evolink_key)
-
-        tab_skills = {
-            "screenplay": ScreenplaySkill(movie),
-            "characters":  CharactersSkill(movie),
-            "storyboard": StoryboardSkill(movie),
-        }
         control = _MovieControl()
 
+        # Tab skills нужен MovieFork — он рождается внутри spawn_subagent через
+        # transport.set_agent. Поэтому сначала субагент, потом строим скиллы.
         sub = await self.agent.spawn_subagent(
             f"movie_{project_name}",
             memory_providers=[],
-            skills=[tab_skills["screenplay"], control],
+            skills=[control],
             transport=MultiTransport([self.agent.transport, movie]),
         )
-        movie.load(Path(sub.memory.memory_dir) / "project")
+        fork = movie.fork
+        fork.generator = Generator(fork, self._gemini_key, self._muapi_key, self._evolink_key)
+        fork.load(Path(sub.memory.memory_dir) / "project")
+
+        tab_skills = {
+            "screenplay": ScreenplaySkill(fork),
+            "characters":  CharactersSkill(fork),
+            "storyboard": StoryboardSkill(fork),
+        }
+        tab_skills["screenplay"].register(sub)
+        sub.skills.append(tab_skills["screenplay"])
 
         def on_tab(tab: str):
             new_skill = tab_skills.get(tab)
@@ -76,9 +81,9 @@ class MovieCreatorSkill(Skill):
                 return
             sub.skills = [s for s in sub.skills if s not in tab_skills.values()] + [new_skill]
             new_skill.register(sub)
-        movie.on_tab_changed(on_tab)
+        fork.on_tab_changed(on_tab)
 
-        url = await movie.get_auth_url("/")
+        url = await fork.get_auth_url("/")
         await self.agent.transport.send_message(f"🎬 Movie Creator: {url}\nДля выхода: /exit")
 
         try:
@@ -86,4 +91,4 @@ class MovieCreatorSkill(Skill):
         finally:
             movie.cleanup()
 
-        return {"status": "done", "project": movie.project.title}
+        return {"status": "done", "project": fork.project.title}

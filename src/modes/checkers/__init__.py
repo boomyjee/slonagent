@@ -5,26 +5,27 @@ from typing import Annotated
 
 from agent import Skill, tool
 from src.modes.checkers.game import Board, ai_move
-from src.transport.web import WebTransport
+from src.transport.web import WebTransport, WebFork
 
 log = logging.getLogger(__name__)
 
 
-class CheckersTransport(WebTransport):
+class CheckersFork(WebFork):
     """Game board served at /{agent_id}/checkers/, WS for moves."""
+    prefix = "/checkers"
 
-    def __init__(self):
-        super().__init__(prefix="/checkers")
+    def __init__(self, ref_agent):
         self.board = Board()
         self.move_event = asyncio.Event()
         self.last_user_move: dict | None = None
         self.game_over = False
+        super().__init__(ref_agent)
 
     async def ws_connect(self, ws):
         await ws.send_text(json.dumps(self._state_msg()))
         await super().ws_connect(ws)
 
-    async def ws_handle_message(self, msg):
+    async def ws_handle_message(self, msg, ws=None):
         if msg.get("type") == "move":
             self.last_user_move = msg
             self.move_event.set()
@@ -54,8 +55,13 @@ class CheckersTransport(WebTransport):
         return self.last_user_move
 
 
+class CheckersTransport(WebTransport):
+    def create_fork(self, agent):
+        return CheckersFork(ref_agent=agent)
+
+
 class CommentatorSkill(Skill):
-    def __init__(self, transport, checkers):
+    def __init__(self, transport, checkers: CheckersFork):
         super().__init__()
         self._transport = transport
         self._checkers = checkers
@@ -80,8 +86,9 @@ class CheckersSkill(Skill):
     @tool("Запустить игру в шашки через веб-интерфейс")
     async def launch(self) -> dict:
         transport = self.agent.transport
-        checkers = CheckersTransport()
-        checkers.set_agent(self.agent)
+        checkers_t = CheckersTransport()
+        checkers_t.set_agent(self.agent)
+        checkers = checkers_t.fork
 
         url = await checkers.get_auth_url("/")
         await transport.send_app_url(url, "Шашки готовы!", "🎮 Играть")
@@ -136,7 +143,7 @@ class CheckersSkill(Skill):
                 await checkers._send_state(last_move={"from": list(ai_from), "to": list(ai_chain[-1])})
 
         finally:
-            checkers.cleanup()
+            checkers_t.cleanup()
 
         return {"status": "game_over", "moves": moves_played}
 

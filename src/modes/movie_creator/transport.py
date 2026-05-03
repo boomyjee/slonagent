@@ -26,15 +26,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 
 from src.modes.movie_creator.project import Generation, Project
-from src.transport.web import WebTransport
+from src.transport.web import WebTransport, WebFork
 
 log = logging.getLogger(__name__)
 
 
-class MovieTransport(WebTransport):
+class MovieFork(WebFork):
+    prefix = "/movie"
 
-    def __init__(self):
-        super().__init__(prefix="/movie", verbose=False)
+    def __init__(self, ref_agent):
         self.project_dir: Path | None = None
         self.project_path: Path | None = None
         self.assets_dir: Path | None = None
@@ -44,16 +44,17 @@ class MovieTransport(WebTransport):
         self.selected_path: list | None = None
         self._pending_approval: asyncio.Future | None = None
         self._on_tab_changed: list = []
+        super().__init__(ref_agent)
 
     def load(self, project_dir: Path):
-        """Point the transport at a project dir and load project.json if present."""
+        """Point the fork at a project dir and load project.json if present."""
         self.project_dir = project_dir
         self.project_path = project_dir / "project.json"
         self.assets_dir = project_dir / "assets"
         if self.project_path.exists():
             self.project = from_dict(Project, json.loads(self.project_path.read_text(encoding="utf-8")))
 
-    # --- WebTransport hooks -------------------------------------------------
+    # --- WebFork hooks ------------------------------------------------------
 
     def register_routes(self):
         self.register_route("get", "/api/asset/{path:path}", self._api_asset)
@@ -62,14 +63,14 @@ class MovieTransport(WebTransport):
 
     async def ws_connect(self, ws: WebSocket):
         # Prime the new client before super() enters its receive loop —
-        # self.send() goes through _clients, which this ws isn't in yet.
+        # self.send() goes through self.clients, which this ws isn't in yet.
         await ws.send_text(json.dumps(
             {"type": "project_updated", "project": asdict(self.project)},
             ensure_ascii=False,
         ))
         await super().ws_connect(ws)
 
-    async def ws_handle_message(self, msg: dict):
+    async def ws_handle_message(self, msg: dict, ws=None):
         t = msg.get("type")
         path = msg.get("path") or []
         data = msg.get("data") or {}
@@ -105,7 +106,7 @@ class MovieTransport(WebTransport):
         elif t == "selected_changed":
             self.selected_path = msg.get("path")
         else:
-            await super().ws_handle_message(msg)
+            await super().ws_handle_message(msg, ws)
 
     # --- Project helpers ----------------------------------------------------
 
@@ -214,3 +215,11 @@ class MovieTransport(WebTransport):
             owner.primary_generation_id = gen.id
         await self.save()
         return JSONResponse({"id": gen.id})
+
+
+class MovieTransport(WebTransport):
+    def __init__(self):
+        super().__init__(verbose=False)
+
+    def create_fork(self, agent):
+        return MovieFork(ref_agent=agent)
