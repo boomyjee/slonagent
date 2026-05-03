@@ -21,6 +21,7 @@ warnings.warn = _warn
 
 import asyncio, json, logging, logging.handlers, os, sys
 from src.skills.config import _format_json
+from src.skills.cron import CronSkill
 
 with open(".config.json", encoding="utf-8") as f: config = json.load(f)
 os.environ.update(config.get("env", {}))
@@ -59,6 +60,7 @@ def release_pid_lock():
 
 async def run_cli():
     DashboardTransport.start(config.get("web", {}))
+    CronSkill.start_daemon(root_dir=os.getcwd())
     transport = MultiTransport([CliTransport(), DashboardTransport(**config.get("web", {}).get("transport", {}))])
     agent = Agent.from_config(resolve(config["agent"]), id="main", agent_dir=os.getcwd(), transport=transport)
     await agent.start()
@@ -112,6 +114,7 @@ async def run_telegram():
 
     DashboardTransport.start(config.get("web", {}), make_agent)
     TelegramTransport.start(config.get("telegram",{}), make_agent)
+    CronSkill.start_daemon(root_dir=os.getcwd(), make_agent=make_agent)
 
     await make_agent("main")
     await asyncio.Event().wait()

@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import json
 import logging
 import os
@@ -14,56 +15,154 @@ log = logging.getLogger(__name__)
 
 _INTERVAL_RE = re.compile(r"^(\d+)\s*(s|m|h|d|w)$", re.IGNORECASE)
 _INTERVAL_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-
-
 _LEGACY_INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
-
-
-def _parse_interval(repeat: str) -> timedelta | None:
-    """Парсит интервал повторения. Примеры: '30m', '2h', '1d', '7d', '90s'."""
-    if repeat in ("once", ""):
-        return None
-    if repeat in _LEGACY_INTERVALS:
-        return _LEGACY_INTERVALS[repeat]
-    m = _INTERVAL_RE.match(repeat.strip())
-    if not m:
-        raise ValueError(f"Неверный формат интервала: {repeat!r}. Используй: 30m, 2h, 1d, 7d и т.п.")
-    return timedelta(seconds=int(m.group(1)) * _INTERVAL_SECONDS[m.group(2).lower()])
+_FILE_RE = re.compile(r"^CRON(?:_(.+))?\.json$")
 
 
 class CronSkill(Skill):
-    def __init__(self):
-        super().__init__()
+    _root_dir: str | None = None
+    _make_agent = None
+    _loop_task: asyncio.Task | None = None
+
+    @classmethod
+    def start_daemon(cls, root_dir: str | None = None, make_agent=None):
+        if make_agent is not None:
+            cls._make_agent = staticmethod(make_agent)
+        if cls._loop_task is not None:
+            return
+        cls._root_dir = root_dir or cls._root_dir or os.getcwd()
+        cls._loop_task = asyncio.create_task(cls._loop())
+
+    async def start(self):
+        CronSkill.start_daemon()
+
+    @classmethod
+    async def _loop(cls):
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await cls._tick()
+            except Exception as e:
+                log.warning("[cron] tick error: %s", e, exc_info=True)
+
+    @classmethod
+    async def _tick(cls):
+        if cls._root_dir is None:
+            return
+        now = datetime.now().astimezone()
+        for agent_id, thread_id, path in cls._discover_files(cls._root_dir):
+            tasks = cls._load_tasks(path)
+            remaining, changed = [], False
+            for task in tasks:
+                try:
+                    due = datetime.fromisoformat(task["scheduled_at"]).astimezone()
+                except ValueError:
+                    log.warning("[cron] invalid scheduled_at for task %s: %r", task.get("id"), task.get("scheduled_at"))
+                    changed = True
+                    continue
+                if due > now:
+                    remaining.append(task)
+                    continue
+                agent = await cls._resolve_agent(agent_id, thread_id)
+                if agent is None:
+                    log.warning("[cron] task %s: no agent for %s/%s, dropping",
+                                task.get("id"), agent_id, thread_id)
+                    changed = True
+                    continue
+                log.info("[cron] firing task %s in %s/%s: %r",
+                         task["id"], agent_id, thread_id, task["message"])
+                text = f"⏰ Cron task [{task['id']}]: {task['message']}"
+                try:
+                    await agent.transport.inject_message(text)
+                    await agent.transport.process_message(
+                        content_parts=[{"type": "text", "text": text}],
+                        user_message_id=f"{task['id']}_{int(now.timestamp())}",
+                    )
+                except Exception as e:
+                    log.warning("[cron] dispatch failed for %s: %s", task.get("id"), e, exc_info=True)
+                next_run = cls._next_run(task["scheduled_at"], task.get("repeat", "once"))
+                if next_run:
+                    task["scheduled_at"] = next_run
+                    remaining.append(task)
+                changed = True
+            if changed:
+                cls._save_tasks(path, remaining)
+
+    @classmethod
+    async def _resolve_agent(cls, agent_id: str, thread_id: str):
+        if cls._make_agent is None:
+            return None
+        try:
+            return await cls._make_agent(agent_id, thread_id)
+        except Exception as e:
+            log.warning("[cron] make_agent(%s, %s) failed: %s", agent_id, thread_id, e, exc_info=True)
+            return None
+
+    # ─── helpers ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_interval(repeat: str) -> timedelta | None:
+        if repeat in ("once", ""):
+            return None
+        if repeat in _LEGACY_INTERVALS:
+            return _LEGACY_INTERVALS[repeat]
+        m = _INTERVAL_RE.match(repeat.strip())
+        if not m:
+            raise ValueError(f"Неверный формат интервала: {repeat!r}. Используй: 30m, 2h, 1d, 7d и т.п.")
+        return timedelta(seconds=int(m.group(1)) * _INTERVAL_SECONDS[m.group(2).lower()])
+
+    @classmethod
+    def _next_run(cls, scheduled_at: str, repeat: str) -> str | None:
+        delta = cls._parse_interval(repeat)
+        if delta is None:
+            return None
+        return (datetime.fromisoformat(scheduled_at) + delta).isoformat()
+
+    @staticmethod
+    def _load_tasks(path: str) -> list[dict]:
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, encoding="utf-8") as f:
+                return [json.loads(line) for line in f if line.strip()]
+        except Exception as e:
+            log.warning("[cron] failed to load tasks from %s: %s", path, e, exc_info=True)
+            return []
+
+    @staticmethod
+    def _save_tasks(path: str, tasks: list[dict]) -> None:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for task in tasks:
+                    f.write(json.dumps(task, ensure_ascii=False) + "\n")
+        except Exception as e:
+            log.warning("[cron] failed to save tasks to %s: %s", path, e, exc_info=True)
+
+    @staticmethod
+    def _discover_files(root_dir: str) -> list[tuple[str, str, str]]:
+        """(agent_id, thread_id, path) для каждого CRON*.json в main и форках:
+        `<root>/memory/CRON*.json` (agent_id="main") и
+        `<root>/forks/<id>/memory/CRON*.json` (agent_id=<id>).
+        thread_id берётся из имени файла: CRON.json → "", CRON_<tid>.json → <tid>."""
+        out = []
+        roots = [("main", os.path.join(root_dir, "memory"))]
+        for fork_dir in glob.glob(os.path.join(root_dir, "forks", "*")):
+            if os.path.isdir(fork_dir):
+                roots.append((os.path.basename(fork_dir), os.path.join(fork_dir, "memory")))
+        for agent_id, mem_dir in roots:
+            for path in glob.glob(os.path.join(mem_dir, "CRON*.json")):
+                m = _FILE_RE.match(os.path.basename(path))
+                if m:
+                    out.append((agent_id, m.group(1) or "", path))
+        return out
+
+    # ─── Instance side: tools ────────────────────────────────────────────────
 
     @property
     def _tasks_path(self) -> str:
         tid = self.agent.thread_id
         fname = f"CRON_{tid}.json" if tid else "CRON.json"
         return os.path.join(self.agent.memory.memory_dir, fname)
-
-    def _load_tasks(self) -> list[dict]:
-        if not os.path.exists(self._tasks_path):
-            return []
-        try:
-            with open(self._tasks_path, encoding="utf-8") as f:
-                return [json.loads(line) for line in f if line.strip()]
-        except Exception as e:
-            log.warning("[cron] failed to load tasks: %s", e, exc_info=True)
-            return []
-
-    def _save_tasks(self, tasks: list[dict]) -> None:
-        try:
-            with open(self._tasks_path, "w", encoding="utf-8") as f:
-                for task in tasks:
-                    f.write(json.dumps(task, ensure_ascii=False) + "\n")
-        except Exception as e:
-            log.warning("[cron] failed to save tasks: %s", e, exc_info=True)
-
-    def _next_run(self, scheduled_at: str, repeat: str) -> str | None:
-        delta = _parse_interval(repeat)
-        if delta is None:
-            return None
-        return (datetime.fromisoformat(scheduled_at) + delta).isoformat()
 
     @tool("Запланировать задачу: агент проснётся в указанное время и выполнит заданное действие.")
     async def schedule_task(
@@ -78,7 +177,7 @@ class CronSkill(Skill):
             return {"error": f"Неверный формат даты: {scheduled_at!r}. Используй ISO 8601."}
 
         try:
-            _parse_interval(repeat)
+            self._parse_interval(repeat)
         except ValueError as e:
             return {"error": str(e)}
 
@@ -89,9 +188,9 @@ class CronSkill(Skill):
             "repeat": repeat,
             "created_at": datetime.now().astimezone().isoformat(),
         }
-        tasks = self._load_tasks()
+        tasks = self._load_tasks(self._tasks_path)
         tasks.append(task)
-        self._save_tasks(tasks)
+        self._save_tasks(self._tasks_path, tasks)
         log.info("[cron] scheduled task %s at %s repeat=%s", task["id"], scheduled_at, repeat)
         return {"status": "scheduled", "task_id": task["id"], "scheduled_at": dt.strftime("%Y-%m-%dT%H:%M:%S"), "repeat": repeat}
 
@@ -100,18 +199,18 @@ class CronSkill(Skill):
         self,
         task_id: Annotated[str, "ID задачи, которую нужно отменить."],
     ) -> dict:
-        tasks = self._load_tasks()
+        tasks = self._load_tasks(self._tasks_path)
         before = len(tasks)
         tasks = [t for t in tasks if t["id"] != task_id]
         if len(tasks) == before:
             return {"error": f"Задача {task_id!r} не найдена."}
-        self._save_tasks(tasks)
+        self._save_tasks(self._tasks_path, tasks)
         log.info("[cron] cancelled task %s", task_id)
         return {"status": "cancelled", "task_id": task_id}
 
     @tool("Показать список всех запланированных задач.")
     async def list_tasks(self) -> dict:
-        tasks = self._load_tasks()
+        tasks = self._load_tasks(self._tasks_path)
         if not tasks:
             return {"tasks": [], "message": "Нет запланированных задач."}
         return {"tasks": [
@@ -121,7 +220,7 @@ class CronSkill(Skill):
 
     @bypass("cron", "Список запланированных задач", standalone=True)
     def cron_command(self, args: str) -> str:
-        tasks = self._load_tasks()
+        tasks = self._load_tasks(self._tasks_path)
         if not tasks:
             return "Нет запланированных задач."
         lines = ["Запланированные задачи:"]
@@ -129,46 +228,3 @@ class CronSkill(Skill):
             repeat = f" [{t['repeat']}]" if t.get("repeat") != "once" else ""
             lines.append(f"  [{t['id']}] {t['scheduled_at']}{repeat} — {t['message']}")
         return "\n".join(lines)
-
-    async def start(self):
-        asyncio.create_task(self._loop())
-
-    async def _loop(self):
-        while True:
-            await asyncio.sleep(30)
-            try:
-                await self._tick()
-            except Exception as e:
-                log.warning("[cron] tick error: %s", e, exc_info=True)
-
-    async def _tick(self):
-        tasks = self._load_tasks()
-        now = datetime.now().astimezone()
-        remaining = []
-        changed = False
-        for task in tasks:
-            try:
-                due = datetime.fromisoformat(task["scheduled_at"]).astimezone()
-            except ValueError:
-                log.warning("[cron] invalid scheduled_at for task %s: %r", task["id"], task["scheduled_at"])
-                changed = True
-                continue
-
-            if due <= now:
-                log.info("[cron] firing task %s: %r", task["id"], task["message"])
-                text = f"⏰ Cron task [{task['id']}]: {task['message']}"
-                await self.agent.transport.inject_message(text)
-                await self.agent.transport.process_message(
-                    content_parts=[{"type": "text", "text": text}],
-                    user_message_id=f"{task['id']}_{int(now.timestamp())}",
-                )
-                next_run = self._next_run(task["scheduled_at"], task.get("repeat", "once"))
-                if next_run:
-                    task["scheduled_at"] = next_run
-                    remaining.append(task)
-                changed = True
-            else:
-                remaining.append(task)
-
-        if changed:
-            self._save_tasks(remaining)

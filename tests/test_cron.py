@@ -45,29 +45,35 @@ def make_cron(tmp_path, thread_id=""):
     return cron
 
 
+@pytest.fixture(autouse=True)
+def reset_cron_class_state():
+    """Class-level cron loop state живёт на CronSkill — между тестами сбрасываем."""
+    CronSkill._root_dir = None
+    CronSkill._make_agent = None
+    CronSkill._loop_task = None
+    yield
+    CronSkill._root_dir = None
+    CronSkill._make_agent = None
+    CronSkill._loop_task = None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # _next_run
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestNextRun:
 
-    def setup_method(self):
-        self.cron = CronSkill()
-
     def test_once_returns_none(self):
-        assert self.cron._next_run("2026-01-01T10:00:00", "once") is None
+        assert CronSkill._next_run("2026-01-01T10:00:00", "once") is None
 
     def test_hourly(self):
-        result = self.cron._next_run("2026-01-01T10:00:00", "hourly")
-        assert "11:00" in result
+        assert "11:00" in CronSkill._next_run("2026-01-01T10:00:00", "hourly")
 
     def test_daily(self):
-        result = self.cron._next_run("2026-01-01T10:00:00", "daily")
-        assert "2026-01-02" in result
+        assert "2026-01-02" in CronSkill._next_run("2026-01-01T10:00:00", "daily")
 
     def test_weekly(self):
-        result = self.cron._next_run("2026-01-01T10:00:00", "weekly")
-        assert "2026-01-08" in result
+        assert "2026-01-08" in CronSkill._next_run("2026-01-01T10:00:00", "weekly")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -132,6 +138,15 @@ class TestCronTools:
 # _tick — срабатывание задач
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _wire_global_loop(tmp_path, agent):
+    """Подключить class-level CronSkill loop к temp dir + фабрика возвращает
+    переданного агента. Для unit-тестов которые гоняют CronSkill._tick()."""
+    CronSkill._root_dir = str(tmp_path)
+    async def factory(agent_id, thread_id):
+        return agent
+    CronSkill._make_agent = staticmethod(factory)
+
+
 class TestCronTick:
 
     @pytest.mark.asyncio
@@ -143,10 +158,11 @@ class TestCronTick:
             side_effect=lambda msg: injected.append(msg)
         )
         cron.agent.transport.process_message = AsyncMock()
+        _wire_global_loop(tmp_path, cron.agent)
 
         past = (datetime.now() - timedelta(minutes=5)).isoformat()
         await cron.schedule_task("fire me", past, "once")
-        await cron._tick()
+        await CronSkill._tick()
 
         assert len(injected) == 1
         assert "fire me" in injected[0]
@@ -156,10 +172,11 @@ class TestCronTick:
         cron = make_cron(tmp_path)
         cron.agent.transport = MagicMock()
         cron.agent.transport.inject_message = AsyncMock()
+        _wire_global_loop(tmp_path, cron.agent)
 
         future = (datetime.now() + timedelta(hours=1)).isoformat()
         await cron.schedule_task("don't fire", future, "once")
-        await cron._tick()
+        await CronSkill._tick()
 
         cron.agent.transport.inject_message.assert_not_called()
 
@@ -169,10 +186,11 @@ class TestCronTick:
         cron.agent.transport = MagicMock()
         cron.agent.transport.inject_message = AsyncMock()
         cron.agent.transport.process_message = AsyncMock()
+        _wire_global_loop(tmp_path, cron.agent)
 
         past = (datetime.now() - timedelta(minutes=5)).isoformat()
         await cron.schedule_task("once task", past, "once")
-        await cron._tick()
+        await CronSkill._tick()
 
         remaining = await cron.list_tasks()
         assert remaining["tasks"] == []
@@ -183,16 +201,32 @@ class TestCronTick:
         cron.agent.transport = MagicMock()
         cron.agent.transport.inject_message = AsyncMock()
         cron.agent.transport.process_message = AsyncMock()
+        _wire_global_loop(tmp_path, cron.agent)
 
         past = (datetime.now() - timedelta(minutes=5)).isoformat()
         await cron.schedule_task("daily task", past, "daily")
-        await cron._tick()
+        await CronSkill._tick()
 
         remaining = await cron.list_tasks()
         assert len(remaining["tasks"]) == 1
         # Следующий запуск — в будущем
         next_dt = datetime.fromisoformat(remaining["tasks"][0]["scheduled_at"]).replace(tzinfo=None)
         assert next_dt > datetime.now()
+
+    @pytest.mark.asyncio
+    async def test_tick_drops_task_if_make_agent_unavailable(self, tmp_path):
+        cron = make_cron(tmp_path)
+        # _root_dir выставлен, но _make_agent=None → агент не резолвится
+        CronSkill._root_dir = str(tmp_path)
+        CronSkill._make_agent = None
+
+        past = (datetime.now() - timedelta(minutes=5)).isoformat()
+        await cron.schedule_task("ghost", past, "once")
+        await CronSkill._tick()
+
+        # task должен быть удалён, ничего не падает
+        remaining = await cron.list_tasks()
+        assert remaining["tasks"] == []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -249,21 +283,72 @@ class TestCronThreadIsolation:
         assert a_msgs == ["only in A"]
         assert b_msgs == ["only in B"]
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Глобальный CronSkill._tick — discovery main + forks
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestGlobalTick:
+
     @pytest.mark.asyncio
-    async def test_thread_tick_does_not_fire_main_task(self, tmp_path):
+    async def test_discovers_main_and_thread_files(self, tmp_path):
+        # main и тред-агент → файлы CRON.json и CRON_t1.json в одной memory_dir
         main = make_cron(tmp_path, thread_id="")
-        thread = make_cron(tmp_path, thread_id="abc")
-        thread.agent.transport = MagicMock()
-        thread.agent.transport.inject_message = AsyncMock()
-        thread.agent.transport.process_message = AsyncMock()
+        thread = make_cron(tmp_path, thread_id="t1")
+        agents_resolved = []
+        agent_main = main.agent
+        agent_main.transport = MagicMock()
+        agent_main.transport.inject_message = AsyncMock()
+        agent_main.transport.process_message = AsyncMock()
+        agent_thread = thread.agent
+        agent_thread.transport = MagicMock()
+        agent_thread.transport.inject_message = AsyncMock()
+        agent_thread.transport.process_message = AsyncMock()
+
+        async def factory(agent_id, thread_id):
+            agents_resolved.append((agent_id, thread_id))
+            return agent_main if thread_id == "" else agent_thread
+        CronSkill._root_dir = str(tmp_path)
+        CronSkill._make_agent = staticmethod(factory)
 
         past = (datetime.now() - timedelta(minutes=5)).isoformat()
-        await main.schedule_task("main due", past, "once")
-        # тред тикает — не должен трогать main-задачу
-        await thread._tick()
-        thread.agent.transport.inject_message.assert_not_called()
-        # main-задача всё ещё в файле main
-        assert len((await main.list_tasks())["tasks"]) == 1
+        await main.schedule_task("main task", past, "once")
+        await thread.schedule_task("thread task", past, "once")
+        await CronSkill._tick()
+
+        # обе задачи зарезолвились через factory
+        assert ("main", "") in agents_resolved
+        assert ("main", "t1") in agents_resolved
+        # каждая до своего агента
+        agent_main.transport.inject_message.assert_called_once()
+        agent_thread.transport.inject_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_discovers_fork_files(self, tmp_path):
+        # эмулируем структуру: cwd/forks/myfork/memory/CRON.json
+        fork_mem = tmp_path / "forks" / "myfork" / "memory"
+        fork_mem.mkdir(parents=True)
+        past = (datetime.now() - timedelta(minutes=5)).isoformat()
+        task = {"id": "abc1234", "message": "in fork", "scheduled_at": past, "repeat": "once"}
+        (fork_mem / "CRON.json").write_text(
+            __import__("json").dumps(task) + "\n", encoding="utf-8",
+        )
+
+        agent_stub = MagicMock()
+        agent_stub.transport = MagicMock()
+        agent_stub.transport.inject_message = AsyncMock()
+        agent_stub.transport.process_message = AsyncMock()
+
+        resolved = []
+        async def factory(agent_id, thread_id):
+            resolved.append((agent_id, thread_id))
+            return agent_stub
+        CronSkill._root_dir = str(tmp_path)
+        CronSkill._make_agent = staticmethod(factory)
+
+        await CronSkill._tick()
+
+        assert resolved == [("myfork", "")]
+        agent_stub.transport.inject_message.assert_called_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
