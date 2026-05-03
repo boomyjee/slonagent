@@ -31,7 +31,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
-from agent import Agent, Skill
+from typing import Annotated
+
+from agent import Agent, Skill, tool
 from src.memory.providers.base import BaseProvider
 from src.transport.base import BaseTransport
 
@@ -121,22 +123,29 @@ class PassthroughCompressor(BaseProvider):
 
 
 class CapturingTransport(BaseTransport):
+    """Накапливает финальный текст по stream_id. stream_id может быть произвольным
+    идентификатором (claude использует id(event) — огромные числа), поэтому храним
+    в dict, не в list."""
+
     def __init__(self):
         super().__init__()
-        self.messages: list[str] = []
+        self._by_stream: dict = {}
+        self._order: list = []  # порядок появления stream_id
 
     async def send_message(self, text: str, stream_id=None, final: bool = True):
-        if stream_id is None:
-            stream_id = len(self.messages)
-            self.messages.append("")
-        while len(self.messages) <= stream_id:
-            self.messages.append("")
-        self.messages[stream_id] = text
-        return stream_id
+        sid = stream_id if stream_id is not None else len(self._order)
+        if sid not in self._by_stream:
+            self._order.append(sid)
+        self._by_stream[sid] = text
+        return sid
+
+    @property
+    def messages(self) -> list[str]:
+        return [self._by_stream[s] for s in self._order]
 
     @property
     def last_message(self) -> str:
-        return self.messages[-1] if self.messages else ""
+        return self._by_stream[self._order[-1]] if self._order else ""
 
 
 def make_agent(tmp_path, llm: dict, providers=None) -> tuple[Agent, CapturingTransport]:
@@ -429,3 +438,80 @@ async def test_fact_provider_context_prompt(tmp_path, llm):
     prompt = await provider.get_context_prompt("где я работаю?")
     # Либо нашёл факты, либо вернул пустую строку — не должен падать
     assert isinstance(prompt, str)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Agent loop — реальный tool-calling через все 3 бэкенда
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CalculatorSkill(Skill):
+    def __init__(self):
+        super().__init__()
+        self.calls: list[tuple[int, int]] = []  # (a, b) каждого вызова
+
+    @tool("Add two numbers and return their sum")
+    async def add(
+        self,
+        a: Annotated[int, "First addend"],
+        b: Annotated[int, "Second addend"],
+    ) -> dict:
+        self.calls.append((a, b))
+        return {"sum": a + b}
+
+
+async def _run_to_text(agent: Agent, user_text: str, max_iter: int = 8) -> str:
+    """Прогоняет agent.llm() до финального текстового ответа.
+
+    Поддерживает оба формата возврата:
+      - openai/kimi/gemini → dict с tool_calls; цикл до dict без tool_calls
+      - claude → list[turn] (всё уже отработано через MCP); финал — последний assistant text
+    """
+    await agent.memory.add_turn({"role": "user", "content": user_text})
+    for _ in range(max_iter):
+        result = await agent.llm()
+        if isinstance(result, list):
+            await agent.memory.add_turn(*result)
+            for t in reversed(result):
+                if isinstance(t, dict) and t.get("role") == "assistant" and t.get("content") and not t.get("tool_calls"):
+                    return t["content"]
+            return ""
+        if not result.get("tool_calls"):
+            await agent.memory.add_turn(result)
+            return result.get("content") or ""
+        tool_turns = await agent.dispatch_tool_calls(result)
+        await agent.memory.add_turn(result, *tool_turns)
+    pytest.fail(f"agent loop не завершился за {max_iter} итераций")
+
+
+async def test_agent_tool_calling(tmp_path, llm):
+    """Полный agent loop: вопрос → tool вызывается → результат → финальный ответ.
+
+    Проверяет что dispatch_tool_calls работает для всех 3 бэкендов:
+    openai-совместимые делают tool_calls + мы их диспетчим;
+    claude — внутри своего MCP-сервера, возвращает list[turn] с уже
+    обработанными tool-блоками.
+    """
+    skill = CalculatorSkill()
+    agent = Agent(
+        id="test",
+        model_name=llm["model_name"], api_key=llm["api_key"], base_url=llm["base_url"],
+        backend=llm["backend"], backend_params=llm["backend_params"],
+        agent_dir=str(tmp_path),
+        memory_compressor=PassthroughCompressor(),
+        skills=[skill],
+        transport=CapturingTransport(),
+    )
+    await agent.start(run_loop=False)
+
+    answer = await _run_to_text(
+        agent,
+        "Используй инструмент calculator_add чтобы сложить 17 и 25.",
+    )
+
+    # Главное что проверяем — наш dispatch отработал и тул реально вызвался
+    # с правильными аргументами. Финальный текст с "42" — bonus: некоторые
+    # модели (kimi-k2.6) после tool result возвращают только thoughts без
+    # content, и assert на answer был бы flaky.
+    assert skill.calls, f"тул calculator_add не был вызван. Ответ: {answer!r}"
+    assert (17, 25) in skill.calls or (25, 17) in skill.calls, \
+        f"тул вызван с неверными args: {skill.calls}"

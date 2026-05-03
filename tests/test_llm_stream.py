@@ -42,17 +42,19 @@ class WeatherSkill(Skill):
         return {"temp": 20, "city": city}
 
 
-def _load_config() -> dict:
-    with open(os.path.join(ROOT, ".config.json"), encoding="utf-8") as f:
-        return json.load(f)
+GEMINI_URL_DEFAULT = "https://generativelanguage.googleapis.com/v1beta/openai/"
+OPENROUTER_URL_DEFAULT = "https://openrouter.ai/api/v1"
 
 
-def _make_agent(model: str, api_key: str, base_url: str) -> Agent:
+def _make_agent(model: str, api_key: str, base_url: str,
+                backend: str = "openai", backend_params: dict | None = None) -> Agent:
     return Agent(
         id="test",
         model_name=model,
         api_key=api_key,
         base_url=base_url,
+        backend=backend,
+        backend_params=backend_params,
         agent_dir=tempfile.mkdtemp(),
         memory_compressor=PassthroughCompressor(),
         skills=[WeatherSkill()],
@@ -60,32 +62,42 @@ def _make_agent(model: str, api_key: str, base_url: str) -> Agent:
     )
 
 
-def _gemini_params() -> tuple[str, str, str]:
-    cfg = _load_config()
-    key = cfg.get("keys", {}).get("gemini")
+def _gemini_params() -> dict:
+    key = os.environ.get("GEMINI_KEY")
     if not key:
-        pytest.skip("gemini key not configured")
-    return "gemini-3-flash-preview", key, cfg["keys"]["gemini_url"]
+        pytest.skip("GEMINI_KEY не задан")
+    return {
+        "model": os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"),
+        "api_key": key,
+        "base_url": os.environ.get("GEMINI_URL", GEMINI_URL_DEFAULT),
+        "backend": "openai",
+        "backend_params": None,
+    }
 
 
-def _openai_params() -> tuple[str, str, str]:
-    cfg = _load_config()
-    key = cfg.get("keys", {}).get("openrouter")
+def _kimi_params() -> dict:
+    key = os.environ.get("OPENROUTER_KEY") or os.environ.get("KIMI_KEY")
     if not key:
-        pytest.skip("openrouter key not configured")
-    return "openai/gpt-4o-mini", key, cfg["keys"]["openrouter_url"]
+        pytest.skip("OPENROUTER_KEY/KIMI_KEY не задан")
+    return {
+        "model": os.environ.get("KIMI_MODEL", "moonshotai/kimi-k2.6"),
+        "api_key": key,
+        "base_url": os.environ.get("KIMI_URL", OPENROUTER_URL_DEFAULT),
+        "backend": "openai",
+        "backend_params": None,
+    }
 
 
 PROVIDERS = [
     pytest.param(_gemini_params, id="gemini"),
-    pytest.param(_openai_params, id="openai"),
+    pytest.param(_kimi_params, id="kimi"),
 ]
 
 
 @pytest.mark.parametrize("get_params", PROVIDERS)
 async def test_text_stream(get_params):
     """Text stream produces a clean turn with role='assistant' (not concatenated)."""
-    agent = _make_agent(*get_params())
+    agent = _make_agent(**get_params())
     await agent.start(run_loop=False)
     await agent.memory.add_turn({"role": "user", "content": "Say hello in 3 words."})
 
@@ -97,9 +109,35 @@ async def test_text_stream(get_params):
 
 
 @pytest.mark.parametrize("get_params", PROVIDERS)
+async def test_no_empty_send_message_during_stream(get_params):
+    """transport.send_message не должен дёргаться с пустым/whitespace-only текстом.
+
+    Регрессия: kimi через openrouter постоянно слал пустые сообщения в стриминг —
+    бэкенд должен фильтровать чанки без полезного контента.
+    """
+    transport = _RecordingTransport()
+    p = get_params()
+    agent = Agent(
+        id="test", model_name=p["model"], api_key=p["api_key"], base_url=p["base_url"],
+        backend=p["backend"], backend_params=p["backend_params"],
+        agent_dir=tempfile.mkdtemp(),
+        memory_compressor=PassthroughCompressor(),
+        transport=transport,
+    )
+    await agent.start(run_loop=False)
+    await agent.memory.add_turn({"role": "user", "content": "Say hello in 3 words."})
+
+    await agent.llm()
+
+    msg_calls = [c for c in transport.calls if c[0] == "send_message"]
+    empties = [c for c in msg_calls if not (c[1] or "").strip()]
+    assert not empties, f"send_message вызывался с пустым/whitespace текстом: {empties!r}"
+
+
+@pytest.mark.parametrize("get_params", PROVIDERS)
 async def test_parallel_tool_calls_stream(get_params):
     """Parallel tool_calls are accumulated correctly without leaking stream artifacts."""
-    agent = _make_agent(*get_params())
+    agent = _make_agent(**get_params())
     await agent.start(run_loop=False)
     await agent.memory.add_turn({
         "role": "user",
@@ -275,7 +313,7 @@ async def test_gemini_thought_not_leaked_to_content():
     tags could end up in turn['content'] (e.g. if the closing tag was missing), and
     regex-based cleanup also stripped *literal* <thought> if the user asked for it.
     """
-    agent = _make_agent(*_gemini_params())
+    agent = _make_agent(**_gemini_params())
     await agent.start(run_loop=False)
     await agent.memory.add_turn({
         "role": "user",
@@ -297,7 +335,7 @@ async def test_memory_round_trip(get_params):
     (e.g. leaked stream-only fields, mangled role, truncated tool_call structure),
     the next llm() will 400 when the provider validates the assistant message.
     """
-    agent = _make_agent(*get_params())
+    agent = _make_agent(**get_params())
     await agent.start(run_loop=False)
     await agent.memory.add_turn({
         "role": "user",
