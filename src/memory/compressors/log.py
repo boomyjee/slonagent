@@ -9,6 +9,7 @@ compress(turns) → recent_turns. Старые сообщения уплотня
 В контекст LLM наблюдения попадают через get_context_prompt — оба бэкенда
 зовут его в общем skill-loop системного промпта.
 """
+import difflib
 import logging
 import os
 import re
@@ -653,6 +654,12 @@ class LogCompressor(BaseProvider):
             if text:
                 await self.agent.transport.send_memory_info(text)
 
+    @staticmethod
+    def _truncate(text: str, limit: int = 10_000) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"\n(...обрезано, больше {limit // 1000}к)"
+
     def copy_from(self, src_memory_dir: str):
         import shutil
         src = os.path.join(src_memory_dir, "LOG.md")
@@ -709,8 +716,7 @@ class LogCompressor(BaseProvider):
         new_obs = "\n\n".join(new_obs_parts)
         updated = (existing_observations + "\n\n" + new_obs).strip() if existing_observations else new_obs
 
-        new_obs_tokens = Memory.count_tokens([{"role": "user", "content": new_obs}])
-        await self.send_memory_info(f"+{new_obs_tokens} токенов наблюдений")
+        await self.send_memory_info(f"Новые наблюдения:\n{self._truncate(new_obs)}")
 
         obs_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
         if obs_tokens >= self._reflect_after_tokens:
@@ -721,12 +727,7 @@ class LogCompressor(BaseProvider):
             if isinstance(t, dict):
                 t["_observed"] = True
         log.info("[LogCompressor] %d turns from %d thread(s) → LOG.md", len(turns), len(by_thread))
-        final_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
-        threads = ", ".join(tid or "default" for tid in by_thread.keys())
-        await self.send_memory_info(
-            f"Свернул {len(turns)} сообщений в наблюдения ({final_tokens} токенов) [треды: {threads}]",
-            final=True,
-        )
+        await self.send_memory_info(final=True)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -826,8 +827,12 @@ class LogCompressor(BaseProvider):
         ratio = (1 - refl_tokens / max(orig_tokens, 1)) * 100
         log.info("[LogCompressor] Reflector level %d: %d → %d tokens (%.0f%%)",
                  compression_level, orig_tokens, refl_tokens, ratio)
+        diff = "\n".join(difflib.unified_diff(
+            observations.splitlines(), reflected.splitlines(),
+            fromfile="до", tofile="после", lineterm="",
+        ))
         await self.send_memory_info(
-            f"Уровень {compression_level}: {orig_tokens} → {refl_tokens} токенов (-{ratio:.0f}%)",
+            f"Уровень {compression_level}: {orig_tokens} → {refl_tokens} токенов (-{ratio:.0f}%)\n{self._truncate(diff)}"
         )
 
         if refl_tokens <= self._reflect_after_tokens or compression_level >= 4:
