@@ -642,21 +642,16 @@ class LogCompressor(BaseProvider):
         self._backend = backend
         self._backend_params = backend_params
         self._memo_lines: list[str] = []
-        self._memo_stream_id: int = id(self._memo_lines)
 
-
-    async def send_memory_info(self, delta: str = "", *, cont: bool = True, final: bool = False):
-        if not cont:
+    async def send_memory_info(self, line: str = "", *, final: bool = False):
+        """Накапливает строки прогресса; шлёт всё одним сообщением при final=True."""
+        if line:
+            self._memo_lines.append(line)
+        if final:
+            text = "\n".join(self._memo_lines)
             self._memo_lines = []
-            self._memo_stream_id = id(self._memo_lines)
-        if delta:
-            self._memo_lines.append(delta)
-        if delta or final:
-            await self.agent.transport.send_memory_info(
-                "\n".join(self._memo_lines),
-                stream_id=self._memo_stream_id,
-                final=final,
-            )
+            if text:
+                await self.agent.transport.send_memory_info(text)
 
     def copy_from(self, src_memory_dir: str):
         import shutil
@@ -696,7 +691,6 @@ class LogCompressor(BaseProvider):
             by_thread.setdefault(turn.get("_thread_id", ""), []).append(turn)
 
         existing_observations = self._read_log()
-        await self.send_memory_info("", cont=False)
 
         new_obs_parts = []
         for tid, thread_turns in by_thread.items():
@@ -824,7 +818,7 @@ class LogCompressor(BaseProvider):
 
         if not reflected:
             log.warning("[LogCompressor] Reflector returned empty")
-            await self.send_memory_info("Reflector вернул пусто", final=True)
+            await self.send_memory_info("Reflector вернул пусто")
             return ""
 
         refl_tokens = Memory.count_tokens([{"role": "user", "content": reflected}])
