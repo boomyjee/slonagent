@@ -53,9 +53,9 @@ class WebFork:
         if self.mount:
             self.register_routes()
 
-    def register_route(self, method, path, handler):
+    def register_route(self, method, path, handler, auth: bool = True):
         url = f"/{self.ref_agent.id}{self.prefix}{path}"
-        self._routes.append(WebTransportServer.register_route(method, url, handler))
+        self._routes.append(WebTransportServer.register_route(method, url, handler, auth=auth))
 
     def register_json_route(self, method, path, handler):
         """Register a handler with contract (query, body, path_params) -> dict|list."""

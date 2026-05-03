@@ -41,8 +41,9 @@ class WebTransportServer:
     _tunnel_ready: asyncio.Event | None = None
 
     @classmethod
-    def register_route(cls, method: str, url: str, handler):
-        if method == "websocket": handler = cls._with_ws_auth(handler)
+    def register_route(cls, method: str, url: str, handler, auth: bool = True):
+        if method == "websocket" and auth:
+            handler = cls._with_ws_auth(handler)
         getattr(cls._app, method)(url)(handler)
         return cls._app.router.routes[-1]
 
