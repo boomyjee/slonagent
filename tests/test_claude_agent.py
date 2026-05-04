@@ -94,6 +94,70 @@ class TestStateFile:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Ephemeral session cleanup
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestEphemeralCleanup:
+    """Эфемерный backend (без agent_dir → memory_dir пуст → state_file None) на
+    GC удаляет свой session jsonl из ~/.claude/projects/<cwd>/, чтоб между
+    запусками не накапливались orphan-сессии. Persistent main-агент (со
+    state_file на диске) не трогается — его сессия живёт через рестарты."""
+
+    def _make_ephemeral_with_fake_jsonl(self):
+        from src.agent.agent import Agent
+        import uuid as _uuid
+        agent = Agent(id="eph", model_name="m", backend="claude")
+        backend = agent.backend_impl
+        sid = str(_uuid.uuid4())
+        backend._memory_state = {"session_id": sid, "created": True}
+        # Кладём фейковый jsonl там же где CLI положил бы свой.
+        jsonl = backend._claude_session_jsonl(sid)
+        # _claude_session_jsonl возвращает None если файла нет — для теста
+        # вычислим путь сами и создадим.
+        import re
+        cwd = backend._cwd or os.getcwd()
+        sanitized = re.sub(r'[^a-zA-Z0-9]', '-', cwd)
+        proj_dir = os.path.join(os.path.expanduser("~"), ".claude", "projects", sanitized)
+        os.makedirs(proj_dir, exist_ok=True)
+        jsonl = os.path.join(proj_dir, f"{sid}.jsonl")
+        with open(jsonl, "w") as f:
+            f.write('{"fake": true}\n')
+        return agent, backend, jsonl
+
+    def test_ephemeral_jsonl_removed_on_gc(self):
+        import gc
+        agent, backend, jsonl = self._make_ephemeral_with_fake_jsonl()
+        assert os.path.exists(jsonl)
+        del agent
+        del backend
+        gc.collect()
+        assert not os.path.exists(jsonl), f"expected {jsonl} to be removed by __del__"
+
+    def test_persistent_jsonl_not_removed_on_gc(self):
+        # У main-агента state_file на диске → __del__ его сессию не трогает.
+        import gc, tempfile, uuid as _uuid, re
+        from src.agent.agent import Agent
+        agent_dir = tempfile.mkdtemp()
+        agent = Agent(id="main", model_name="m", backend="claude", agent_dir=agent_dir)
+        backend = agent.backend_impl
+        sid = str(_uuid.uuid4())
+        backend._save_state({"session_id": sid, "created": True})
+        sanitized = re.sub(r'[^a-zA-Z0-9]', '-', backend._cwd)
+        proj_dir = os.path.join(os.path.expanduser("~"), ".claude", "projects", sanitized)
+        os.makedirs(proj_dir, exist_ok=True)
+        jsonl = os.path.join(proj_dir, f"{sid}.jsonl")
+        with open(jsonl, "w") as f:
+            f.write('{"fake": true}\n')
+        try:
+            del agent
+            del backend
+            gc.collect()
+            assert os.path.exists(jsonl), "persistent agent's session must NOT be cleaned by __del__"
+        finally:
+            with __import__("contextlib").suppress(OSError): os.remove(jsonl)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # _build_mcp_server
 # ═══════════════════════════════════════════════════════════════════════════════
 

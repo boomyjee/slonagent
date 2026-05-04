@@ -61,19 +61,35 @@ class ClaudeBackend(BaseBackend):
         skill = ClaudeAgentSkill()
         skill.register(self)
         agent.skills.insert(0, skill)
-        # cwd живёт под memory_dir (там же claude-сессии и LOG.md). У эфемерного
-        # агента (memory_dir пустой) cwd нет — claude запустится в дефолтной
-        # директории, persistence нам всё равно не нужен.
+        # cwd живёт под memory_dir (там же claude-сессии и LOG.md). Для
+        # эфемерного агента (memory_dir пустой) явно берём process cwd —
+        # это то же что claude CLI использовал бы по умолчанию, но раз
+        # явно — helper'у не нужен fallback и __del__ корректно находит
+        # session jsonl.
         if agent.memory.memory_dir:
             self._cwd = os.path.join(agent.memory.memory_dir, "workspace")
             os.makedirs(self._cwd, exist_ok=True)
         else:
-            self._cwd = None
+            self._cwd = os.getcwd()
         self._client: ClaudeSDKClient | None = None
         self._client_append: str | None = None  # текст системки в живом клиенте
         self._mcp_server = None  # построится лениво из agent.skills
         # Эфемерный агент: session_id живёт в памяти инстанса, на диск ничего не пишем.
         self._memory_state: dict = {}
+
+    def __del__(self):
+        # Эфемерный агент (memory_dir пуст) — на shutdown'е чистим за собой
+        # session jsonl в ~/.claude/projects/<cwd>/, чтоб не накапливалось
+        # между запусками. Persistent main-агент имеет state_file и сюда не
+        # попадает; его сессия живёт через рестарты.
+        try:
+            if self._state_file is None and self._memory_state.get("session_id"):
+                jsonl = self._claude_session_jsonl(self._memory_state["session_id"])
+                if jsonl:
+                    os.remove(jsonl)
+                    log.info("[claude_agent] cleaned up ephemeral session %s", jsonl)
+        except Exception:
+            pass  # __del__ не должен бросать
 
     def _build_mcp_server(self):
         """Оборачивает тулы своих скиллов в SDK MCP-сервер. Клод увидит как mcp__slon__*."""
@@ -106,9 +122,7 @@ class ClaudeBackend(BaseBackend):
 
     def _claude_session_jsonl(self, session_id: str) -> str | None:
         # claude CLI sanitizes cwd by replacing non-alphanumerics with dashes,
-        # uses that as the project dir under ~/.claude/projects/.
-        if not self._cwd:
-            return None
+        # uses that as project dir under ~/.claude/projects/.
         sanitized = re.sub(r'[^a-zA-Z0-9]', '-', self._cwd)
         path = os.path.join(os.path.expanduser("~"), ".claude", "projects", sanitized, f"{session_id}.jsonl")
         return path if os.path.isfile(path) else None
