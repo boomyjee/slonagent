@@ -183,6 +183,76 @@ class TestBuildMcpServer:
         assert server["name"] == "slon"
 
 
+_FAKE_B64 = "ZmFrZWltYWdl"  # base64 of "fakeimage"
+
+
+class _ImgSkill(Skill):
+    @tool("returns image")
+    async def pic(self):
+        return {"_parts": [{"type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{_FAKE_B64}"}}]}
+
+
+class _MixSkill(Skill):
+    @tool("returns text+image")
+    async def both(self):
+        return {"_parts": [
+            {"type": "text", "text": "look at this:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_FAKE_B64}"}},
+        ]}
+
+
+class _StrSkill(Skill):
+    @tool("returns string")
+    async def msg(self):
+        return "plain text result"
+
+
+class TestMcpHandlerContent:
+    """Handler внутри _build_mcp_server конвертирует skill-результаты в
+    MCP content blocks. Дёргаем настоящий MCP-сервер через его call_tool
+    request_handler — чтоб не подстраивать код под тесты."""
+
+    @staticmethod
+    async def _call(skill, tool_name, arguments=None):
+        from mcp.types import CallToolRequest, CallToolRequestParams
+        agent = make_agent(skills=[skill])
+        server = agent.backend_impl._build_mcp_server()
+        handler = server["instance"].request_handlers[CallToolRequest]
+        req = CallToolRequest(method="tools/call",
+                              params=CallToolRequestParams(name=tool_name, arguments=arguments or {}))
+        return (await handler(req)).root.content
+
+    @pytest.mark.asyncio
+    async def test_dict_result_becomes_text_block_with_json(self):
+        content = await self._call(_SkillWithTool(), "_skillwithtool_hello", {"name": "test"})
+        assert len(content) == 1
+        assert content[0].type == "text"
+        assert '"greeting": "hello test"' in content[0].text
+
+    @pytest.mark.asyncio
+    async def test_image_url_part_becomes_image_block(self):
+        content = await self._call(_ImgSkill(), "_img_pic")
+        assert len(content) == 1
+        assert content[0].type == "image"
+        assert content[0].mimeType == "image/png"
+        assert content[0].data == _FAKE_B64
+
+    @pytest.mark.asyncio
+    async def test_mixed_text_and_image_parts(self):
+        content = await self._call(_MixSkill(), "_mix_both")
+        assert len(content) == 2
+        assert content[0].type == "text" and content[0].text == "look at this:"
+        assert content[1].type == "image" and content[1].data == _FAKE_B64
+
+    @pytest.mark.asyncio
+    async def test_string_result_becomes_text_block(self):
+        content = await self._call(_StrSkill(), "_str_msg")
+        assert len(content) == 1
+        assert content[0].type == "text"
+        assert content[0].text == "plain text result"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # llm() — конвертация блоков в OpenAI-format
 # ═══════════════════════════════════════════════════════════════════════════════

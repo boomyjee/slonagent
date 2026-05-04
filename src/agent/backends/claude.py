@@ -107,6 +107,22 @@ class ClaudeBackend(BaseBackend):
                             "arguments": json.dumps(args, ensure_ascii=False),
                         }
                     })
+                    # Скилл может вернуть {"_parts": [...]} в OpenAI-формате
+                    # (text + image_url). Конвертируем в MCP-content blocks
+                    # — иначе base64 картинки уйдёт в text-поле и SDK
+                    # сохранит огромный JSON в tool-results на хосте.
+                    if isinstance(result, dict) and "_parts" in result:
+                        blocks = []
+                        for p in result["_parts"]:
+                            if p.get("type") == "text":
+                                blocks.append({"type": "text", "text": p.get("text", "")})
+                            elif p.get("type") == "image_url":
+                                url = (p.get("image_url") or {}).get("url", "")
+                                if url.startswith("data:") and "," in url:
+                                    head, b64 = url.split(",", 1)
+                                    mime = head.removeprefix("data:").split(";", 1)[0] or "image/jpeg"
+                                    blocks.append({"type": "image", "data": b64, "mimeType": mime})
+                        return {"content": blocks}
                     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
                     return {"content": [{"type": "text", "text": text}]}
 
