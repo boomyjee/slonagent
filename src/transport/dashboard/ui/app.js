@@ -64,6 +64,14 @@ class App extends Component {
 
     componentDidMount() {
         this._lastSeenId = -1;
+        this._unread = 0;
+        navigator.clearAppBadge?.();
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                this._unread = 0;
+                navigator.clearAppBadge?.();
+            }
+        });
         this._connect();
         document.addEventListener('keydown', e => {
             if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -151,6 +159,9 @@ class App extends Component {
         if (ev.id != null && ev.id > this._lastSeenId) this._lastSeenId = ev.id;
         if (ev.type === 'transport') {
             this._chat?.handleMessage(ev);
+            if (document.hidden && ev.method === 'send_message' && ev.final !== false) {
+                navigator.setAppBadge?.(++this._unread);
+            }
         } else if (ev.type === 'log') {
             this.setState(({ logs }) => {
                 const cat = ev.category;

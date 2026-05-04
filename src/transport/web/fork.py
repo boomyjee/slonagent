@@ -101,8 +101,26 @@ class WebFork:
         self.register_route("get", "/api/commands", self._api_commands)
         self.register_route("get", "/api/history", self._api_history)
         self.register_route("get", "/api/thread_list", self._api_thread_list)
+        self.register_route("get", "/manifest.json", self._manifest)
         self.register_route("get", "/{filename:path}", self._static)
         self.register_route("websocket", "/ws", self._ws)
+
+    async def _manifest(self):
+        # Per-agent name → каждый агент устанавливается отдельным PWA
+        # с распознаваемым именем в списке приложений.
+        name = self.ref_agent.id
+        return JSONResponse({
+            "name": f"Slon · {name}",
+            "short_name": name,
+            "start_url": ".", "scope": ".", "display": "standalone",
+            "orientation": "any",
+            "theme_color": "#1e1e1e", "background_color": "#1e1e1e",
+            "icons": [
+                {"src": "icon.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any"},
+                {"src": "icon.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any"},
+                {"src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable"},
+            ],
+        })
 
     async def _serve_upload(self, filename: str):
         path = os.path.join(self.uploads_dir, filename)
