@@ -132,6 +132,10 @@ class App extends Component {
     }
 
     _onMessage(ev) {
+        if (ev.type === 'replay') {
+            for (const e of ev.events || []) this._onMessage(e);
+            return;
+        }
         if (ev.id != null && ev.id > this._lastSeenId) this._lastSeenId = ev.id;
         if (ev.type === 'transport') {
             this._chat?.handleMessage(ev);

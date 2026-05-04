@@ -284,6 +284,66 @@ class TestWebForkInbound:
         })
         # Доехали без исключения — этого достаточно.
 
+    @pytest.mark.asyncio
+    async def test_replay_sends_single_batch_envelope(self):
+        # Replay шлётся одним сообщением {type:'replay', events:[...]} — клиент
+        # развернёт его синхронно, чтоб все setState'ы схлопнулись в один render.
+        main = MagicMock(id="forkX", thread_id="")
+        fork = _NoMountFork(ref_agent=main)
+        for i in range(3):
+            await fork.send({"type": "log", "category": "agent", "text": f"l{i}"}, replay=True)
+
+        ws = MagicMock(); ws.send_text = AsyncMock()
+        await fork.ws_handle_message({"type": "replay", "last_seen_id": -1}, ws=ws)
+
+        ws.send_text.assert_awaited_once()
+        payload = json.loads(ws.send_text.await_args.args[0])
+        assert payload["type"] == "replay"
+        assert len(payload["events"]) == 3
+        assert [e["text"] for e in payload["events"]] == ["l0", "l1", "l2"]
+
+    @pytest.mark.asyncio
+    async def test_replay_filters_by_last_seen_id(self):
+        main = MagicMock(id="forkX", thread_id="")
+        fork = _NoMountFork(ref_agent=main)
+        for i in range(3):
+            await fork.send({"type": "log", "category": "agent", "text": f"l{i}"}, replay=True)
+        cutoff = fork.replay_other[1]["id"]   # пропускаем l0, l1; ждём только l2
+
+        ws = MagicMock(); ws.send_text = AsyncMock()
+        await fork.ws_handle_message({"type": "replay", "last_seen_id": cutoff}, ws=ws)
+
+        ws.send_text.assert_awaited_once()
+        payload = json.loads(ws.send_text.await_args.args[0])
+        assert [e["text"] for e in payload["events"]] == ["l2"]
+
+    @pytest.mark.asyncio
+    async def test_replay_with_empty_buffer_sends_nothing(self):
+        main = MagicMock(id="forkX", thread_id="")
+        fork = _NoMountFork(ref_agent=main)
+
+        ws = MagicMock(); ws.send_text = AsyncMock()
+        await fork.ws_handle_message({"type": "replay", "last_seen_id": -1}, ws=ws)
+        ws.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_replay_merges_transport_and_other_in_id_order(self):
+        # Replay-буферы держат разные типы событий; в пакете они выходят
+        # отсортированы по id (heapq.merge).
+        main = MagicMock(id="forkX", thread_id="")
+        fork = _NoMountFork(ref_agent=main)
+        await fork.send({"type": "transport", "method": "send_message", "thread_id": "", "text": "t1"}, replay=True)
+        await fork.send({"type": "log", "category": "agent", "text": "log1"}, replay=True)
+        await fork.send({"type": "transport", "method": "send_message", "thread_id": "", "text": "t2"}, replay=True)
+
+        ws = MagicMock(); ws.send_text = AsyncMock()
+        await fork.ws_handle_message({"type": "replay", "last_seen_id": -1}, ws=ws)
+
+        payload = json.loads(ws.send_text.await_args.args[0])
+        ids = [e["id"] for e in payload["events"]]
+        assert ids == sorted(ids)
+        assert len(payload["events"]) == 3
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WebFork: persistence transport-истории в memory_dir/WEB_<thread>.json

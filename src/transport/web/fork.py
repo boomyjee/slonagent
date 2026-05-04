@@ -193,11 +193,13 @@ class WebFork:
     async def ws_handle_message(self, msg: dict, ws=None):
         if msg.get("type") == "replay" and ws is not None:
             last_seen = msg.get("last_seen_id", -1)
-            stream = heapq.merge(self.replay_transport, self.replay_other,
-                                 key=lambda e: e.get("id", 0))
+            stream = heapq.merge(self.replay_transport, self.replay_other,key=lambda e: e.get("id", 0))
+            events = []
             for event in stream:
                 if event.get("id", 0) > last_seen:
-                    await ws.send_text(json.dumps(event, ensure_ascii=False))
+                    events.append(event)
+            if events:
+                 await ws.send_text(json.dumps({"type": "replay", "events": events}, ensure_ascii=False))
             return
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
             # Запоминаем клиента который последним прислал user message — туда
