@@ -86,10 +86,38 @@ class TestParseObservations:
         result = _parse_observations(text)
         assert "item1" in result
 
-    def test_fallback_to_raw_when_no_bullets(self):
+    def test_empty_when_no_xml_or_bullets(self):
+        # Mastra extractListItemsOnly: пусто если нет ни <observations>, ни list-items
         text = "plain text no bullets"
+        assert _parse_observations(text) == ""
+
+    def test_numbered_list_fallback(self):
+        text = "1. item one\n2. item two"
         result = _parse_observations(text)
-        assert result == "plain text no bullets"
+        assert "item one" in result and "item two" in result
+
+    def test_multi_block_observations(self):
+        text = "<observations>\n* a\n</observations>\n<observations>\n* b\n</observations>"
+        result = _parse_observations(text)
+        assert "a" in result and "b" in result
+
+    def test_inline_observations_tag_ignored(self):
+        # Mastra: тег должен быть в начале строки, иначе не парсится
+        text = "User mentioned <observations>tag</observations> in chat"
+        assert _parse_observations(text) == ""
+
+    def test_truncates_long_lines(self):
+        # Уникальный контент — иначе degenerate-детектор сработает раньше truncate
+        long = "* " + " ".join(str(i) for i in range(3500))
+        result = _parse_observations(f"<observations>\n{long}\n</observations>")
+        assert "[truncated]" in result
+        assert len(result.splitlines()[0]) < 11_000
+
+    def test_degenerate_repetition_returns_empty(self):
+        # повторяющееся 200-char окно > 40% sampled windows
+        chunk = "abc" * 70  # ≥200 chars
+        text = chunk * 100  # длинный текст с повторами
+        assert _parse_observations(text) == ""
 
 
 class TestFormatRelativeTime:

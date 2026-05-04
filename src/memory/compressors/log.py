@@ -10,6 +10,7 @@ compress(turns) → recent_turns. Старые сообщения уплотня
 зовут его в общем skill-loop системного промпта.
 """
 import difflib
+import json
 import logging
 import os
 import re
@@ -528,18 +529,69 @@ log = logging.getLogger(__name__)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _parse_xml_tag(text: str, tag: str) -> str:
-    """Извлекает содержимое первого XML-тега."""
+    """Извлекает содержимое первого XML-тега (case-insensitive)."""
     m = re.search(rf"<{tag}>([\s\S]*?)</{tag}>", text, re.IGNORECASE)
     return m.group(1).strip() if m else ""
 
 
+_MAX_OBSERVATION_LINE_CHARS = 10_000
+
+
+def _detect_degenerate_repetition(text: str) -> bool:
+    """Mastra detectDegenerateRepetition (observer-agent.ts:1241)."""
+    if not text or len(text) < 2000:
+        return False
+    window_size = 200
+    step = max(1, len(text) // 50)
+    seen: dict[str, int] = {}
+    duplicate_windows = 0
+    total_windows = 0
+    for i in range(0, len(text) - window_size + 1, step):
+        window = text[i:i + window_size]
+        total_windows += 1
+        count = seen.get(window, 0) + 1
+        seen[window] = count
+        if count > 1:
+            duplicate_windows += 1
+    if total_windows > 5 and duplicate_windows / total_windows > 0.4:
+        return True
+    return any(len(line) > 50_000 for line in text.split("\n"))
+
+
+def _sanitize_observation_lines(observations: str) -> str:
+    """Mastra sanitizeObservationLines: truncate lines > MAX_OBSERVATION_LINE_CHARS."""
+    if not observations:
+        return observations
+    lines = observations.split("\n")
+    for i, line in enumerate(lines):
+        if len(line) > _MAX_OBSERVATION_LINE_CHARS:
+            lines[i] = line[:_MAX_OBSERVATION_LINE_CHARS] + " … [truncated]"
+    return "\n".join(lines)
+
+
 def _parse_observations(text: str) -> str:
-    """Извлекает observations из XML, fallback — list items."""
-    obs = _parse_xml_tag(text, "observations")
-    if obs:
-        return obs
-    lines = [l for l in text.splitlines() if re.match(r"^\s*[-*]\s", l)]
-    return "\n".join(lines).strip() or text.strip()
+    """Mastra parseMemorySectionXml + parseObserverOutput.
+
+    Поддерживает несколько <observations> блоков (склеиваются через \\n), требует чтобы
+    тег стоял в начале строки (избегаем inline-упоминаний типа "User discussed <observations> tags").
+    Fallback — все list-items (-, *, \\d.) если тегов нет.
+    Lines > 10K chars обрезаются. Detect degenerate repetition → пустая строка.
+    """
+    if _detect_degenerate_repetition(text):
+        return ""
+
+    blocks = re.findall(
+        r"^[ \t]*<observations>([\s\S]*?)^[ \t]*</observations>",
+        text, flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if blocks:
+        observations = "\n".join(b.strip() for b in blocks if b.strip())
+    else:
+        observations = "\n".join(
+            line for line in text.split("\n")
+            if re.match(r"^\s*([-*]|\d+\.)\s", line)
+        ).strip()
+    return _sanitize_observation_lines(observations)
 
 
 
@@ -747,7 +799,7 @@ class LogCompressor(BaseProvider):
         except Exception as e:
             log.warning("[LogCompressor] write LOG.md failed: %s", e, exc_info=True)
 
-    async def _generate(self, label: str, system: str, messages: list, **kwargs) -> str:
+    async def _generate(self, label: str, system: str, user_prompt: str, **kwargs) -> str:
         if not hasattr(self, "_llm_agent"):
             self._llm_agent = Agent(
                 id="",
@@ -759,23 +811,7 @@ class LogCompressor(BaseProvider):
             )
 
         self._llm_agent.memory.clear()
-        # Claude backend шлёт в claude.query() только последний user-turn (остальное
-        # хранит сама claude-сессия через resume). У нас compressor — one-shot, истории
-        # на стороне claude нет, поэтому склеиваем весь диалог в один текстовый запрос.
-        if self._backend == "claude":
-            lines = []
-            for m in messages:
-                role = m.get("role", "user")
-                content = m.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(
-                        p.get("text", "") for p in content
-                        if isinstance(p, dict) and "text" in p
-                    )
-                lines.append(f"[{role}]: {content}")
-            await self._llm_agent.memory.add_turn({"role": "user", "content": "\n\n".join(lines)})
-        else:
-            await self._llm_agent.memory.add_turn(*messages)
+        await self._llm_agent.memory.add_turn({"role": "user", "content": user_prompt})
 
         try:
             turn = await self._llm_agent.llm(
@@ -789,15 +825,83 @@ class LogCompressor(BaseProvider):
         return Agent.turn_text(turn)
 
     async def _run_observer(self, turns: list, existing_observations: str) -> str:
-        messages = []
+        # Промпт собран 1:1 с Mastra (buildObserverPrompt + formatMessagesForObserver):
+        # SOTA на LongMemEval (94.87%). Структура: [новый диалог] → [старые obs] → [task].
+        # Bold-заголовки ролей, en-US-таймстемпы в скобках, --- между блоками,
+        # JSON pretty-printed для tool args/results.
+        def _pretty(raw):
+            if isinstance(raw, str):
+                try: return json.dumps(json.loads(raw), ensure_ascii=False, indent=2)
+                except Exception: return raw
+            try: return json.dumps(raw, ensure_ascii=False, indent=2)
+            except Exception: return str(raw)
+
+        def _format_ts(raw: str) -> str:
+            # Mastra: en-US toLocaleString — "Jan 1, 2025, 10:00 AM"
+            try:
+                dt = datetime.fromisoformat(raw).astimezone()
+            except (ValueError, TypeError):
+                return ""
+            hour12 = dt.hour % 12 or 12
+            ampm = "AM" if dt.hour < 12 else "PM"
+            return f"{dt.strftime('%b')} {dt.day}, {dt.year}, {hour12}:{dt.minute:02d} {ampm}"
+
+        MAX_TOOL_RESULT_CHARS = 40_000
+        pending_calls: dict[str, str] = {}  # call_id → tool_name, для линковки tool-ответов
+        blocks = []
+        for m in turns:
+            if not isinstance(m, dict): continue
+            role = m.get("role", "user")
+            ts = _format_ts(m.get("_timestamp", ""))
+            ts_suffix = f" ({ts})" if ts else ""
+            sections: list[str] = []
+
+            if role == "tool":
+                name = pending_calls.pop(m.get("tool_call_id", ""), "?")
+                body = _pretty(m.get("content", ""))
+                if len(body) > MAX_TOOL_RESULT_CHARS:
+                    body = body[:MAX_TOOL_RESULT_CHARS] + f"\n... [truncated {len(body) - MAX_TOOL_RESULT_CHARS} chars]"
+                sections.append(f"[Tool Result: {name}]\n{body}")
+                header = f"**Tool{ts_suffix}:**"
+            else:
+                content = m.get("content")
+                if isinstance(content, str) and content:
+                    sections.append(content)
+                elif isinstance(content, list):
+                    text = "\n".join(b.get("text", "") for b in content
+                                     if isinstance(b, dict) and "text" in b)
+                    if text: sections.append(text)
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    name = fn.get("name", "")
+                    pending_calls[tc.get("id", "")] = name
+                    sections.append(f"[Tool Call: {name}]\n{_pretty(fn.get('arguments', ''))}")
+                header = f"**{role.capitalize()}{ts_suffix}:**"
+
+            if sections:
+                blocks.append(f"{header}\n" + "\n".join(sections))
+
+        dialog_md = "\n\n---\n\n".join(blocks)
+
+        task_prompt = ""
         if existing_observations:
-            messages.append({"role": "user", "content": f"## Previous Observations\n\n{existing_observations}\n\nDo not repeat existing observations. Append new ones only."})
-            messages.append({"role": "assistant", "content": "Understood. I will only append new observations."})
-        messages.extend(self.agent.strip_contents_private(turns, self._model_name))
-        messages.append({"role": "user", "content": "Extract observations from the conversation above."})
+            task_prompt += f"## Previous Observations\n\n{existing_observations}\n\n---\n\n"
+            task_prompt += (
+                "Do not repeat these existing observations. "
+                "Your new observations will be appended to the existing observations.\n\n"
+            )
+        task_prompt += "## Your Task\n\n"
+        task_prompt += (
+            "Extract new observations from the message history above. "
+            "Do not repeat observations that are already in the previous observations. "
+            "Add your new observations in the format specified in your instructions."
+        )
+
+        user_prompt = f"## New Message History to Observe\n\n{dialog_md}\n\n---\n\n{task_prompt}"
 
         response = await self._generate(
-            "Observer", OBSERVER_SYSTEM_PROMPT, messages, temperature=0.3, max_tokens=100_000,
+            "Observer", OBSERVER_SYSTEM_PROMPT, user_prompt,
+            temperature=0.3, max_tokens=100_000,
         )
         return _parse_observations(response)
 
@@ -812,7 +916,7 @@ class LogCompressor(BaseProvider):
             user_prompt += f"\n\n{COMPRESSION_GUIDANCE[compression_level]}"
 
         reflected = _parse_observations(await self._generate(
-            "Reflector", REFLECTOR_SYSTEM_PROMPT, [{"role": "user", "content": user_prompt}],
+            "Reflector", REFLECTOR_SYSTEM_PROMPT, user_prompt,
             temperature=0.0, max_tokens=100_000,
         ))
 
