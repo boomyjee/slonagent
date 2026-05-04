@@ -292,6 +292,7 @@ class App extends Component {
     _tabContextItems = (tab) => {
         const closable = tab.closable !== false;
         const isFile = tab.id.startsWith('/') && !tab.id.startsWith('git-');
+        const isUrl = tab.id.startsWith('url:');
         const blameable = isFile && isInGitRepo(tab.id);
         const others = this.state.tabs.filter(t => t.closable !== false && t.id !== tab.id);
         return [
@@ -299,6 +300,7 @@ class App extends Component {
             { label: 'Close Others', disabled: !others.length, action: () => this._closeOthers(tab.id) },
             { label: 'Close All', action: () => this._closeAll() },
             ...(blameable ? [{ label: 'Git Blame', action: () => this._openGitBlame(tab.id, tab.label) }] : []),
+            ...(isUrl ? [{ label: 'Copy URL', action: () => navigator.clipboard?.writeText(tab.id.slice(4)) }] : []),
         ];
     };
 
