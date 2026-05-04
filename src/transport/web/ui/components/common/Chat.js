@@ -138,6 +138,7 @@ export class Chat extends Component {
     render({ connected, className, threadsEnabled = true }, { tabs, activeTab, processingByThread }) {
         const tabsRender = tabs.map(t => ({
             id: t.id,
+            tooltip: t.id || '(primary)',
             label: html`<span class=${t.label ? '' : cl.untitled}>${t.label || 'Untitled'}</span>${processingByThread[t.id] ? html`<span class=${cl.tabSpinner}></span>` : null}`,
             closable: threadsEnabled,
         }));

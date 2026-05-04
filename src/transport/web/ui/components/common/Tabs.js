@@ -85,6 +85,7 @@ export class Tabs extends Component {
                     (dragInsertAt === tabs.length && i === tabs.length - 1) ? ' drag-after' : '';
                 return html`<div key=${t.id}
                      data-tab-id=${t.id}
+                     title=${t.tooltip || ''}
                      class="${cl.tab}${active === t.id ? ' active' : ''}${t.diskChanged ? ' disk' : t.dirty ? ' dirty' : ''}${insertHere}"
                      onMouseDown=${e => this._startDrag(e, t)}
                      onClick=${() => onSelect(t.id)}

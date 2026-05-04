@@ -48,6 +48,17 @@ test('initial mount shows a single empty tab', async () => {
     assert.equal(chat.state.activeTab, '');
 });
 
+test('tab tooltip shows the thread id; empty id reads as (primary)', async () => {
+    resetStorage();
+    const { chat, container } = mount();
+    await flush();
+    chat.setState({ tabs: [{ id: '', label: '' }, { id: 'ab12cd34', label: 'X' }], activeTab: '' });
+    await flush();
+    const [main, named] = container.querySelectorAll('[data-tab-id]');
+    assert.equal(main.getAttribute('title'), '(primary)');
+    assert.equal(named.getAttribute('title'), 'ab12cd34');
+});
+
 test('handleMessage routes per-thread events to the matching ChatDialog', async () => {
     resetStorage();
     const { chat } = mount();

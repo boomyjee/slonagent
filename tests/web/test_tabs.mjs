@@ -49,6 +49,17 @@ test('active tab gets the .active class', async () => {
     assert.equal(b.className.includes('active'), true);
 });
 
+test('tooltip prop is rendered as the title attribute', async () => {
+    const { container } = mount({ tabs: [
+        { id: 'a', label: 'A', tooltip: 'long description' },
+        { id: 'b', label: 'B' },
+    ]});
+    await flush();
+    const [a, b] = container.querySelectorAll('[data-tab-id]');
+    assert.equal(a.getAttribute('title'), 'long description');
+    assert.equal(b.getAttribute('title'), '');
+});
+
 test('clicking a tab calls onSelect with its id', async () => {
     const { container, calls } = mount({ tabs: [tab('a'), tab('b')] });
     await flush();
