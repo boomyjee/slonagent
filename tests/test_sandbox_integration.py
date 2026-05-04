@@ -662,3 +662,203 @@ class TestBackgroundShell:
         assert "error" in r
         r = await sb.kill_shell(shell_id="invalid")
         assert "error" in r
+
+
+# ─── RPC passthrough host ↔ container ─────────────────────────────────────────
+
+class TestRpcPassthrough:
+    """Реальный podman + reальный RPC канал. dispatch_tool_call дёргается
+    напрямую — без LLM/loop, чтобы изолировать именно проброс команд и
+    функций между host'ом и кастомным скриптом-скиллом в контейнере."""
+
+    @staticmethod
+    def _drop_tool(tmp_path, filename: str, body: str):
+        tools_dir = tmp_path / "memory" / "workspace" / "tools"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        (tools_dir / filename).write_text(body, encoding="utf-8")
+
+    @staticmethod
+    def _tool_call(name: str, args: dict, call_id="c1") -> dict:
+        import json as _j
+        return {"id": call_id, "type": "function",
+                "function": {"name": name, "arguments": _j.dumps(args)}}
+
+    async def test_function_returns_value(self, sandbox, tmp_path):
+        """Forward path: dispatch_tool_call → exec script in container → result."""
+        self._drop_tool(tmp_path, "math_tools.py",
+            "from agent import Skill, tool\n"
+            "from typing import Annotated\n"
+            "class MathSkill(Skill):\n"
+            "    @tool('Удваивает число')\n"
+            "    async def double(self, x: Annotated[int, 'число']) -> dict:\n"
+            "        return {'result': x * 2}\n"
+        )
+        _, sb, _ = sandbox
+        sb.get_tools()  # триггерит _scan_script_tools — без него dispatch не найдёт имя
+        result = await sb.dispatch_tool_call(
+            self._tool_call("sandbox_math_double", {"x": 21})
+        )
+        assert result == {"result": 42}
+
+    async def test_function_with_kwargs_and_types(self, sandbox, tmp_path):
+        """Маршаллинг типов: int/str/list/dict через JSON-сериализацию RPC."""
+        self._drop_tool(tmp_path, "echo_tools.py",
+            "from agent import Skill, tool\n"
+            "from typing import Annotated\n"
+            "class EchoSkill(Skill):\n"
+            "    @tool('Эхо аргументов')\n"
+            "    async def args(self, n: Annotated[int, 'n'],\n"
+            "                   s: Annotated[str, 's'],\n"
+            "                   xs: Annotated[list, 'xs']) -> dict:\n"
+            "        return {'n': n, 's': s, 'xs': xs, 'kinds': [type(n).__name__, type(s).__name__, type(xs).__name__]}\n"
+        )
+        _, sb, _ = sandbox
+        sb.get_tools()
+        result = await sb.dispatch_tool_call(
+            self._tool_call("sandbox_echo_args", {"n": 7, "s": "ok", "xs": [1, 2, 3]})
+        )
+        assert result == {"n": 7, "s": "ok", "xs": [1, 2, 3],
+                          "kinds": ["int", "str", "list"]}
+
+    async def test_function_exception_propagates_with_traceback(self, sandbox, tmp_path):
+        """Исключение из тулзы проходит через RPC с трейсом и именем файла."""
+        self._drop_tool(tmp_path, "boom_tools.py",
+            "from agent import Skill, tool\n"
+            "from typing import Annotated\n"
+            "class BoomSkill(Skill):\n"
+            "    @tool('Кидает ошибку')\n"
+            "    async def crash(self, msg: Annotated[str, 'msg']) -> dict:\n"
+            "        raise RuntimeError(msg)\n"
+        )
+        _, sb, _ = sandbox
+        sb.get_tools()
+        result = await sb.dispatch_tool_call(
+            self._tool_call("sandbox_boom_crash", {"msg": "bang"})
+        )
+        # SandboxSkill ловит исключение и возвращает {"error": "..."} с trace+stderr
+        assert "error" in result
+        assert "RuntimeError" in result["error"]
+        assert "bang" in result["error"]
+
+    async def test_callback_to_host_via_agent_proxy(self, tmp_path):
+        """Reverse path: тулза в sandbox зовёт self.agent.transport.send_message
+        → RPC обратно на хост → метод исполняется на CaptureTransport'е."""
+        from src.transport.base import BaseTransport
+
+        class CaptureTransport(BaseTransport):
+            def __init__(self):
+                super().__init__()
+                self.messages: list[str] = []
+
+            async def send_message(self, text, stream_id=None, final=True):
+                self.messages.append(text)
+
+        self._drop_tool(tmp_path, "ping_tools.py",
+            "from agent import Skill, tool\n"
+            "from typing import Annotated\n"
+            "class PingSkill(Skill):\n"
+            "    @tool('Шлёт сообщение через transport родителя')\n"
+            "    async def send(self, msg: Annotated[str, 'msg']) -> dict:\n"
+            "        await self.agent.transport.send_message(msg)\n"
+            "        return {'sent': True}\n"
+        )
+
+        # Кастомный agent: ставим CaptureTransport до start.
+        transport = CaptureTransport()
+        sb = SandboxSkill()
+        cs = ConfigSkill()
+        agent = Agent(
+            id="sb_callback",
+            model_name="dummy",
+            api_key="",
+            base_url="",
+            agent_dir=str(tmp_path),
+            memory_compressor=PassthroughCompressor(),
+            skills=[sb, cs],
+            transport=transport,
+        )
+        await agent.start(run_loop=False)
+        try:
+            sb.get_tools()
+            result = await sb.dispatch_tool_call(
+                self._tool_call("sandbox_ping_send", {"msg": "hello from container"})
+            )
+            assert result == {"sent": True}
+            assert transport.messages == ["hello from container"]
+        finally:
+            _cleanup(sb)
+
+    async def test_spawn_subagent_runs_echo_loop_via_rpc(self, tmp_path):
+        """Substantial: тулза в sandbox вызывает self.agent.spawn_subagent,
+        стартует под-агентов loop через прокси, шлёт через process_message,
+        echo backend отвечает в parent transport (он же sub transport — наследуется).
+        Хост-сторона ловит echo в CaptureTransport, проверяет содержимое."""
+        from src.transport.base import BaseTransport
+
+        class CaptureTransport(BaseTransport):
+            def __init__(self):
+                super().__init__()
+                self.messages: list[str] = []
+                self.done = asyncio.Event()
+
+            async def send_message(self, text, stream_id=None, final=True):
+                if final:
+                    self.messages.append(text)
+                    self.done.set()
+
+        self._drop_tool(tmp_path, "spawn_tools.py",
+            "import asyncio\n"
+            "from typing import Annotated\n"
+            "from agent import Skill, tool\n"
+            "class SpawnSkill(Skill):\n"
+            "    @tool('Спавнит sub-agent с echo backend и крутит его loop')\n"
+            "    async def run(self, name: Annotated[str, 'имя'],\n"
+            "                  msg: Annotated[str, 'msg']) -> dict:\n"
+            "        sub = await self.agent.spawn_subagent(\n"
+            "            name, backend='echo', skills=[], memory_providers=[]\n"
+            "        )\n"
+            "        loop_task = asyncio.create_task(sub.loop())\n"
+            "        try:\n"
+            "            await sub.process_message([{'type':'text','text': msg}])\n"
+            "            # Echo отрабатывает <1s. Отдыхаем чтобы host'у дойти.\n"
+            "            await asyncio.sleep(1.0)\n"
+            "        finally:\n"
+            "            loop_task.cancel()\n"
+            "            try: await loop_task\n"
+            "            except BaseException: pass\n"
+            "        return {'spawned': name}\n"
+        )
+
+        # Кастомный agent с CaptureTransport — sub-agent наследует transport
+        # из parent (default override в spawn_subagent), echo пишет туда.
+        transport = CaptureTransport()
+        sb = SandboxSkill()
+        cs = ConfigSkill()
+        agent = Agent(
+            id="sb_subagent",
+            model_name="dummy",
+            api_key="",
+            base_url="",
+            agent_dir=str(tmp_path),
+            memory_compressor=PassthroughCompressor(),
+            skills=[sb, cs],
+            transport=transport,
+        )
+        # spawn_subagent зовёт Agent.from_config(self._config, ...) — _config
+        # сетится только в from_config, не в __init__. Подкладываем минимум.
+        agent._config = {"model_name": "dummy", "api_key": "", "base_url": ""}
+        await agent.start(run_loop=False)
+        try:
+            sb.get_tools()
+            result = await sb.dispatch_tool_call(
+                self._tool_call("sandbox_spawn_run", {"name": "kid", "msg": "hello"})
+            )
+            assert result == {"spawned": "kid"}
+            assert transport.done.is_set(), "no final send_message captured"
+            echoes = [m for m in transport.messages if m.startswith("эхо: ")]
+            assert echoes, f"no echo prefix in messages: {transport.messages!r}"
+            assert "hello" in echoes[0]
+            sub_dir = tmp_path / "memory" / "subagents" / "kid"
+            assert sub_dir.is_dir()
+        finally:
+            _cleanup(sb)

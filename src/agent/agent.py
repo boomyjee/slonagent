@@ -80,7 +80,6 @@ class Agent:
         if self.agent_dir is None:
             raise RuntimeError("ephemeral agent (agent_dir=None) can't spawn subagents — nowhere to persist them")
         subagent_dir = os.path.join(self.agent_dir, "memory", "subagents", name)
-        os.makedirs(subagent_dir, exist_ok=True)
         cfg_overrides.setdefault("transport", self.transport)
         agent = Agent.from_config(self._config, id=f"{self.id}:{name}", agent_dir=subagent_dir, **cfg_overrides)
 
