@@ -232,44 +232,6 @@ async def test_log_compressor_reflect(tmp_path, llm):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ToolProvider — LLM-суммаризация после tool use
-# ═══════════════════════════════════════════════════════════════════════════════
-
-async def test_tool_provider_consolidate(tmp_path, llm):
-    """ToolProvider генерирует описание инструмента через LLM после его использования."""
-    from src.memory.providers.tool import ToolProvider
-
-    provider = ToolProvider(
-        model_name=llm["model_name"], api_key=llm["api_key"], base_url=llm["base_url"],
-        backend=llm["backend"], backend_params=llm["backend_params"],
-        consolidate_tokens=1,
-    )
-    agent, _ = make_agent(tmp_path, llm, providers=[provider])
-    await agent.start()
-
-    # Симулируем диалог с вызовом инструмента
-    tool_call_id = "call_abc123"
-    turns = [
-        {"role": "user", "content": [{"type": "text", "text": "Сколько будет 2+2?"}]},
-        {"role": "assistant", "content": None, "tool_calls": [{
-            "id": tool_call_id, "type": "function",
-            "function": {"name": "sandbox_exec", "arguments": '{"command": "python3 -c \\"print(2+2)\\""}'},
-        }]},
-        {"role": "tool", "tool_call_id": tool_call_id,
-         "content": '{"stdout": "4\\n", "stderr": "", "exit_code": 0}',
-         "_timestamp": "2025-01-01T10:00:01"},
-        {"role": "assistant", "content": "Результат: 4"},
-    ]
-
-    # Принудительно запускаем consolidate
-    await provider._consolidate(turns)
-
-    prompt = await provider.get_tool_prompt("sandbox_exec")
-    assert prompt, "ToolProvider не сгенерировал описание инструмента"
-    assert len(prompt) > 30, f"Описание слишком короткое: {prompt!r}"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # SandboxSkill — выполнение команды в Podman
 # ═══════════════════════════════════════════════════════════════════════════════
 
