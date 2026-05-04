@@ -13,6 +13,17 @@ function mdToHtml(text) {
     text = text.replace(/`([^`]+)`/g, (_, c) => `\x00IC${inlines.push(c) - 1}\x00`);
     text = text.replace(/^>\s*(.*)$/gm, '$1');
     text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Markdown tables: detect consecutive lines with | delimiters and a separator row
+    text = text.replace(/(?:^|\n)((?:\|[^\n]+\|\n)+)/g, (match, block) => {
+        const rows = block.trim().split('\n').filter(r => r.trim());
+        if (rows.length < 2) return match;
+        const sepIdx = rows.findIndex(r => /^\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)+\|?$/.test(r.trim()));
+        if (sepIdx < 1) return match;
+        const parseRow = (r, tag) => '<tr>' + r.replace(/^\||\|$/g, '').split('|').map(c => `<${tag}>${c.trim()}</${tag}>`).join('') + '</tr>';
+        const head = rows.slice(0, sepIdx).map(r => parseRow(r, 'th')).join('');
+        const body = rows.slice(sepIdx + 1).map(r => parseRow(r, 'td')).join('');
+        return '\n<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>\n';
+    });
     text = text.replace(/^(#{1,6})\s+(.+)$/gm, (_, h, t) => `<h${h.length}>${t}</h${h.length}>`);
     text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
@@ -655,6 +666,10 @@ cl.msg = css`
   & pre { background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 4px;
           margin: 4px 0; overflow-x: auto; white-space: pre; }
   & pre code { background: transparent; padding: 0; }
+  & table { border-collapse: collapse; margin: 6px 0; font-size: 13px; width: auto; }
+  & th, & td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; white-space: normal; }
+  & th { background: rgba(0,0,0,0.15); font-weight: 600; }
+  & tr:nth-child(even) td { background: rgba(0,0,0,0.05); }
 `;
 cl.tool = css`
   margin-bottom: 5px; border: 1px solid var(--border); border-radius: 3px; font-size: 12px;
