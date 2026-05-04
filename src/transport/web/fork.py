@@ -100,6 +100,7 @@ class WebFork:
         self.register_route("get", "/uploads/{filename:path}", self._serve_upload)
         self.register_route("get", "/api/commands", self._api_commands)
         self.register_route("get", "/api/history", self._api_history)
+        self.register_route("get", "/api/thread_list", self._api_thread_list)
         self.register_route("get", "/{filename:path}", self._static)
         self.register_route("websocket", "/ws", self._ws)
 
@@ -115,6 +116,9 @@ class WebFork:
 
     async def _api_history(self, thread_id: str = ""):
         return JSONResponse({"events": self._load_history_tail(thread_id)})
+
+    async def _api_thread_list(self):
+        return JSONResponse(self.ref_agent.thread_list())
 
     async def _api_commands(self):
         cmds = {
@@ -162,12 +166,9 @@ class WebFork:
         # No auto-replay — clients ask for it explicitly via a "replay" message
         # after they connect (so reconnects on a live page can specify
         # last_seen_id and skip what they already have).
+        # Реестр имён тредов — snapshot, отдаётся по GET /api/thread_list. Тут
+        # его не флудим как фейковые thread_rename'ы.
         self.clients.add(ws)
-        for uuid_, info in self.ref_agent.thread_list().items():
-            await ws.send_text(json.dumps({
-                "type": "transport", "method": "thread_rename",
-                "uuid": uuid_, "name": info.get("name", ""),
-            }, ensure_ascii=False))
         try:
             while True:
                 data = await ws.receive_text()

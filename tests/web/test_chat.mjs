@@ -44,15 +44,88 @@ test('initial mount shows a single empty tab', async () => {
     const { chat } = mount();
     await flush();
     assert.equal(chat.state.tabs.length, 1);
-    assert.equal(chat.state.tabs[0].id, '');
+    assert.equal(chat.state.tabs[0], '');
     assert.equal(chat.state.activeTab, '');
+});
+
+test('fetches /api/thread_list on mount, populates threads registry', async () => {
+    resetStorage();
+    const calls = [];
+    const list = { 'abc': { name: 'Alpha' }, 'def': { name: 'Bravo' } };
+    globalThis.fetch = async (url) => { calls.push(url); return mockResponse(list); };
+    try {
+        const { chat } = mount();
+        for (let i = 0; i < 5; i++) await flush();
+        assert.ok(calls.some(u => /api\/thread_list/.test(u)));
+        assert.equal(chat.state.threads['abc'], 'Alpha');
+        assert.equal(chat.state.threads['def'], 'Bravo');
+    } finally {
+        globalThis.fetch = async () => mockResponse({ events: [] });
+    }
+});
+
+test('thread_list fetch fills server-side names into threads registry', async () => {
+    resetStorage();
+    // Fake a previously persisted open-tab list (id-only).
+    localStorage.setItem(
+        Object.keys(localStorage).find(k => k.endsWith(':chat:tabs')) || 'slon::chat:tabs',
+        JSON.stringify({ tabs: ['abc'], active: 'abc' }),
+    );
+    globalThis.fetch = async () => mockResponse({ 'abc': { name: 'Renamed' } });
+    try {
+        const { chat } = mount();
+        for (let i = 0; i < 5; i++) await flush();
+        assert.equal(chat.state.threads['abc'], 'Renamed');
+        assert.deepEqual(chat.state.tabs, ['abc']);
+    } finally {
+        globalThis.fetch = async () => mockResponse({ events: [] });
+    }
+});
+
+test('events arriving before thread_list ready are buffered, applied after', async () => {
+    resetStorage();
+    let resolve;
+    globalThis.fetch = () => new Promise(r => { resolve = () => r(mockResponse({})); });
+    try {
+        const { chat } = mount();
+        // Fetch is pending → state.ready is still false; events go to buffer.
+        chat.handleMessage(ev('thread_rename', { uuid: 'abc', name: 'Live' }));
+        assert.equal(chat.state.ready, false);
+        assert.equal(chat.state.threads['abc'], undefined);
+        // Resolve fetch — ready flips, componentDidUpdate drains the buffer.
+        resolve();
+        for (let i = 0; i < 5; i++) await flush();
+        assert.equal(chat.state.ready, true);
+        assert.equal(chat.state.threads['abc'], 'Live');
+    } finally {
+        globalThis.fetch = async () => mockResponse({ events: [] });
+    }
+});
+
+test('rename arriving during thread_list fetch wins over server snapshot', async () => {
+    resetStorage();
+    let resolve;
+    globalThis.fetch = () => new Promise(r => {
+        resolve = () => r(mockResponse({ 'X': { name: 'Server' } }));
+    });
+    try {
+        const { chat } = mount();
+        // Live rename для того же uuid — приходит после серверного снимка.
+        chat.handleMessage(ev('thread_rename', { uuid: 'X', name: 'Live' }));
+        resolve();
+        for (let i = 0; i < 5; i++) await flush();
+        // Snapshot применился первым (Server), потом drain накатил Live поверх.
+        assert.equal(chat.state.threads['X'], 'Live');
+    } finally {
+        globalThis.fetch = async () => mockResponse({ events: [] });
+    }
 });
 
 test('tab tooltip shows the thread id; empty id reads as (primary)', async () => {
     resetStorage();
     const { chat, container } = mount();
     await flush();
-    chat.setState({ tabs: [{ id: '', label: '' }, { id: 'ab12cd34', label: 'X' }], activeTab: '' });
+    chat.setState({ tabs: ['', 'ab12cd34'], threads: { 'ab12cd34': 'X' }, activeTab: '' });
     await flush();
     const [main, named] = container.querySelectorAll('[data-tab-id]');
     assert.equal(main.getAttribute('title'), '(primary)');
@@ -98,31 +171,30 @@ test('send_processing flips the per-thread spinner flag', async () => {
     assert.equal(chat.state.processingByThread[''], false);
 });
 
-test('thread_rename updates the matching tab label and the threads index', async () => {
+test('thread_rename updates the threads registry (tabs untouched)', async () => {
     resetStorage();
     const { chat } = mount();
     await flush();
-    // Bootstrap a real tab id, then rename it.
-    chat.setState({ tabs: [{ id: 'abc', label: '' }], activeTab: 'abc' });
+    chat.setState({ tabs: ['abc'], activeTab: 'abc' });
     await flush();
     chat.handleMessage(ev('thread_rename', { uuid: 'abc', name: 'My Thread' }));
     await flush();
-    assert.equal(chat.state.tabs[0].label, 'My Thread');
+    assert.deepEqual(chat.state.tabs, ['abc']);  // tabs хранят только id
     assert.equal(chat.state.threads['abc'], 'My Thread');
 });
 
-test('opening a new tab creates a stable id and persists it', async () => {
+test('opening a new tab creates a stable id and persists only ids', async () => {
     resetStorage();
     const { chat } = mount();
     await flush();
     chat._onAddTab();
     await flush();
     assert.equal(chat.state.tabs.length, 2);
-    const newId = chat.state.tabs[1].id;
+    const newId = chat.state.tabs[1];
     assert.ok(newId && newId.length > 0);
     assert.equal(chat.state.activeTab, newId);
     const persisted = JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k => k.endsWith(':chat:tabs'))));
-    assert.equal(persisted.tabs.length, 2);
+    assert.deepEqual(persisted.tabs, ['', newId]);
     assert.equal(persisted.active, newId);
 });
 
@@ -132,14 +204,14 @@ test('closing a tab removes its dialog and any processing flag', async () => {
     await flush();
     chat._onAddTab();
     await flush();
-    const tid = chat.state.tabs[1].id;
+    const tid = chat.state.tabs[1];
     chat.handleMessage(ev('send_processing', { thread_id: tid, active: true }));
     await flush();
     assert.equal(chat.state.processingByThread[tid], true);
 
     chat._onCloseTab(tid);
     await flush();
-    assert.equal(chat.state.tabs.find(t => t.id === tid), undefined);
+    assert.equal(chat.state.tabs.includes(tid), false);
     assert.equal(chat.state.processingByThread[tid], undefined);
     assert.equal(chat._dialogs[tid], undefined);
 });
@@ -162,7 +234,7 @@ test('two threads keep messages independent', async () => {
     await flush();
     chat._onAddTab();
     await flush();
-    const t2 = chat.state.tabs[1].id;
+    const t2 = chat.state.tabs[1];
 
     chat.handleMessage(ev('send_message', { thread_id: '', text: 'A', stream_id: 1, final: true }));
     chat.handleMessage(ev('send_message', { thread_id: t2, text: 'B', stream_id: 2, final: true }));

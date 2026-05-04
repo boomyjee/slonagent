@@ -317,6 +317,76 @@ test('process_message with empty parts is a no-op', async () => {
 
 // ─── history bootstrap on mount ────────────────────────────────────────
 
+test('events arriving before history ready are buffered and applied after', async () => {
+    let resolve;
+    globalThis.fetch = () => new Promise(r => { resolve = () => r(mockResponse({ events: [] })); });
+    try {
+        const { dialog } = mount();
+        dialog.handleEvent(ev('inject_message', { text: 'live', id: 50 }));
+        assert.equal(dialog.state.ready, false);
+        assert.equal(dialog.state.messages.length, 0);   // буфер, не state
+        resolve();
+        for (let i = 0; i < 5; i++) await flush();
+        assert.equal(dialog.state.ready, true);
+        assert.equal(dialog.state.messages.length, 1);
+        assert.equal(dialog.state.messages[0].text, 'live');
+    } finally {
+        globalThis.fetch = async () => mockResponse({ events: [] });
+    }
+});
+
+test('events with id <= lastSeenId after history are deduplicated', async () => {
+    globalThis.fetch = async () => mockResponse({ events: [
+        { method: 'inject_message', text: 'hist', id: 100 },
+    ]});
+    try {
+        const { dialog } = mount();
+        for (let i = 0; i < 5; i++) await flush();
+        assert.equal(dialog._lastSeenId, 100);
+
+        // Тот же id — игнор.
+        dialog.handleEvent(ev('inject_message', { text: 'dup', id: 100 }));
+        await flush();
+        assert.equal(dialog.state.messages.length, 1);
+
+        // Старый id (был в реплее, но история его обогнала) — игнор.
+        dialog.handleEvent(ev('inject_message', { text: 'old', id: 50 }));
+        await flush();
+        assert.equal(dialog.state.messages.length, 1);
+
+        // Новее последнего — применяется.
+        dialog.handleEvent(ev('inject_message', { text: 'new', id: 101 }));
+        await flush();
+        assert.equal(dialog.state.messages.length, 2);
+        assert.equal(dialog.state.messages[1].text, 'new');
+    } finally {
+        globalThis.fetch = async () => mockResponse({ events: [] });
+    }
+});
+
+test('on F5 race: stale replay older than history boundary is filtered', async () => {
+    let resolve;
+    globalThis.fetch = () => new Promise(r => {
+        resolve = () => r(mockResponse({ events: [
+            { method: 'inject_message', text: 'hist', id: 100 },
+        ]}));
+    });
+    try {
+        const { dialog } = mount();
+        // Реплей шлёт перекрывающие историю события — old и fresh:
+        dialog.handleEvent(ev('inject_message', { text: 'stale', id: 99 }));
+        dialog.handleEvent(ev('inject_message', { text: 'fresh', id: 101 }));
+        resolve();
+        for (let i = 0; i < 5; i++) await flush();
+        // history → lastSeenId=100. drain: stale(99) отфильтрован, fresh(101) ок.
+        assert.equal(dialog.state.messages.length, 2);
+        assert.equal(dialog.state.messages[0].text, 'hist');
+        assert.equal(dialog.state.messages[1].text, 'fresh');
+    } finally {
+        globalThis.fetch = async () => mockResponse({ events: [] });
+    }
+});
+
 test('componentDidMount fetches /api/history and replays events into state', async () => {
     const calls = [];
     const events = [

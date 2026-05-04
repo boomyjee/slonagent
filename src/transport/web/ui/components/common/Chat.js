@@ -30,16 +30,70 @@ export class Chat extends Component {
         super(props);
         const enabled = props.threadsEnabled !== false;
         const saved = enabled ? persist.get('chat:tabs', null) : null;
-        const tabs = saved?.tabs?.length ? saved.tabs : [{ id: '', label: '' }];
-        const active = saved?.active != null ? saved.active : tabs[0].id;
+        const tabs = saved?.tabs?.length ? saved.tabs : [''];
+        const active = saved?.active != null ? saved.active : tabs[0];
         this.state = {
-            tabs,                                   // [{id, label}] — открытые табы
+            tabs,                                   // [id, id, ...]
             activeTab: active,
             processingByThread: {},                 // tid → bool (для спиннера на табе)
-            threads: {},                            // uuid → label, всё что прислал сервер
+            threads: {},                            // uuid → label
+            ready: false,                           // false до завершения thread_list
         };
         this._dialogs = {};      // tid → ChatDialog instance
     }
+
+    componentDidMount() {
+        this._fetchThreadList();
+    }
+
+    async _fetchThreadList() {
+        let list = {};
+        try {
+            const r = await fetch('api/thread_list');
+            if (r.ok) list = await r.json();    // {uuid: {name, ...}}
+        } catch (e) {
+            console.warn('thread_list fetch failed', e);
+        }
+        const threads = Object.fromEntries(
+            Object.entries(list).map(([id, info]) => [id, info?.name || ''])
+        );
+        this.setState(({ tabs, activeTab }) => {
+            // Выкидываем tabs, которых нет в server registry. '' (primary)
+            let valid = tabs.filter(id => id === '' || id in threads);
+            if (!valid.length) valid = [''];
+            return {
+                threads, ready: true,
+                tabs: valid,
+                activeTab: valid.includes(activeTab) ? activeTab : valid[0],
+            };
+        }, () => this._persist());
+        // _pending дренит componentDidUpdate когда видит ready=true.
+    }
+
+    componentDidUpdate() {
+        if (this.state.ready && this._pending?.length)
+            for (const ev of this._pending.splice(0)) this.handleMessage(ev);
+    }
+
+    handleMessage(ev) {
+        if (!this.state.ready) return (this._pending ??= []).push(ev);
+
+        const tid = ev.thread_id || '';
+        const m = ev.method;
+        if (m === 'thread_rename') {
+            this.setState(({ threads }) => ({
+                threads: { ...threads, [ev.uuid]: ev.name },
+            }));
+            return;
+        }
+        if (m === 'send_processing') {
+            this.setState(({ processingByThread }) => ({
+                processingByThread: { ...processingByThread, [tid]: !!ev.active },
+            }));
+            return;
+        }
+        this._dialogs[tid]?.handleEvent(ev);
+    }    
 
     _persist() {
         if (this.props.threadsEnabled === false) return;
@@ -51,8 +105,8 @@ export class Chat extends Component {
     };
 
     _onCloseTab = (id) => {
-        const next = this.state.tabs.filter(t => t.id !== id);
-        const active = this.state.activeTab === id ? (next[0]?.id || '') : this.state.activeTab;
+        const next = this.state.tabs.filter(t => t !== id);
+        const active = this.state.activeTab === id ? (next[0] || '') : this.state.activeTab;
         this.setState(({ processingByThread }) => {
             const p = { ...processingByThread }; delete p[id];
             return { tabs: next, activeTab: active, processingByThread: p };
@@ -64,29 +118,28 @@ export class Chat extends Component {
         // → Agent.start) или явном rename. Закрытие пустого таба не оставит хвостов.
         const id = (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/-/g, '').slice(0, 8);
         this.setState({
-            tabs: [...this.state.tabs, { id, label: '' }],
+            tabs: [...this.state.tabs, id],
             activeTab: id,
         }, () => this._persist());
     };
 
     _onRenameTab = (id) => {
-        const cur = this.state.tabs.find(t => t.id === id);
-        const name = prompt('Имя треда:', cur?.label || '');
-        if (name == null || name === cur?.label) return;
+        const cur = this.state.threads[id] || '';
+        const name = prompt('Имя треда:', cur);
+        if (name == null || name === cur) return;
         this.props.app.send({ type: 'transport', method: 'thread_rename', uuid: id, name });
     };
 
     _openTabFromHistory = (id) => {
-        const label = this.state.threads[id] || '';
         this.setState({
-            tabs: [...this.state.tabs, { id, label }],
+            tabs: [...this.state.tabs, id],
             activeTab: id,
         }, () => this._persist());
         Dialog.close();
     };
 
     _onShowHistory = () => {
-        const openIds = new Set(this.state.tabs.map(t => t.id));
+        const openIds = new Set(this.state.tabs);
         const closed = Object.entries(this.state.threads).filter(([id]) => !openIds.has(id));
         Dialog.open(html`
             <div class=${cl.historyHeader}>История тредов</div>
@@ -113,35 +166,17 @@ export class Chat extends Component {
         else delete this._dialogs[id];
     };
 
-    handleMessage(ev) {
-        const tid = ev.thread_id || '';
-        const m = ev.method;
-        if (m === 'thread_rename') {
-            this.setState(({ tabs, threads }) => ({
-                tabs: tabs.map(t => t.id === ev.uuid ? { ...t, label: ev.name } : t),
-                threads: { ...threads, [ev.uuid]: ev.name },
-            }), () => this._persist());
-            return;
-        }
-        if (m === 'send_processing') {
-            this.setState(({ processingByThread }) => ({
-                processingByThread: { ...processingByThread, [tid]: !!ev.active },
-            }));
-            return;
-        }
-        // Всё остальное — внутрь конкретного диалога. Если таб не открыт,
-        // событие отбрасывается: бэкенд уже записал его в WEB_<tid>.json,
-        // так что при открытии таба ChatDialog подтянет историю с диска.
-        this._dialogs[tid]?.handleEvent(ev);
-    }
-
-    render({ connected, className, threadsEnabled = true }, { tabs, activeTab, processingByThread }) {
-        const tabsRender = tabs.map(t => ({
-            id: t.id,
-            tooltip: t.id || '(primary)',
-            label: html`<span class=${t.label ? '' : cl.untitled}>${t.label || 'Untitled'}</span>${processingByThread[t.id] ? html`<span class=${cl.tabSpinner}></span>` : null}`,
-            closable: threadsEnabled,
-        }));
+    render({ connected, className, threadsEnabled = true }, { tabs, activeTab, processingByThread, threads, ready }) {
+        if (!ready) return null;
+        const tabsRender = tabs.map(id => {
+            const name = threads[id] || '';
+            return {
+                id,
+                tooltip: id || '(primary)',
+                label: html`<span class=${name ? '' : cl.untitled}>${name || 'Untitled'}</span>${processingByThread[id] ? html`<span class=${cl.tabSpinner}></span>` : null}`,
+                closable: threadsEnabled,
+            };
+        });
         return html`
             <div class="${cl.chat} ${className || ''}">
                 <div class=${cl.tabBar}>
@@ -153,14 +188,14 @@ export class Chat extends Component {
                         <button class=${cl.headerBtn} title="История тредов" onClick=${this._onShowHistory}>${ICON_CLOCK}</button>
                         <button class=${cl.headerBtn} title="Новый тред" onClick=${this._onAddTab}>${ICON_PLUS}</button>`}
                 </div>
-                ${tabs.map(t => html`
+                ${tabs.map(id => html`
                     <${ChatDialog}
-                        key=${t.id}
-                        ref=${this._setDialogRef(t.id)}
+                        key=${id}
+                        ref=${this._setDialogRef(id)}
                         connected=${connected}
-                        className=${t.id === activeTab ? '' : cl.hidden}
-                        threadId=${t.id}
-                        onSend=${this._onSend(t.id)} />`)}
+                        className=${id === activeTab ? '' : cl.hidden}
+                        threadId=${id}
+                        onSend=${this._onSend(id)} />`)}
             </div>
         `;
     }

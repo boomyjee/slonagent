@@ -139,16 +139,48 @@ export class ChatDialog extends Component {
             attachments: [],     // [{kind: 'image'|'audio'|'file_text'|'file_meta', ...}]
             recording: false,
             palette: null,       // {items: [{cmd, desc}], selected: int} when /-popup visible
+            ready: false,        // false до завершения history fetch
         };
         this._recorder = null;
-        // Sticky-bottom flag. Starts true so initial buffer replay (where
-        // scrollTop=0 but scrollHeight is already huge) still snaps down.
-        // Flipped off when the user scrolls up, back on when they scroll
-        // to within 120px of the bottom.
+        // Sticky-bottom flag.
         this._stick = true;
+        this._lastSeenId = -1;
     }
 
+    componentDidMount() {
+        // Snap down once the initial buffer replay has rendered.
+        if (this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
+        this._fetchHistory();
+    }    
+
+    async _fetchHistory() {
+        let events = [];
+        try {
+            const r = await fetch(`api/history?thread_id=${encodeURIComponent(this.props.threadId || '')}`);
+            if (r.ok) ({ events } = await r.json());
+        } catch (e) {
+            console.warn('history fetch failed', e);
+        }
+        for (const e of events || []) {
+            if (e.id != null && e.id > this._lastSeenId) this._lastSeenId = e.id;
+        }
+        this.setState(prev => ({
+            ...(events || []).reduce((s, e) => this._reduce(s, e), prev),
+            ready: true,
+        }));
+    }    
+
+    componentDidUpdate() {
+        // Honor the sticky-bottom flag — proximity is recomputed only on user scroll
+        if (this._stick && this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
+        if (this.state.ready && this._pending?.length)
+            for (const ev of this._pending.splice(0)) this.handleEvent(ev);
+    }    
+
     handleEvent(ev) {
+        if (!this.state.ready) return (this._pending ??= []).push(ev);
+        if (ev.id != null && ev.id <= this._lastSeenId) return;
+        if (ev.id != null) this._lastSeenId = ev.id;
         this.setState(prev => this._reduce(prev, ev));
     }
 
@@ -242,17 +274,6 @@ export class ChatDialog extends Component {
         return this._push(state, { kind: 'msg', role: 'user', items: preview, pending: true });
     }
 
-    async _fetchHistory() {
-        try {
-            const r = await fetch(`api/history?thread_id=${encodeURIComponent(this.props.threadId || '')}`);
-            if (!r.ok) return;
-            const { events } = await r.json();
-            this.setState(prev => (events || []).reduce((s, e) => this._reduce(s, e), prev));
-        } catch (e) {
-            console.warn('history fetch failed', e);
-        }
-    }
-
     _onScroll = () => {
         const el = this._scroll;
         if (!el) return;
@@ -335,13 +356,6 @@ export class ChatDialog extends Component {
             this._submit();
         }
     };
-
-    componentDidMount() {
-        // Snap down once the initial buffer replay has rendered.
-        if (this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
-        this._fetchHistory();
-    }
-
 
     _sendOption(opt) {
         // Юзер кликнул кнопку suggestion — отправляем её текст как обычное сообщение.
@@ -607,12 +621,7 @@ export class ChatDialog extends Component {
         `;
     }
 
-    componentDidUpdate() {
-        // Honor the sticky-bottom flag — proximity is recomputed only on user
-        // scroll, not on every render, so in-flight updates that grow
-        // scrollHeight past the threshold don't disable autoscroll.
-        if (this._stick && this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
-    }
+
 }
 
 // --- styles ---
