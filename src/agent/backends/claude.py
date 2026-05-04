@@ -407,15 +407,18 @@ class ClaudeBackend(BaseBackend):
                                 "_uuid": message.uuid,
                             })
                         elif isinstance(block, ToolUseBlock):
-                            await agent.transport.on_tool_call(block.name, block.input)
-                            tool_use_names[block.id] = block.name
+                            # MCP-обёртки наших скиллов прилетают как mcp__slon__<name>,
+                            # внутренний учёт ведём по короткому имени.
+                            name = block.name.removeprefix("mcp__slon__")
+                            await agent.transport.on_tool_call(name, block.input)
+                            tool_use_names[block.id] = name
                             turns.append({
                                 "role": "assistant",
                                 "tool_calls": [{
                                     "id": block.id,
                                     "type": "function",
                                     "function": {
-                                        "name": block.name,
+                                        "name": name,
                                         "arguments": json.dumps(block.input, ensure_ascii=False),
                                     },
                                 }],
