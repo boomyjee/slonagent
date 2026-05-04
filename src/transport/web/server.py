@@ -9,7 +9,7 @@ WebTransport-инстансы регистрируют свои URL через `
 по url, чтоб одни и те же fork-уровневые роуты делил несколько инстансов
 одного форка)."""
 
-import asyncio, base64, contextlib, hashlib, logging, os, sys
+import asyncio, base64, contextlib, hashlib, logging, os, re, sys
 from datetime import date, timedelta
 
 from fastapi import FastAPI, Request, WebSocket
@@ -39,6 +39,7 @@ class WebTransportServer:
     _password_hash: str = ""
     _tunnel_url: str | None = None
     _tunnel_ready: asyncio.Event | None = None
+    _spawn_locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
     def register_route(cls, method: str, url: str, handler, auth: bool = True):
@@ -117,6 +118,27 @@ class WebTransportServer:
         _NO_PASSWORD = PlainTextResponse(
             "No password configured. Set password_hash in config.", status_code=503,
         )
+
+        # Регистрируем ДО auth_middleware: Starlette крутит middleware в
+        # обратном порядке регистрации, поэтому auth (зарегистрирован позже)
+        # будет outer, lazy_spawn — inner. Спавним только после успешной auth.
+        @cls._app.middleware("http")
+        async def lazy_spawn(request: Request, call_next):
+            # /<id>/... → ensure агент поднят (thread_id=""). make_agent сам
+            # кэширует и возвращает None для несуществующих папок, нам
+            # достаточно сериализовать одновременные запросы локом. main
+            # поднимается из main.py при старте — здесь его не трогаем.
+            m = re.match(r"^/([^/]+)/", request.url.path)
+            if m and (agent_id := m.group(1)) != "main":
+                from src.transport.web import WebTransport
+                if WebTransport.make_agent is not None:
+                    lock = cls._spawn_locks.setdefault(agent_id, asyncio.Lock())
+                    async with lock:
+                        try:
+                            await WebTransport.make_agent(agent_id, "")
+                        except Exception:
+                            logging.exception("[lazy-spawn] failed for %s", agent_id)
+            return await call_next(request)
 
         @cls._app.middleware("http")
         async def auth_middleware(request: Request, call_next):
