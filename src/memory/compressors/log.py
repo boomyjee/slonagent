@@ -631,8 +631,7 @@ class LogCompressor(BaseProvider):
                  max_recent_turns_tokens: int = 50_000,
                  compress_after_tokens: int = 30_000,
                  reflect_after_tokens: int  = 40_000):
-        super().__init__()
-        self._compress_after_tokens = compress_after_tokens
+        super().__init__(consolidate_tokens=compress_after_tokens)
         self._reflect_after_tokens  = reflect_after_tokens
         self._recent_tokens         = recent_tokens
         self._min_recent_turns      = min_recent_turns
