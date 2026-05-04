@@ -164,10 +164,13 @@ export class ChatDialog extends Component {
         if (m === 'send_message') {
             return this._stream(state, sk, ev, { kind: 'msg', role: 'assistant' });
         }
-        if (m === 'send_thinking' || m === 'send_memory_info') {
-            const kind = m === 'send_memory_info' ? 'memory' : 'thinking';
-            const k2 = sk && (kind === 'memory' ? `m_${sk}` : `t_${sk}`);
-            return this._stream(state, k2, ev, { kind });
+        if (m === 'send_thinking') {
+            return this._stream(state, sk && `t_${sk}`, ev, { kind: 'thinking' });
+        }
+        if (m === 'send_memory_info') {
+            // Memory observations are single-shot (no stream/final field
+            // in the event). Mark final=true so the bubble can collapse.
+            return this._push(state, { kind: 'memory', text: ev.text, final: true });
         }
         if (m === 'on_tool_call') {
             return this._push(state, { kind: 'tool', name: ev.name, args: ev.args, result: null });

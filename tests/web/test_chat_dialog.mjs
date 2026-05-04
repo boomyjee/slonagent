@@ -5,7 +5,7 @@
 // through its public surface (handleEvent / _send), and assert on both
 // component state and the rendered DOM.
 
-import { mockResponse } from './_dom.mjs';
+import { mockResponse, fireMouse } from './_dom.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -107,21 +107,45 @@ test('two parallel streams render as two separate messages', async () => {
     assert.deepEqual(texts, ['A1A2', 'B1B2']);
 });
 
-test('thinking and memory with the same stream_id do not collide', async () => {
+test('thinking and memory render as distinct bubbles', async () => {
     const { dialog, container } = mount();
     await fire(dialog,
-        ev('send_thinking',    { text: 'thought-1', stream_id: 1, final: false }),
-        ev('send_memory_info', { text: 'memo-1',    stream_id: 1, final: false }),
-        ev('send_thinking',    { text: 'thought-2', stream_id: 1, final: true  }),
-        ev('send_memory_info', { text: 'memo-2',    stream_id: 1, final: true  }),
+        ev('send_thinking',    { text: 'thought-2', stream_id: 1, final: true }),
+        ev('send_memory_info', { text: 'memo-2' }),
     );
     assert.equal(dialog.state.messages.length, 2);
-    // CSS class signals which is which (cl.msg + .thinking, optionally + .memory).
     const thinkingNodes = [...container.querySelectorAll('.thinking')];
     const memoryNode    = thinkingNodes.find(n => n.className.includes('memory'));
     const thinkingOnly  = thinkingNodes.find(n => !n.className.includes('memory'));
     assert.match(thinkingOnly.textContent, /thought-2/);
     assert.match(memoryNode.textContent, /memo-2/);
+});
+
+test('send_memory_info entries are marked final so they can collapse', async () => {
+    const { dialog, container } = mount();
+    await fire(dialog, ev('send_memory_info', { text: 'observation' }));
+    // The reducer must stamp final=true even though the event omits it —
+    // render uses m.final to gate the .collapsed CSS class.
+    assert.equal(dialog.state.messages[0].final, true);
+    const node = container.querySelector('.memory');
+    assert.ok(node);
+    assert.ok(node.className.includes('collapsed'),
+        `expected memory bubble to be collapsed, got class=${node.className}`);
+});
+
+test('clicking a collapsed memory bubble expands it (and back)', async () => {
+    const { dialog, container } = mount();
+    await fire(dialog, ev('send_memory_info', { text: 'observation' }));
+    const node = container.querySelector('.memory');
+    assert.ok(node.className.includes('collapsed'));
+    fireMouse(node, 'click');
+    await flush();
+    const after = container.querySelector('.memory');
+    assert.ok(!after.className.includes('collapsed'));
+    fireMouse(after, 'click');
+    await flush();
+    const reCollapsed = container.querySelector('.memory');
+    assert.ok(reCollapsed.className.includes('collapsed'));
 });
 
 test('streams unaffected by interleaved non-stream events', async () => {
