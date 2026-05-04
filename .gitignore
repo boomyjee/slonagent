@@ -45,6 +45,9 @@ desktop.ini
 
 .agent.pid
 
+# Node — корень тестов и зависимости jsdom живут в tests/web
+tests/web/node_modules/
+
 # Отчёты скриптов
 /*.html
 

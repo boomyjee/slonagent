@@ -120,12 +120,21 @@ const ICON_SEND = html`
     </svg>`;
 
 
-// Один диалог = один тред. messages приходит пропом; внутри хранится только
-// UI-состояние (input, attachments, palette, recording).
+// Один диалог = один тред. Владеет своим списком сообщений и стрим-индексом
+// (messages/streams в state); Chat выше — лишь маршрутизатор: прокидывает
+// входящие события в handleEvent. История подгружается на mount по thread_id.
+//
+// state.messages — массив элементов, каждый со своим kind:
+//   msg | thinking | memory | tool | media | suggestions
+// state.streams — { streamKey → idx в messages } для апдейтов on-the-fly:
+//   `${stream_id}` для send_message, `t_${stream_id}` для thinking,
+//   `m_${stream_id}` для memory_info. Индекс держим, чтоб расти в одном
+//   и том же сообщении на каждый чанк, а не плодить новые.
 export class ChatDialog extends Component {
     constructor(props) {
         super(props);
         this.state = {
+            messages: [], streams: {},
             input: '', expanded: {},
             attachments: [],     // [{kind: 'image'|'audio'|'file_text'|'file_meta', ...}]
             recording: false,
@@ -137,6 +146,108 @@ export class ChatDialog extends Component {
         // Flipped off when the user scrolls up, back on when they scroll
         // to within 120px of the bottom.
         this._stick = true;
+    }
+
+    handleEvent(ev) {
+        this.setState(prev => this._reduce(prev, ev));
+    }
+
+    // Чистая (state, ev) → state редукция. Без `this`/DOM/setState — поэтому
+    // вызывается и из handleEvent (live), и из _fetchHistory (батч событий
+    // с диска), и напрямую из тестов. Возвращает старый state без копии,
+    // если событие безымённое или нет работы — Preact это понимает.
+    _reduce(state, ev) {
+        const m = ev.method;
+        const sid = ev.stream_id;
+        const sk = sid != null ? String(sid) : null;
+
+        if (m === 'send_message') {
+            return this._stream(state, sk, ev, { kind: 'msg', role: 'assistant' });
+        }
+        if (m === 'send_thinking' || m === 'send_memory_info') {
+            const kind = m === 'send_memory_info' ? 'memory' : 'thinking';
+            const k2 = sk && (kind === 'memory' ? `m_${sk}` : `t_${sk}`);
+            return this._stream(state, k2, ev, { kind });
+        }
+        if (m === 'on_tool_call') {
+            return this._push(state, { kind: 'tool', name: ev.name, args: ev.args, result: null });
+        }
+        if (m === 'on_tool_result') {
+            const i = state.messages.findLastIndex(x =>
+                x.kind === 'tool' && x.name === ev.name && x.result == null);
+            if (i < 0) return state;
+            const messages = state.messages.slice();
+            messages[i] = { ...messages[i], result: ev.result };
+            return { ...state, messages };
+        }
+        if (m === 'send_system_prompt') {
+            const preview = (ev.text || '').split('\n')[0].slice(0, 80);
+            return this._push(state, { kind: 'tool', name: preview, args: null, result: ev.text });
+        }
+        if (m === 'inject_message') {
+            return this._push(state, { kind: 'msg', role: 'inject', text: ev.text });
+        }
+        if (m === 'send_images') {
+            return this._push(state, { kind: 'media', media: 'images', items: ev.items || [] });
+        }
+        if (m === 'send_files') {
+            return this._push(state, { kind: 'media', media: 'files', items: ev.items || [] });
+        }
+        if (m === 'send_voice') {
+            return this._push(state, { kind: 'media', media: 'voice', items: [ev.item] });
+        }
+        if (m === 'send_suggestions') {
+            return this._push(state, { kind: 'suggestions', text: ev.text || '', options: ev.options || [] });
+        }
+        if (m === 'process_message') {
+            const items = [];
+            for (const p of (ev.content_parts || [])) {
+                if (p.type === 'text') items.push({ kind: 'text', text: p.text });
+                else if (p.type === 'image_url') items.push({ kind: 'image', url: (p.image_url || {}).url });
+            }
+            if (!items.length) return state;
+            const pi = state.messages.findLastIndex(x => x.pending);
+            if (pi !== -1) {
+                const messages = state.messages.slice();
+                messages[pi] = { kind: 'msg', role: 'user', items };
+                return { ...state, messages };
+            }
+            return this._push(state, { kind: 'msg', role: 'user', items });
+        }
+        return state;
+    }
+
+    _push(state, msg) {
+        return { ...state, messages: [...state.messages, msg] };
+    }
+
+    _stream(state, sk, ev, base) {
+        if (sk && state.streams[sk] != null) {
+            const idx = state.streams[sk];
+            const messages = state.messages.slice();
+            messages[idx] = { ...messages[idx], text: ev.text, final: ev.final };
+            return { ...state, messages };
+        }
+        const messages = [...state.messages, { ...base, text: ev.text, stream_id: ev.stream_id, final: ev.final }];
+        if (sk) {
+            return { ...state, messages, streams: { ...state.streams, [sk]: messages.length - 1 } };
+        }
+        return { ...state, messages };
+    }
+
+    _addPending(state, preview) {
+        return this._push(state, { kind: 'msg', role: 'user', items: preview, pending: true });
+    }
+
+    async _fetchHistory() {
+        try {
+            const r = await fetch(`api/history?thread_id=${encodeURIComponent(this.props.threadId || '')}`);
+            if (!r.ok) return;
+            const { events } = await r.json();
+            this.setState(prev => (events || []).reduce((s, e) => this._reduce(s, e), prev));
+        } catch (e) {
+            console.warn('history fetch failed', e);
+        }
     }
 
     _onScroll = () => {
@@ -225,12 +336,18 @@ export class ChatDialog extends Component {
     componentDidMount() {
         // Snap down once the initial buffer replay has rendered.
         if (this._scroll) this._scroll.scrollTop = this._scroll.scrollHeight;
+        this._fetchHistory();
     }
 
 
     _sendOption(opt) {
         // Юзер кликнул кнопку suggestion — отправляем её текст как обычное сообщение.
-        this.props.onSubmit?.([{ type: 'text', text: opt }], [{ kind: 'text', text: opt }]);
+        this._send([{ type: 'text', text: opt }], [{ kind: 'text', text: opt }]);
+    }
+
+    _send(parts, preview) {
+        this.props.onSend?.(parts);
+        this.setState(prev => this._addPending(prev, preview));
     }
 
     _submit() {
@@ -250,7 +367,7 @@ export class ChatDialog extends Component {
         if (text) preview.push({ kind: 'text', text });
         else if (att.length) preview.push({ kind: 'text', text: '⏳ Отправка...' });
 
-        this.props.onSubmit?.(parts, preview);
+        this._send(parts, preview);
         this._allCmds = null;
         this._paletteDismissed = false;
         this.setState({ input: '', attachments: [], palette: null });
@@ -349,7 +466,7 @@ export class ChatDialog extends Component {
         return JSON.stringify(result, null, 2);
     }
 
-    render({ connected, className, messages = [] }, { input, expanded }) {
+    render({ connected, className }, { input, expanded, messages }) {
         return html`
             <div class="${cl.dialog} ${className || ''}">
                 <div class=${cl.messages} ref=${el => this._scroll = el} onScroll=${this._onScroll}>

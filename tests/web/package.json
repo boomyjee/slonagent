@@ -1,0 +1,11 @@
+{
+  "name": "slonagent-web-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test_*.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
