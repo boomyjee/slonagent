@@ -1,7 +1,10 @@
-import { html, Component, css, keyframes } from '../../lib.js';
+import { html, Component, css, keyframes, createContext } from '../../lib.js';
 import { Lightbox } from './Lightbox.js';
 
 const cl = {};
+
+
+export const IdeContext = createContext(null);
 
 // Minimal markdown → HTML, mirrors src/transport/telegram.py:_markdown_to_html.
 // Code spans/blocks are stashed first so their contents don't get re-formatted.
@@ -142,6 +145,8 @@ const ICON_SEND = html`
 //   `m_${stream_id}` для memory_info. Индекс держим, чтоб расти в одном
 //   и том же сообщении на каждый чанк, а не плодить новые.
 export class ChatDialog extends Component {
+    static contextType = IdeContext;
+
     constructor(props) {
         super(props);
         this.state = {
@@ -382,18 +387,25 @@ export class ChatDialog extends Component {
         const text = this.state.input.trim();
         const att = this.state.attachments;
         if (!text && !att.length) return;
-        const parts = att.map(a => ({
-            type: 'file', data: a.base64, mime: a.mime, name: a.name, size: a.size,
-        }));
-        if (text) parts.push({ type: 'text', text });
-        // Превью pending-сообщения: картинки + текст. Сервер echo'нёт
-        // process_message и заменит pending-плэйсхолдер.
+        const parts = [];
         const preview = [];
+        const ide = this.context;
+        // /-команды — это bypass'ы (skill bypass_commands), агенту они не идут, прицеплять туда ide-контекст нет смысла.
+        if (ide?.selection && ide.enabled && !text.startsWith('/')) {
+            const tag = ChatDialog._formatIdeTag(ide.selection);
+            parts.push({ type: 'text', text: tag });
+            preview.push({ kind: 'text', text: tag });
+        }
         for (const a of att) {
+            parts.push({ type: 'file', data: a.base64, mime: a.mime, name: a.name, size: a.size });
             if ((a.mime || '').startsWith('image/')) preview.push({ kind: 'image', url: a.base64url || ('data:' + a.mime + ';base64,' + a.base64) });
         }
-        if (text) preview.push({ kind: 'text', text });
-        else if (att.length) preview.push({ kind: 'text', text: '⏳ Отправка...' });
+        if (text) {
+            parts.push({ type: 'text', text });
+            preview.push({ kind: 'text', text });
+        } else if (att.length) {
+            preview.push({ kind: 'text', text: '⏳ Отправка...' });
+        }
 
         this._send(parts, preview);
         this._allCmds = null;
@@ -472,6 +484,52 @@ export class ChatDialog extends Component {
         }));
     }
 
+    static _formatIdeTag(ide) {
+        if (!ide) return '';
+        if (ide.startLine != null) {
+            return `<ide_selection>The user selected the lines ${ide.startLine} to ${ide.endLine} from ${ide.file}:\n${ide.text}\n\nThis may or may not be related to the current task.</ide_selection>`;
+        }
+        return `<ide_opened_file>The user opened the file ${ide.file} in the IDE. This may or may not be related to the current task.</ide_opened_file>`;
+    }
+
+    static _ideChipLabel(ide) {
+        if (!ide) return '';
+        const name = ide.file.split('/').pop();
+        if (ide.startLine != null) {
+            const range = ide.startLine === ide.endLine ? `L${ide.startLine}` : `L${ide.startLine}-${ide.endLine}`;
+            return `${name} ${range}`;
+        }
+        return name;
+    }
+
+    // Распознаёт ide-теги в тексте user-item'а — нужно рендеру баббла, чтоб
+    // вместо raw <ide_*>...</...> показать чип.
+    static _parseIdeTag(text) {
+        const sel = text.match(/^<ide_selection>The user selected the lines (\d+) to (\d+) from ([^:]+):\n([\s\S]*?)\n\nThis may or may not be related to the current task\.<\/ide_selection>$/);
+        if (sel) return { file: sel[3], startLine: +sel[1], endLine: +sel[2], text: sel[4] };
+        const opened = text.match(/^<ide_opened_file>The user opened the file (.+?) in the IDE\. This may or may not be related to the current task\.<\/ide_opened_file>$/);
+        if (opened) return { file: opened[1] };
+        return null;
+    }
+
+    // Один item в user-баббле: картинка, ide-tag (chip + collapsible code) или
+    // обычный markdown-текст. i — индекс сообщения, j — индекс item'а внутри;
+    // пара нужна как ключ для `expanded`-стейта (раскрыт ли code-блок чипа).
+    _renderUserItem(it, i, j, expanded) {
+        if (it.kind === 'image') return html`<img src=${it.url} class=${cl.thumb} />`;
+        const ide = ChatDialog._parseIdeTag(it.text || '');
+        if (!ide) return html`<div dangerouslySetInnerHTML=${{__html: mdToHtml(it.text)}}></div>`;
+        const key = `${i}:${j}`;
+        const open = expanded[key];
+        return html`
+            <div class="${cl.chip} ${cl.ideBubbleChip}" title=${ide.file}
+                 onClick=${() => ide.text && this.setState(({ expanded: e }) => ({ expanded: { ...e, [key]: !open } }))}>
+                <span class=${cl.chipIcon}>📎</span>
+                <span class=${cl.chipName}>${ChatDialog._ideChipLabel(ide)}</span>
+            </div>
+            ${open && ide.text && html`<pre class=${cl.ideExpand}><code>${ide.text}</code></pre>`}`;
+    }
+
     _formatArgs(args) {
         if (!args) return '';
         const fmt = v => typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
@@ -504,9 +562,7 @@ export class ChatDialog extends Component {
                             // одна text-строка от send_message stream.
                             if (m.items) return html`
                                 <div class="${cl.msg} ${m.role}${m.pending ? ' pending' : ''}">
-                                    ${m.items.map(it => it.kind === 'image'
-                                        ? html`<img src=${it.url} class=${cl.thumb} />`
-                                        : html`<div dangerouslySetInnerHTML=${{__html: mdToHtml(it.text)}}></div>`)}
+                                    ${m.items.map((it, j) => this._renderUserItem(it, i, j, expanded))}
                                 </div>
                             `;
                             return html`
@@ -595,6 +651,13 @@ export class ChatDialog extends Component {
                     </div>
                 `}
                 <div class=${cl.input}>
+                    ${this.context?.selection && html`
+                        <div class="${cl.idePill} ${this.context.enabled ? '' : cl.idePillOff}"
+                             title=${this.context.selection.file + ' · клик переключает прикрепление к сообщениям'}
+                             onMouseDown=${e => e.preventDefault()}
+                             onClick=${() => { this.context.enabled = !this.context.enabled; this.context.change(); }}>
+                            <span>${ChatDialog._ideChipLabel(this.context.selection)}</span>
+                        </div>`}
                     ${this.state.palette && html`
                         <div class=${cl.palette}>
                             ${this.state.palette.items.map((item, i) => html`
@@ -746,6 +809,34 @@ cl.chipRemove = css`
   background: none; border: none; color: var(--text-dim); cursor: pointer;
   padding: 0 2px; font-size: 16px; line-height: 1;
   &:hover { color: var(--text); }
+`;
+cl.idePill = css`
+  position: absolute; top: -10px; right: 45px; z-index: 5;
+  padding: 1px 8px;
+  background: var(--surface);
+  color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 10px;
+  font-size: 10px; font-family: monospace;
+  cursor: pointer; user-select: none;
+  &:hover { background: var(--surface2); }
+`;
+cl.idePillOff = css`
+  color: var(--text-dim) !important;
+  border-color: var(--border) !important;
+`;
+cl.ideBubbleChip = css`
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px; margin: 2px 0;
+  background: rgba(137, 180, 250, 0.15);
+  border: 1px solid var(--accent); border-radius: 4px;
+  font-size: 11px; cursor: pointer; color: var(--text);
+  font-family: monospace;
+  &:hover { background: rgba(137, 180, 250, 0.25); }
+`;
+cl.ideExpand = css`
+  background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 4px;
+  margin: 4px 0; max-height: 240px; overflow: auto;
+  font-family: monospace; font-size: 12px; white-space: pre;
 `;
 cl.thumb = css`
   max-width: 240px; max-height: 240px; border-radius: 4px;

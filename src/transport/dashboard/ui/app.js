@@ -1,5 +1,6 @@
 import { render, html, Component, css, persist } from './lib.js';
 import { Chat } from './components/common/Chat.js';
+import { IdeContext } from './components/common/ChatDialog.js';
 import { Resizer } from './components/common/Resizer.js';
 import { FileTree, refreshTree, setTreeScope, isInGitRepo } from './components/FileTree.js';
 import { openChangeRootDialog } from './components/ChangeRootDialog.js';
@@ -45,6 +46,17 @@ class App extends Component {
             // CSS @media drives viewport-based layout; this state only
             // says which pane is active when the viewport is mobile.
             mobileView: persist.get('dashboard.mobileView', 'editor'),
+            // IDE-контекст: bag, в который consumer'ы пишут напрямую и зовут
+            // change(). Тот персистит enabled и пересоздаёт bag с новой
+            // ссылкой через setState, чтоб Preact-context propagation сработал.
+            ideContext: {
+                selection: null,
+                enabled: persist.get('ide.enabled', true),
+                change: () => {
+                    persist.set('ide.enabled', this.state.ideContext.enabled);
+                    this.setState(({ ideContext }) => ({ ideContext: { ...ideContext } }));
+                },
+            },
         };
         this._chat = null;
         this._editor = null;
@@ -314,13 +326,14 @@ class App extends Component {
         }));
     };
 
-    render(_, { connected, root, rootKey, tabs, activeTab, logs, gitRefreshKey, mobileView }) {
+    render(_, { connected, root, rootKey, tabs, activeTab, logs, gitRefreshKey, mobileView, ideContext }) {
         const isLogs = activeTab === 'logs';
         const isGit = activeTab.startsWith('git:');
         const isUrl = activeTab.startsWith('url:');
         const activeFile = !isLogs && !isGit && !isUrl ? activeTab : null;
         this._webViews = this._webViews || {};
         return html`
+            <${IdeContext.Provider} value=${ideContext}>
             <div class="${cl.app} mobile-${mobileView}">
                 <div class="${cl.sidebar} dash-sidebar">
                     <div class=${cl.sidebarHdr}>Explorer</div>
@@ -378,6 +391,7 @@ class App extends Component {
                                 onClick=${() => this._setMobileView(k)}>${label}</button>`)}
                 </div>
             </div>
+            </${IdeContext.Provider}>
         `;
     }
 }

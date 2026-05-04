@@ -1,5 +1,6 @@
 import { html, Component, css, persist } from '../lib.js';
 import { api, currentRoot } from './api.js';
+import { IdeContext } from './common/ChatDialog.js';
 
 const cl = {};
 const LANG = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'typescript',json:'json',md:'markdown',html:'html',css:'css',yaml:'yaml',yml:'yaml',sh:'shell',bash:'shell',rs:'rust',go:'go',java:'java',rb:'ruby',c:'c',cpp:'cpp',h:'c',hpp:'cpp',toml:'ini',cfg:'ini',txt:'plaintext'};
@@ -90,6 +91,8 @@ function loadMonaco() {
 // active model via the `active` prop. Parent gets dirty/disk-changed
 // state through `onDirtyChange(path, dirty, diskChanged)`.
 export class Editor extends Component {
+    static contextType = IdeContext;
+
     constructor(props) {
         super(props);
         this.state = { ready: false, mediaPath: null };
@@ -103,6 +106,7 @@ export class Editor extends Component {
             minimap: { enabled: true }, fontSize: 13,
             automaticLayout: true, scrollBeyondLastLine: false,
         });
+        this._editor.onDidChangeCursorSelection(() => this._emitIdeContext());
         this.setState({ ready: true });
         this._handleActive();
         // Persist scroll/cursor on F5/close — _handleActive only fires on
@@ -161,7 +165,7 @@ export class Editor extends Component {
         this._lastActive = this.props.active;
 
         const path = this.props.active;
-        if (!path) return;
+        if (!path) { this._emitIdeContext(); return; }
         // Only real workspace paths render as media — virtual schemes
         // (git-show:, git-blame:) keep going through the monaco loader.
         const isFilePath = path.startsWith('/');
@@ -174,6 +178,29 @@ export class Editor extends Component {
             if (this.state.mediaPath) this.setState({ mediaPath: null });
             this._activate(path);
         }
+        this._emitIdeContext();
+    }
+
+    // Пишет текущий selection в IdeContext-bag и зовёт change(). Что попадает:
+    // рабочий файл с опциональным выделением, либо null для не-файловых табов.
+    // file — абсолютный host-путь (currentRoot + project-relative), чтоб LLM
+    // знал куда смотреть; sandbox-агент при необходимости транслирует сам.
+    _emitIdeContext() {
+        const ide = this.context;
+        if (!ide) return;
+        const path = this._lastActive;
+        const set = sel => { ide.selection = sel; ide.change(); };
+        const fullPath = () => ((currentRoot() || '') + path).replace(/\\/g, '/');
+        if (!path || !path.startsWith('/') || mediaKind(path)) return set(null);
+        if (!this._editor || !this._editor.getModel()) return set({ file: fullPath() });
+        const sel = this._editor.getSelection();
+        if (!sel || sel.isEmpty()) return set({ file: fullPath() });
+        set({
+            file: fullPath(),
+            startLine: sel.startLineNumber,
+            endLine: sel.endLineNumber,
+            text: this._editor.getModel().getValueInRange(sel),
+        });
     }
 
     _applyTabOptions(tab) {
