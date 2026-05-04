@@ -269,9 +269,6 @@ class ClaudeBackend(BaseBackend):
         state = self._load_state()
         session_id = state.get("session_id") or str(uuid.uuid4())
 
-        # Триггер компрессии — обновит OM_turn в _turns
-        await agent.memory.get_contents()
-
         # Если у claude'а в jsonl есть старые turn'ы которых уже нет в нашей
         # памяти — вычищаем (наша компрессия должна резать клода тоже, иначе
         # его собственный autocompact пробьётся и стирает почти всё).
@@ -372,9 +369,11 @@ class ClaudeBackend(BaseBackend):
             log.info("[claude_agent] reusing live claude")
 
         pending = []
-        for t in reversed(agent.memory._turns):
+        contents = await agent.memory.get_contents()
+        for t in reversed(contents):
             if not isinstance(t, dict) or t.get("role") != "user": break
             pending.insert(0, t)
+        pending = self.agent.strip_contents_private(pending)
 
         if not pending:
             raise RuntimeError("ClaudeBackend.llm(): нет user-турнов в хвосте памяти — нечего слать")
