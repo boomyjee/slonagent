@@ -49,36 +49,36 @@ function loadMonaco() {
             window.require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs' }});
             window.require(['vs/editor/editor.main'], () => resolve(window.monaco));
         });
-        monaco.editor.defineTheme('catppuccin', {
+        monaco.editor.defineTheme('vs-slon', {
             base: 'vs-dark',
             inherit: true,
             rules: [
-                { token: 'comment', foreground: '6c7086', fontStyle: 'italic' },
-                { token: 'keyword', foreground: 'cba6f7' },
-                { token: 'string', foreground: 'a6e3a1' },
-                { token: 'number', foreground: 'fab387' },
-                { token: 'type', foreground: 'f9e2af' },
-                { token: 'function', foreground: '89b4fa' },
-                { token: 'variable', foreground: 'cdd6f4' },
-                { token: 'operator', foreground: '89dceb' },
-                { token: 'delimiter', foreground: '9399b2' },
+                { token: 'comment', foreground: '6a9955', fontStyle: 'italic' },
+                { token: 'keyword', foreground: '569cd6' },
+                { token: 'string', foreground: 'ce9178' },
+                { token: 'number', foreground: 'b5cea8' },
+                { token: 'type', foreground: '4ec9b0' },
+                { token: 'function', foreground: 'dcdcaa' },
+                { token: 'variable', foreground: '9cdcfe' },
+                { token: 'operator', foreground: 'd4d4d4' },
+                { token: 'delimiter', foreground: 'd4d4d4' },
             ],
             colors: {
-                'editor.background': '#1e1e2e',
-                'editor.foreground': '#cdd6f4',
-                'editor.lineHighlightBackground': '#2a2a3d',
-                'editor.selectionBackground': '#45475a',
-                'editor.inactiveSelectionBackground': '#313147',
-                'editorCursor.foreground': '#89b4fa',
-                'editorLineNumber.foreground': '#6c7086',
-                'editorLineNumber.activeForeground': '#cdd6f4',
-                'editorIndentGuide.background': '#313147',
-                'editorIndentGuide.activeBackground': '#45475a',
-                'editorWidget.background': '#252536',
-                'editorWidget.border': '#333350',
-                'minimap.background': '#1e1e2e',
-                'scrollbarSlider.background': '#31314780',
-                'scrollbarSlider.hoverBackground': '#45475a80',
+                'editor.background': '#1e1e1e',
+                'editor.foreground': '#d4d4d4',
+                'editor.lineHighlightBackground': '#2d2d30',
+                'editor.selectionBackground': '#264f78',
+                'editor.inactiveSelectionBackground': '#3a3d41',
+                'editorCursor.foreground': '#aeafad',
+                'editorLineNumber.foreground': '#858585',
+                'editorLineNumber.activeForeground': '#d4d4d4',
+                'editorIndentGuide.background': '#404040',
+                'editorIndentGuide.activeBackground': '#707070',
+                'editorWidget.background': '#252526',
+                'editorWidget.border': '#3c3c3c',
+                'minimap.background': '#1e1e1e',
+                'scrollbarSlider.background': '#79797966',
+                'scrollbarSlider.hoverBackground': '#646464b3',
             },
         });
         return monaco;
@@ -102,7 +102,7 @@ export class Editor extends Component {
     async componentDidMount() {
         this.monaco = await loadMonaco();
         this._editor = this.monaco.editor.create(this._el, {
-            value: '', language: 'plaintext', theme: 'catppuccin',
+            value: '', language: 'plaintext', theme: 'vs-slon',
             minimap: { enabled: true }, fontSize: 13,
             automaticLayout: true, scrollBeyondLastLine: false,
         });
