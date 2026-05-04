@@ -701,7 +701,7 @@ class LogCompressor(BaseProvider):
         new_obs_parts = []
         for tid, thread_turns in by_thread.items():
             label = f"thread {tid}" if tid else "default"
-            await self.send_memory_info(f"Уплотняю память: наблюдаю за {len(thread_turns)} сообщениями ({label})…")
+            await self.send_memory_info(f"Наблюдаю за {len(thread_turns)} сообщениями ({label})…")
             obs = await self._run_observer(thread_turns, existing_observations)
             if not obs:
                 continue

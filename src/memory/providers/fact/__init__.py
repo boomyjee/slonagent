@@ -131,7 +131,7 @@ class FactProvider(BaseProvider):
 
         threads = ", ".join(tid or "default" for tid in by_thread.keys())
         async def on_done(summary: str):
-            annotated = f"[треды: {threads}]\n{summary}"
+            annotated = f"Сохранил факты в долгосрочную память [треды: {threads}]\n{summary}"
             self.agent.call_before_next_message(
                 self.agent.transport.send_memory_info(annotated)
             )
