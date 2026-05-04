@@ -502,6 +502,15 @@ export class ChatDialog extends Component {
         return name;
     }
 
+    // Подсказка для tool-заголовка: basename файла из file_path/path. Для
+    // tool'ов без file-аргумента — null, ничего не подмешиваем.
+    static _toolHint(args) {
+        if (!args) return null;
+        const path = args.file_path || args.path;
+        if (typeof path !== 'string' || !path) return null;
+        return path.split(/[/\\]/).pop() || path;
+    }
+
     // Распознаёт ide-теги в тексте user-item'а — нужно рендеру баббла, чтоб
     // вместо raw <ide_*>...</...> показать чип.
     static _parseIdeTag(text) {
@@ -577,11 +586,13 @@ export class ChatDialog extends Component {
                             const open = expanded[i];
                             const argsText = this._formatArgs(m.args);
                             const resultText = this._formatResult(m.result);
+                            const hint = ChatDialog._toolHint(m.args);
                             return html`
                                 <div class=${cl.tool}>
                                     <div class="hdr" onClick=${() => this.setState(({ expanded: e }) => ({ expanded: { ...e, [i]: !open } }))}>
                                         <span class="arr">${open ? '▼' : '▶'}</span>
                                         <span>⚙ ${m.name}</span>
+                                        ${hint && html`<span class=${cl.toolHint}>${hint}</span>`}
                                     </div>
                                     ${open && argsText && html`<div class="body">${argsText}</div>`}
                                     ${open && resultText && html`<div class="result">${resultText}</div>`}
@@ -728,6 +739,13 @@ cl.msg = css`
   & th, & td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; white-space: normal; }
   & th { background: rgba(0,0,0,0.15); font-weight: 600; }
   & tr:nth-child(even) td { background: rgba(0,0,0,0.05); }
+`;
+cl.toolHint = css`
+  margin-left: 0px;
+  margin-top: 2px;
+  padding: 2px 6px;
+  background: var(--bg);
+  font-family: monospace; font-size: 10px;
 `;
 cl.tool = css`
   margin-bottom: 5px; border: 1px solid var(--border); border-radius: 3px; font-size: 12px;
