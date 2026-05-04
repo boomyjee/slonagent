@@ -505,29 +505,23 @@ export class ChatDialog extends Component {
     // Распознаёт ide-теги в тексте user-item'а — нужно рендеру баббла, чтоб
     // вместо raw <ide_*>...</...> показать чип.
     static _parseIdeTag(text) {
-        const sel = text.match(/^<ide_selection>The user selected the lines (\d+) to (\d+) from ([^:]+):\n([\s\S]*?)\n\nThis may or may not be related to the current task\.<\/ide_selection>$/);
+        // (.+?) для file — non-greedy до `:\n`. На Windows путь содержит `:`
+        // (E:/...), `[^:]+` срезал бы только букву диска.
+        const sel = text.match(/^<ide_selection>The user selected the lines (\d+) to (\d+) from (.+?):\n([\s\S]*?)\n\nThis may or may not be related to the current task\.<\/ide_selection>$/);
         if (sel) return { file: sel[3], startLine: +sel[1], endLine: +sel[2], text: sel[4] };
         const opened = text.match(/^<ide_opened_file>The user opened the file (.+?) in the IDE\. This may or may not be related to the current task\.<\/ide_opened_file>$/);
         if (opened) return { file: opened[1] };
         return null;
     }
 
-    // Один item в user-баббле: картинка, ide-tag (chip + collapsible code) или
-    // обычный markdown-текст. i — индекс сообщения, j — индекс item'а внутри;
-    // пара нужна как ключ для `expanded`-стейта (раскрыт ли code-блок чипа).
-    _renderUserItem(it, i, j, expanded) {
+    // Один item в user-баббле: картинка, ide-tag (chip с текстом в title) или
+    // обычный markdown-текст.
+    _renderUserItem(it) {
         if (it.kind === 'image') return html`<img src=${it.url} class=${cl.thumb} />`;
         const ide = ChatDialog._parseIdeTag(it.text || '');
         if (!ide) return html`<div dangerouslySetInnerHTML=${{__html: mdToHtml(it.text)}}></div>`;
-        const key = `${i}:${j}`;
-        const open = expanded[key];
-        return html`
-            <div class="${cl.chip} ${cl.ideBubbleChip}" title=${ide.file}
-                 onClick=${() => ide.text && this.setState(({ expanded: e }) => ({ expanded: { ...e, [key]: !open } }))}>
-                <span class=${cl.chipIcon}>📎</span>
-                <span class=${cl.chipName}>${ChatDialog._ideChipLabel(ide)}</span>
-            </div>
-            ${open && ide.text && html`<pre class=${cl.ideExpand}><code>${ide.text}</code></pre>`}`;
+        const tip = ide.text ? `${ide.file}\n\n${ide.text}` : ide.file;
+        return html`<div class="${cl.idePill} ${cl.idePillBubble}" title=${tip}>${ChatDialog._ideChipLabel(ide)}</div>`;
     }
 
     _formatArgs(args) {
@@ -562,7 +556,7 @@ export class ChatDialog extends Component {
                             // одна text-строка от send_message stream.
                             if (m.items) return html`
                                 <div class="${cl.msg} ${m.role}${m.pending ? ' pending' : ''}">
-                                    ${m.items.map((it, j) => this._renderUserItem(it, i, j, expanded))}
+                                    ${m.items.map(it => this._renderUserItem(it))}
                                 </div>
                             `;
                             return html`
@@ -707,6 +701,7 @@ cl.dialog = css`
 `;
 cl.messages = css`flex: 1; min-height: 0; overflow-y: auto; padding: 12px;`;
 cl.msg = css`
+  position: relative;
   margin-bottom: 10px; font-size: 13px; line-height: 1.5; padding: 8px 12px;
   border-radius: 8px; max-width: 90%; white-space: pre-wrap; word-break: break-word;
   &.user, &.inject { background: var(--accent); color: #1e1e2e; margin-left: auto; }
@@ -811,12 +806,12 @@ cl.chipRemove = css`
   &:hover { color: var(--text); }
 `;
 cl.idePill = css`
-  position: absolute; top: -10px; right: 45px; z-index: 5;
+  position: absolute; top: -7px; right: 45px; z-index: 5;
   padding: 1px 8px;
   background: var(--surface);
   color: var(--accent);
   border: 1px solid var(--accent); border-radius: 10px;
-  font-size: 10px; font-family: monospace;
+  font-size: 8px; font-family: monospace;
   cursor: pointer; user-select: none;
   &:hover { background: var(--surface2); }
 `;
@@ -824,19 +819,8 @@ cl.idePillOff = css`
   color: var(--text-dim) !important;
   border-color: var(--border) !important;
 `;
-cl.ideBubbleChip = css`
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 8px; margin: 2px 0;
-  background: rgba(137, 180, 250, 0.15);
-  border: 1px solid var(--accent); border-radius: 4px;
-  font-size: 11px; cursor: pointer; color: var(--text);
-  font-family: monospace;
-  &:hover { background: rgba(137, 180, 250, 0.25); }
-`;
-cl.ideExpand = css`
-  background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 4px;
-  margin: 4px 0; max-height: 240px; overflow: auto;
-  font-family: monospace; font-size: 12px; white-space: pre;
+cl.idePillBubble = css`
+  top: -7px; right: 42px;
 `;
 cl.thumb = css`
   max-width: 240px; max-height: 240px; border-radius: 4px;
