@@ -123,7 +123,12 @@ class CronSkill(Skill):
         delta = cls._parse_interval(repeat)
         if delta is None:
             return None
-        return (datetime.fromisoformat(scheduled_at) + delta).isoformat()
+        next_dt = datetime.fromisoformat(scheduled_at) + delta
+        now = datetime.now().astimezone()
+        if next_dt <= now:
+            skips = (now - next_dt) // delta + 1
+            next_dt += skips * delta
+        return next_dt.isoformat()
 
     @staticmethod
     def _load_tasks(path: str) -> list[dict]:
