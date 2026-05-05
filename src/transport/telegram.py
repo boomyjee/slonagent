@@ -5,7 +5,7 @@ log = logging.getLogger(__name__)
 from typing import Annotated
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.exceptions import TelegramRetryAfter, TelegramServerError
+from aiogram.exceptions import TelegramMigrateToChat, TelegramRetryAfter, TelegramServerError
 from aiogram.types import Message, CallbackQuery, FSInputFile, InputMediaPhoto, InputMediaDocument, LinkPreviewOptions, MessageOriginUser, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat
 from agent import Skill, tool
 from src.transport.base import BaseTransport
@@ -196,6 +196,16 @@ class TelegramTransport(BaseTransport):
         self._stream_messages: dict[int, list] = {}  # stream_id → list of Message
         self._suggestion_options: dict[int, list[str]] = {}  # msg_id → options для длинных кнопок
 
+    @classmethod
+    def _migrate_chat(cls, old: int, new: int) -> None:
+        b = cls.load_bindings()
+        if str(old) in b:
+            b[str(new)] = b.pop(str(old))
+            cls.save_bindings(b)
+        if cls._main_chat_id == old:
+            cls._main_chat_id = new
+        log.info("[telegram] migrated chat %s → %s", old, new)
+
     async def _ensure_chat_and_topic(self) -> bool:
         """True — можно слать. False — у агента нет группы или не удалось создать топик."""
         if self.chat_id is None:
@@ -209,6 +219,11 @@ class TelegramTransport(BaseTransport):
         name = self.agent.thread_name(self.agent.thread_id) or f"thread {self.agent.thread_id[:8]}"
         try:
             topic = await self.bot.create_forum_topic(self.chat_id, name=name)
+        except TelegramMigrateToChat as e:
+            # Юзер включил Topics → группа стала супергруппой с новым chat_id.
+            self._migrate_chat(self.chat_id, e.migrate_to_chat_id)
+            self.chat_id = e.migrate_to_chat_id
+            return await self._ensure_chat_and_topic()
         except Exception as e:
             log.warning("create_forum_topic failed: %s", e)
             return False
@@ -305,6 +320,26 @@ class TelegramTransport(BaseTransport):
             self._suggestion_options[msg.message_id] = list(options)
 
     async def thread_rename(self, uuid: str, name: str):
+        # Main thread агента (uuid="") маппится на General топик группы.
+        # Отдельный API метод edit_general_forum_topic, и в bindings.topics
+        # General не лежит — итерим по чатам где этот агент привязан.
+        if uuid == "":
+            if self.agent is None:
+                return
+            for chat_str, chat in self.load_bindings().items():
+                if chat.get("agent_id") != self.agent.id:
+                    continue
+                # Личка у main-агента — chat_id положительный, в ней нет
+                # General-топика. edit_general_forum_topic тут вернёт ошибку.
+                if int(chat_str) >= 0:
+                    continue
+                try:
+                    await self.bot.edit_general_forum_topic(int(chat_str), name=name)
+                except Exception as e:
+                    log.warning("[telegram] edit_general_forum_topic failed: %s", e)
+            if self.agent.thread_id == "":
+                self.thread_name = name
+            return
         for chat_str, chat in self.load_bindings().items():
             for tid, tu in chat.get("topics", {}).items():
                 if tu != uuid: continue
