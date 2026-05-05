@@ -27,7 +27,6 @@ class WebTransport(BaseTransport):
         super().__init__()
         self._verbose = verbose
         self.fork: WebFork | None = None
-        self._web_skill = WebTransportSkill(self)
 
     def create_fork(self, agent):
         return WebFork(ref_agent=agent)
@@ -51,7 +50,7 @@ class WebTransport(BaseTransport):
         self.fork = None
 
     def get_skills(self):
-        return [self._web_skill]
+        return [WebTransportSkill(self)]
 
     async def _transport_event(self, method: str, replay: bool = True, **kwargs):
         await self.fork.send(

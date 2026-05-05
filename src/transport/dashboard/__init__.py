@@ -229,15 +229,12 @@ class DashboardTransport(WebTransport):
 
     _fork_cls = DashboardFork
 
-    def __init__(self, verbose: bool = True):
-        super().__init__(verbose=verbose)
-        self._skill = DashboardSkill(self)
 
     def create_fork(self, agent):
         return DashboardFork(ref_agent=agent)
 
     def get_skills(self):
-        return [*super().get_skills(), self._skill]
+        return [*super().get_skills(), DashboardSkill(self)]
 
     def set_agent(self, agent):
         super().set_agent(agent)
