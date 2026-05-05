@@ -8,12 +8,14 @@ _SHELL_LOG_DIR = "/tmp/_sandbox_shells"
 
 
 class SandboxSkill(Skill):
+    runtime: str = "podman"  # один на процесс — все песочницы делят podman/docker
+    _host_ip: str | None = None  # process-wide кеш host_url
+
     def __init__(
         self,
         workspace_dir: str | None = None,
         image: str = "python:3.11-slim",
         default_timeout: int = 120,
-        runtime: str = "podman",
         container_name: str = None,
     ):
         super().__init__()
@@ -22,7 +24,6 @@ class SandboxSkill(Skill):
         self.tools_dir: str = ""
         self.image = image
         self.default_timeout = default_timeout
-        self.runtime = runtime
         self._skill_script_map: dict[str, str] = {}
         # Кеш _ensure_container: пропускаем тяжёлые проверки если хеш набора
         # маунтов не менялся. На смене конфига хеш ломается → пересоздаём.
@@ -318,6 +319,69 @@ class SandboxSkill(Skill):
                 await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
                 logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
         self._mounts_hash = new_hash
+        await self._sync_rpc_url()
+
+    @classmethod
+    async def host_url(cls) -> str:
+        """Адрес host'а с точки зрения контейнера. Docker Desktop сам
+        прописывает host.docker.internal. На podman-машине (Win/Mac) она
+        не работает с --no-hosts, slirp-gateway 10.0.2.2 указывает на VM —
+        достаём default gateway VM через asyncssh. Bare Linux подман
+        прописывает alias сам, ловим через fallback."""
+        if cls._host_ip is not None:
+            return cls._host_ip
+        if cls.runtime == "podman":
+            cls._host_ip = await cls._podman_machine_gateway() or "host.containers.internal"
+        else:
+            cls._host_ip = "host.docker.internal"
+        logging.info("[sandbox] host ip (%s): %s", cls.runtime, cls._host_ip)
+        return cls._host_ip
+
+    @classmethod
+    async def _podman_machine_gateway(cls) -> str | None:
+        try:
+            import asyncssh, json
+            out = await asyncio.to_thread(
+                subprocess.run, ["podman", "machine", "inspect"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if out.returncode != 0:
+                raise RuntimeError(f"rc={out.returncode}: {out.stderr!r}")
+            machines = json.loads(out.stdout)
+            if not machines:
+                return None
+            ssh = machines[0]["SSHConfig"]
+            key = asyncssh.read_private_key(ssh["IdentityPath"])
+            async with asyncssh.connect(
+                "127.0.0.1", port=ssh["Port"], username=ssh["RemoteUsername"],
+                client_keys=[key], known_hosts=None, connect_timeout=10,
+            ) as conn:
+                result = await conn.run("ip route show default", check=False)
+            parts = (result.stdout or "").split()
+            if "via" in parts:
+                return parts[parts.index("via") + 1]
+            logging.warning("[sandbox] unexpected ip route output: %r", result.stdout)
+        except Exception as e:
+            logging.warning("[sandbox] podman-machine gateway lookup failed: %r", e)
+        return None
+
+    async def _sync_rpc_url(self):
+        """Пишет URL host /agent-rpc/<token> в /run/slonagent.env внутри
+        контейнера — источник истины для container_lib/agent.get_agent().
+        Зовётся один раз из _ensure_container на жизнь процесса."""
+        from src.transport.web.server import WebTransportServer
+        if WebTransportServer._app is None:
+            return
+        token = WebTransportServer.agent_token(self.agent.id)
+        url = await WebTransportServer.get_url(
+            f"/agent-rpc/{token}", host=await self.host_url(), scheme="ws",
+        )
+        cmd = [self.runtime, "exec", "-e", f"URL={url}", self.container_name,
+               "bash", "-c", 'printf "SLONAGENT_RPC_URL=%s\\n" "$URL" > /run/slonagent.env']
+        proc = await self._run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            logging.warning("[exec] не удалось записать /run/slonagent.env: %s",
+                            proc.stderr.strip())
 
     @tool(
         "Выполнить команду внутри Docker-контейнера. "

@@ -31,7 +31,6 @@ class SandboxProxy:
         self._pending_http: dict[int, asyncio.Future] = {}
         self._ws_sessions: dict[int, asyncio.Queue] = {}
         self._start_lock = asyncio.Lock()
-        self._host_ip: str | None = None
 
     async def handle_tunnel(self, ws: WebSocket):
         await ws.accept()
@@ -238,64 +237,9 @@ class SandboxProxy:
         return True
 
     async def _worker_url(self) -> str:
+        from src.skills.sandbox import SandboxSkill
         return await self.fork.get_url(
             "/sandbox-tunnel",
-            host=await self._host_address(),
+            host=await SandboxSkill.host_url(),
             scheme="ws",
         )
-
-    async def _host_address(self) -> str:
-        """Hostname/IP the container can use to reach the host's uvicorn.
-
-        Docker Desktop wires up `host.docker.internal` transparently, so we
-        don't need anything fancy there. Podman is tricker: on Win/Mac it
-        runs inside a `podman machine` VM, and inside the agent's container
-        `host.containers.internal` isn't populated (--no-hosts) and the
-        slirp gateway (10.0.2.2) points at the VM's loopback, not the real
-        host. We fetch the VM's default gateway (= the host from the VM's
-        view) via asyncssh using the machine's own SSH config. On bare
-        Linux podman there's no machine, so we fall through to the magic
-        alias which podman auto-populates in /etc/hosts.
-        """
-        if self._host_ip:
-            return self._host_ip
-        sandbox = self.fork._sandbox
-        runtime = sandbox.runtime if sandbox else "podman"
-        if runtime == "podman":
-            ip = await self._podman_machine_gateway()
-            if ip:
-                self._host_ip = ip
-                log.info("[sandbox-proxy] host ip via podman-machine: %s", ip)
-                return ip
-            self._host_ip = "host.containers.internal"
-        else:
-            self._host_ip = "host.docker.internal"
-        log.info("[sandbox-proxy] host ip (%s): %s", runtime, self._host_ip)
-        return self._host_ip
-
-    async def _podman_machine_gateway(self) -> str | None:
-        try:
-            import asyncssh
-            out = await asyncio.to_thread(
-                subprocess.run, ["podman", "machine", "inspect"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if out.returncode != 0:
-                raise RuntimeError(f"rc={out.returncode}: {out.stderr!r}")
-            machines = json.loads(out.stdout)
-            if not machines:
-                return None
-            ssh = machines[0]["SSHConfig"]
-            key = asyncssh.read_private_key(ssh["IdentityPath"])
-            async with asyncssh.connect(
-                "127.0.0.1", port=ssh["Port"], username=ssh["RemoteUsername"],
-                client_keys=[key], known_hosts=None, connect_timeout=10,
-            ) as conn:
-                result = await conn.run("ip route show default", check=False)
-            parts = (result.stdout or "").split()
-            if "via" in parts:
-                return parts[parts.index("via") + 1]
-            log.warning("[sandbox-proxy] unexpected ip route output: %r", result.stdout)
-        except Exception as e:
-            log.warning("[sandbox-proxy] podman-machine gateway lookup failed: %r", e)
-        return None

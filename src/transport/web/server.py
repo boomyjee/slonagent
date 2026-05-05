@@ -9,7 +9,7 @@ WebTransport-инстансы регистрируют свои URL через `
 по url, чтоб одни и те же fork-уровневые роуты делил несколько инстансов
 одного форка)."""
 
-import asyncio, base64, contextlib, hashlib, logging, os, re, sys
+import asyncio, base64, contextlib, hashlib, hmac, logging, os, re, secrets, sys
 from datetime import date, timedelta
 
 from fastapi import FastAPI, Request, WebSocket
@@ -40,6 +40,19 @@ class WebTransportServer:
     _tunnel_url: str | None = None
     _tunnel_ready: asyncio.Event | None = None
     _spawn_locks: dict[str, asyncio.Lock] = {}
+    # agent-rpc токен: HMAC(_secret_seed, agent_id|password_hash). Минтится
+    # при agent_token(), запоминается в _token_to_agent для O(1) резолва.
+    _secret_seed: bytes | None = None
+    _token_to_agent: dict[str, str] = {}
+
+    @classmethod
+    def agent_token(cls, agent_id: str) -> str:
+        if cls._secret_seed is None:
+            cls._secret_seed = secrets.token_bytes(32)
+        msg = f"{agent_id}|{cls._password_hash}".encode()
+        token = hmac.new(cls._secret_seed, msg, hashlib.sha256).hexdigest()[:32]
+        cls._token_to_agent[token] = agent_id
+        return token
 
     @classmethod
     def register_route(cls, method: str, url: str, handler, auth: bool = True):
@@ -187,6 +200,17 @@ class WebTransportServer:
         @cls._app.get("/")
         async def root():
             return RedirectResponse("/main/dashboard/")
+
+        # /agent-rpc/{token} — единственный agent-rpc эндпоинт на процесс.
+        from src.transport.web.agent_rpc import handle_agent_rpc
+
+        @cls._app.websocket("/agent-rpc/{token}")
+        async def _agent_rpc(ws: WebSocket, token: str):
+            agent_id = cls._token_to_agent.get(token)
+            if agent_id is None:
+                await ws.close(code=4401)
+                return
+            await handle_agent_rpc(agent_id, ws)
 
         async def _run():
             import uvicorn
