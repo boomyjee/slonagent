@@ -14,6 +14,10 @@ export function Resizer({ side, persistKey, className }) {
         if (!el) return;
         const startX = e.clientX;
         const startW = el.getBoundingClientRect().width;
+        // Без overlay'я iframe в центральной панели перехватывает mousemove
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;cursor:col-resize';
+        document.body.appendChild(overlay);
         function onMove(ev) {
             const dx = ev.clientX - startX;
             const w = Math.max(150, startW + (side === 'left' ? dx : -dx));
@@ -23,6 +27,7 @@ export function Resizer({ side, persistKey, className }) {
         function onUp() {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
+            overlay.remove();
             if (persistKey) persist.set(`resizer.${persistKey}`, parseInt(el.style.width));
         }
         document.addEventListener('mousemove', onMove);
