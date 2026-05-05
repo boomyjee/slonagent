@@ -440,6 +440,7 @@ class ClaudeBackend(BaseBackend):
                 "system_prompt": None,
                 "setting_sources": None,
                 "tools": [],
+                "max_turns": agent.max_iterations,
                 "extra_args": extra_args,
                 "mcp_servers": {"slon": self._mcp_server} if self._mcp_server else {},
                 "stderr": _on_stderr,
