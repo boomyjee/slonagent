@@ -144,53 +144,133 @@ class ClaudeBackend(BaseBackend):
         return path if os.path.isfile(path) else None
 
     async def _sync_claude_session(self, session_id: str) -> int:
-        """Если у claude'а в jsonl сильно больше старых turn'ов чем у нас в памяти —
-        вычищаем лишние. Возвращает кол-во удалённых строк (0 если не трогали)."""
-        jsonl_path = self._claude_session_jsonl(session_id)
-        if not jsonl_path:
-            return 0
+        """Синкает Claude jsonl с нашей памятью. Возвращает кол-во удалённых строк.
 
-        our_uuids = {t["_uuid"] for t in self.agent.memory._turns
-                     if isinstance(t, dict) and t.get("_uuid")}
-        if not our_uuids:
+        Легитимных состояний всего два:
+          - Наша память пуста (one-shot start) — ничего не делаем.
+          - UUID-ы нашей памяти, которые есть в Claude jsonl, идут там тем же порядком
+            подряд до конца jsonl. Перед ними у Claude могут быть старые extras
+            (которые мы уже выкинули) — если их >20, режем.
+
+        UUID-ы нашей памяти, которых НЕТ в Claude jsonl, считаем nested-sub-agent
+        activity (например, Claude Code Agent-tool эмитит вложенные turn'ы — мы их
+        пишем в память, а parent jsonl их не знает). Такие просто пропускаем
+        при выравнивании.
+
+        Любой другой расклад (UUID есть, но в неправильном порядке; наш UUID есть
+        в jsonl, но и в jsonl что-то лишнее перед/после него) — баг pipeline.
+        Громкий warn + notify через transport.
+        """
+        jsonl_path = self._claude_session_jsonl(session_id)
+
+        our_uuids_all = [t["_uuid"] for t in self.agent.memory._turns
+                         if isinstance(t, dict) and t.get("_uuid")]
+        if not our_uuids_all:
+            return 0  # one-shot start, легитимно
+
+        if not jsonl_path:
+            await self._notify_desync(
+                f"в памяти {len(our_uuids_all)} турнов с UUID, но Claude jsonl отсутствует",
+            )
             return 0
-        our_oldest = next(
-            (t["_uuid"] for t in self.agent.memory._turns
-             if isinstance(t, dict) and t.get("_uuid")), None,
-        )
 
         with open(jsonl_path, encoding="utf-8") as f:
             lines = f.readlines()
 
-        oldest_idx, pre_count = None, 0
+        # Все uuid-bearing entries из jsonl, любого type (user/assistant/system/...).
+        # /context-команда и подобное приходит как type="system" с uuid — раньше мы
+        # их фильтровали и получали false-positive desync.
+        claude_seq: list[tuple[int, str]] = []  # (line_idx, uuid)
         for i, line in enumerate(lines):
             try: entry = json.loads(line)
             except json.JSONDecodeError: continue
-            if entry.get("uuid") == our_oldest:
-                oldest_idx = i
-                break
-            if entry.get("type") in ("user", "assistant"):
-                pre_count += 1
+            uid = entry.get("uuid")
+            if uid: claude_seq.append((i, uid))
 
-        if oldest_idx is None or pre_count <= 20:
+        claude_uuids_set = {u for _, u in claude_seq}
+        our_uuids_set = set(our_uuids_all)
+
+        # Сводим обе стороны к пересечению UUID-ов:
+        #   our_synced   — UUID-ы нашей памяти, известные Claude (в нашем порядке).
+        #   claude_synced_seq — entries Claude'a, известные нашей памяти (в порядке jsonl).
+        # Они должны быть равны как списки. Лишние entries Claude'а, которых у нас
+        # нет с UUID (реальные user-сообщения, system-entries которые мы не пишем),
+        # как и наши UUID-ы которых нет у Claude (nested sub-agent activity), просто
+        # выпадают из выравнивания.
+        our_synced = [u for u in our_uuids_all if u in claude_uuids_set]
+        claude_synced_seq = [(idx, u) for idx, u in claude_seq if u in our_uuids_set]
+        claude_synced = [u for _, u in claude_synced_seq]
+        nested_count = len(our_uuids_all) - len(our_synced)
+
+        if not our_synced:
+            await self._notify_desync(
+                f"ни один из {len(our_uuids_all)} UUID нашей памяти не найден "
+                f"в Claude jsonl ({len(claude_seq)} uuid-entries)",
+            )
+            return 0
+
+        for i in range(min(len(our_synced), len(claude_synced))):
+            if our_synced[i] != claude_synced[i]:
+                await self._notify_desync(
+                    f"расхождение UUID на synced-позиции {i}: "
+                    f"наш={our_synced[i][:8]}, claude={claude_synced[i][:8]}",
+                )
+                return 0
+
+        if len(our_synced) != len(claude_synced):
+            # При совпавшем prefix лишние с одной стороны = одна из «сторона ушла вперёд».
+            ahead = "мы" if len(our_synced) > len(claude_synced) else "Claude"
+            diff = abs(len(our_synced) - len(claude_synced))
+            await self._notify_desync(
+                f"{ahead} {('ушли' if ahead == 'мы' else 'ушёл')} вперёд на {diff} synced-турнов",
+            )
+            return 0
+
+        # Норма: our_synced == claude_synced. Режем старые extras Claude-jsonl
+        # ПЕРЕД первым общим UUID — это турны, которые мы давно выкинули из памяти.
+        first_match_line = claude_synced_seq[0][0]
+        # Считаем uuid-bearing entries до first_match_line, чьи UUID-ы НЕ в нашей
+        # памяти (значит реально устаревшие, а не текущие user-сообщения посередине).
+        pre_count = sum(
+            1 for idx, u in claude_seq
+            if idx < first_match_line and u not in our_uuids_set
+        )
+        if pre_count <= 20:
             return 0
 
         new_lines = []
-        for line in lines:
+        for line_idx, line in enumerate(lines):
             try: entry = json.loads(line)
             except json.JSONDecodeError:
-                new_lines.append(line)
-                continue
+                new_lines.append(line); continue
             uid = entry.get("uuid")
-            if uid is None or uid in our_uuids:
+            # No-uuid строки (queue-op/last-prompt) и строки чьи UUID в нашей памяти
+            # — оставляем всегда. Чужие UUID до first_match_line — режем (это старое,
+            # что мы выкинули). Чужие UUID после — оставляем (реальные user-сообщения).
+            if uid is None or uid in our_uuids_set or line_idx >= first_match_line:
                 new_lines.append(line)
 
         with open(jsonl_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
         pruned = len(lines) - len(new_lines)
-        log.info("[claude_agent] sync: pruned %d → %d lines from %s",
-                 len(lines), len(new_lines), session_id)
+        log.info(
+            "[claude_agent] sync: pruned %d → %d lines from %s (nested=%d)",
+            len(lines), len(new_lines), session_id, nested_count,
+        )
         return pruned
+
+    async def _notify_desync(self, reason: str):
+        msg = (
+            f"Claude session разошёлся с памятью: {reason}.\n"
+            "Скорее всего сломан memory-pipeline (мутация турнов / обход PreCompact / "
+            "crash при стриме). Состояние Claude может быть неконсистентным."
+        )
+        log.warning("[claude_agent] DESYNC: %s", reason)
+        # Эфемерный агент (нет agent_dir) — transport мог быть заглушкой и сообщение
+        # уйдёт в никуда. Не дадим тихо продолжать с поломанным состоянием — бросаем.
+        if not self.agent.memory.memory_dir:
+            raise RuntimeError(f"⚠️ {msg}")
+        await self.agent.transport.send_memory_info(f"⚠️ {msg}")
 
     @property
     def _state_file(self) -> str | None:
