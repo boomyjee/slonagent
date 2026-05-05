@@ -5,6 +5,7 @@
 turn'ом (как клод хранит в своей сессионной jsonl).
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -73,6 +74,7 @@ class ClaudeBackend(BaseBackend):
             self._cwd = os.getcwd()
         self._client: ClaudeSDKClient | None = None
         self._client_append: str | None = None  # текст системки в живом клиенте
+        self._client_skills_fp: str | None = None  # fingerprint скилов в живом клиенте
         self._mcp_server = None  # построится лениво из agent.skills
         # Эфемерный агент: session_id живёт в памяти инстанса, на диск ничего не пишем.
         self._memory_state: dict = {}
@@ -90,6 +92,22 @@ class ClaudeBackend(BaseBackend):
                     log.info("[claude_agent] cleaned up ephemeral session %s", jsonl)
         except Exception:
             pass  # __del__ не должен бросать
+
+    def _skills_fingerprint(self) -> str:
+        """Хеш набора тулов всех скиллов (name+description+schema). Используется
+        чтобы пересобрать MCP-сервер и переподнять клиент когда скилы поменялись —
+        агент мог добавить новый скилл, переключился режим и т.п."""
+        items = []
+        for skill in self.agent.skills:
+            for decl in skill.get_tools():
+                fn = decl["function"]
+                items.append((
+                    fn["name"],
+                    fn.get("description", ""),
+                    json.dumps(fn.get("parameters") or {}, sort_keys=True),
+                ))
+        items.sort()
+        return hashlib.sha256(repr(items).encode()).hexdigest()
 
     def _build_mcp_server(self):
         """Оборачивает тулы своих скиллов в SDK MCP-сервер. Клод увидит как mcp__slon__*."""
@@ -372,14 +390,22 @@ class ClaudeBackend(BaseBackend):
             parts.append(system_prompt)
         append_text = "\n\n".join(p for p in parts if p)
 
-        # Переподнимаем клиент если системка изменилась (claude читает
-        # --append-system-prompt-file только при старте процесса).
-        if self._client and self._client_append != append_text:
-            log.info("[claude_agent] system prompt changed, recreating client")
+        skills_fp = self._skills_fingerprint()
+
+        # Переподнимаем клиент если системка ИЛИ набор тулов изменились — claude
+        # читает --append-system-prompt-file и mcp_servers только при старте процесса.
+        prompt_changed = self._client and self._client_append != append_text
+        skills_changed = self._client and self._client_skills_fp != skills_fp
+        if prompt_changed or skills_changed:
+            reason = "system prompt" if prompt_changed else "skills set"
+            log.info("[claude_agent] %s changed, recreating client", reason)
             with suppress(Exception, asyncio.CancelledError):
                 await self._client.disconnect()
             self._client = None
             self._client_append = None
+            self._client_skills_fp = None
+            if skills_changed:
+                self._mcp_server = None  # пересобрать на новых тулах
 
         if self._client is None:
             extra_args = {}
@@ -444,6 +470,7 @@ class ClaudeBackend(BaseBackend):
                 await _connect(use_resume=not state.get("created"))
 
             self._client_append = append_text
+            self._client_skills_fp = skills_fp
             self._save_state({"session_id": session_id, "created": True})
         else:
             log.info("[claude_agent] reusing live claude")
