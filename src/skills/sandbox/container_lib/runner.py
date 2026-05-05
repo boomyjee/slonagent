@@ -1,68 +1,56 @@
-"""Runner for slonagent sandbox scripts.
+"""Tool entry-point для скриптов в песочнице.
 
-Connects to host via bidirectional JSON-lines RPC (rpc.Channel).
-Exposes a single run_tool(name, args) method for host to call.
+Usage: python runner.py <script_path> <tool_name> <args_json> <thread_id>
 
-Usage:
-    python runner.py script.py   # started by host via podman exec
-"""
+Импортит скрипт, находит @tool-метод на Skill-классе по имени, создаёт
+скилл (с _thread_id для лениво-резолвящегося self.agent), вызывает,
+печатает результат в stdout с маркером.
+
+Запускается host'ом через `podman exec`. Один tool-call = один процесс."""
 
 import sys, json, asyncio, inspect, importlib.util
+
 from agent import Skill
-from src.transport.web import WebTransport
-from rpc import Channel
+
+RESULT_MARKER = "__SLONAGENT_RESULT__"
 
 
-class Runner:
-    def __init__(self, mod):
-        self._mod = mod
-        self._skills = {}  # cls → instance
-
-    async def run_tool(self, name, args, agent):
-        for _, cls in inspect.getmembers(self._mod, inspect.isclass):
-            if not issubclass(cls, Skill) or cls is Skill:
-                continue
-            prefix = cls.__name__.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider").lower()
-            for mname, fn in inspect.getmembers(cls, predicate=inspect.isfunction):
-                if not getattr(fn, "_is_tool", False) or f"{prefix}_{mname}" != name:
-                    continue
-                if cls not in self._skills:
-                    skill = cls()
-                    skill.agent = agent
-                    self._skills[cls] = skill
-                return await fn(self._skills[cls], **args) if asyncio.iscoroutinefunction(fn) else fn(self._skills[cls], **args)
-        raise AttributeError(f"tool not found: {name}")
-
-
-def main():
-    # Write as UTF-8 bytes directly; avoids container locale (cp1252/etc.)
-    # failing on non-ASCII characters like emojis in RPC payloads.
-    def writeline(msg):
-        data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
-        sys.stdout.buffer.write(data)
-        sys.stdout.buffer.flush()
-
-    def readline():
-        line = sys.stdin.buffer.readline()
-        return line.decode("utf-8") if line else ""
-
-    script_path = sys.argv[1]
-    spec = importlib.util.spec_from_file_location("_script", script_path)
+def _load(path):
+    spec = importlib.util.spec_from_file_location("_script", path)
     mod = importlib.util.module_from_spec(spec)
-    mod.__file__ = script_path
+    mod.__file__ = path
     sys.modules["_script"] = mod
     spec.loader.exec_module(mod)
+    return mod
 
-    ch = Channel(readline, writeline, ref_prefix="s", allowed={
-        Skill: {"register", "start", "get_context_prompt", "get_tool_prompt", "get_tools",
-                "get_bypass_commands", "is_bypass_command", "dispatch_bypass", "dispatch_tool_call"},
-        Runner: {"run_tool"},
-        WebTransport: None,
-    })
-    ch.register("runner", Runner(mod))
-    ch.start()
-    ch.join()
+
+def _find_tool(mod, tool_name):
+    for _, cls in inspect.getmembers(mod, inspect.isclass):
+        if not issubclass(cls, Skill) or cls is Skill:
+            continue
+        prefix = cls.__name__.removesuffix("Skill").removesuffix("Memory").removesuffix("Provider").lower()
+        for mname, fn in inspect.getmembers(cls, predicate=inspect.isfunction):
+            if getattr(fn, "_is_tool", False) and f"{prefix}_{mname}" == tool_name:
+                return cls, fn
+    raise AttributeError(f"tool not found: {tool_name}")
+
+
+async def main():
+    script, tool_name, args_json, thread_id = sys.argv[1:5]
+    mod = _load(script)
+    cls, fn = _find_tool(mod, tool_name)
+    skill = cls()
+    skill._thread_id = thread_id
+    result = fn(skill, **json.loads(args_json))
+    if asyncio.iscoroutine(result):
+        result = await result
+    if not isinstance(result, dict):
+        result = {"result": result}
+    sys.stdout.buffer.write(
+        (RESULT_MARKER + json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8")
+    )
+    sys.stdout.buffer.flush()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

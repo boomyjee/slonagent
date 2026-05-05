@@ -6,9 +6,11 @@ ro/rw bind-mounts, config changes, resolve_path.
 """
 import asyncio
 import os
+import socket
 import subprocess
 import sys
 
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -20,6 +22,7 @@ from agent import Agent, Skill
 from src.memory.providers.base import BaseProvider
 from src.skills.config import ConfigSkill
 from src.skills.sandbox import SandboxSkill
+from src.transport.web import WebTransport, WebTransportServer
 
 
 pytestmark = pytest.mark.integration
@@ -56,6 +59,43 @@ async def _make_agent(tmp_path):
     )
     await agent.start(run_loop=False)
     return agent, sb, cs
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+async def _bring_up_server_for(agent) -> None:
+    """Поднимает uvicorn и регистрирует make_agent-stub для тестов, где
+    sandbox-скрипт лезет в self.agent — это идёт через /agent-rpc."""
+    port = _free_port()
+    WebTransportServer._app = None
+    WebTransportServer._tunnel_url = None
+    WebTransportServer._tunnel_ready = None
+    WebTransportServer._token_to_agent = {}
+    WebTransportServer._secret_seed = None
+    WebTransport._forks.clear()
+    WebTransport.start({"port": port, "password_hash": ""})
+
+    async def _make_agent(agent_id, _tid=""):
+        return agent if agent_id == agent.id else None
+    WebTransport.make_agent = staticmethod(_make_agent)
+
+    base = f"http://127.0.0.1:{port}"
+    async with httpx.AsyncClient(timeout=5.0) as cl:
+        for _ in range(60):
+            try:
+                r = await cl.get(f"{base}/_probe")
+                if r.status_code in (200, 404):
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+    pytest.fail("uvicorn didn't come up")
 
 
 def _cleanup(sb: SandboxSkill):
@@ -778,6 +818,7 @@ class TestRpcPassthrough:
             transport=transport,
         )
         await agent.start(run_loop=False)
+        await _bring_up_server_for(agent)
         try:
             sb.get_tools()
             result = await sb.dispatch_tool_call(
@@ -848,6 +889,7 @@ class TestRpcPassthrough:
         # сетится только в from_config, не в __init__. Подкладываем минимум.
         agent._config = {"model_name": "dummy", "api_key": "", "base_url": ""}
         await agent.start(run_loop=False)
+        await _bring_up_server_for(agent)
         try:
             sb.get_tools()
             result = await sb.dispatch_tool_call(

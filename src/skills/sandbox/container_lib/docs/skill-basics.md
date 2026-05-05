@@ -127,6 +127,3 @@ UI склеит все чанки с одинаковым `stream_id` в одн�
 
 - `from agent import Skill, tool` — всегда.
 - `from typing import Annotated`.
-- `from src.transport.web import WebTransport` — если нужен веб-UI.
-- `from src.transport.multi import MultiTransport` — фан-аут в несколько
-  транспортов.

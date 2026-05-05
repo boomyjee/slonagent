@@ -18,19 +18,12 @@
 ### `spawn_subagent` — типичный паттерн
 
 ```python
-from src.transport.multi import MultiTransport
-
-sub = await self.agent.spawn_subagent(
-    "helper",
-    skills=["sandbox", "memory"],
-    transport=MultiTransport([self.agent.transport, my_web_transport]),
-)
+sub = await self.agent.spawn_subagent("helper", skills=["sandbox", "memory"])
 await sub.loop()  # блокирующий loop — ок, под-агент будет жить до выхода
 ```
 
-Под-агенту с веб-UI обычно дают `MultiTransport([self.agent.transport, web])`
-— чтобы сообщения летели и в основной чат (Telegram/Dashboard), и в
-твой WebSocket.
+Без явного `transport=` под-агент наследует транспорт родителя — его
+сообщения летят туда же, в основной чат.
 
 ## `self.agent.transport`
 

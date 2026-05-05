@@ -48,30 +48,17 @@ class WeatherSkill(Skill):
   переменные модуля обнулятся. Состояние храни в `/workspace/` или
   через `self.agent.memory`.
 
-## Свой веб-UI / WebSocket
-
-Если тулу нужна морда — редактор, дашборд, игра, live-чат — наследуйся
-от `WebTransport`. Хост сам поднимет FastAPI-роуты и WebSocket. Фронт
-пишется на **Preact + htm** (никакого React/сборщиков — работает прямо
-в браузере через `lib.js` из шаред-UI).
-
-Пошаговый гайд с примерами `ui/app.js`, WebSocket-протоколом и готовым
-`Chat`-компонентом — [docs/web-ui.md](docs/web-ui.md).
-
 ## Чеклист
 
 - [ ] Файл в `/workspace/tools/`, класс наследуется от `Skill`.
 - [ ] Tool-методы помечены `@tool("описание")`, параметры — `Annotated[T, "..."]`.
 - [ ] Долгие операции: `send_processing(True/False)`, стрим — через
       `send_message(..., stream_id=..., final=False)`.
-- [ ] Нужен веб-UI — прочитал [docs/web-ui.md](docs/web-ui.md), положил
-      `ui/app.js` рядом со скиллом.
 
 ## Файлы и монтирование
 
 - `/workspace` — read/write рабочая директория. Тут твои тулы и артефакты.
-- `/slonagent` — read-only: этот SKILLS.md, `agent.py`, `docs/*.md`,
-  `src/transport/*` стабы. Импорты `from agent import ...` и
-  `from src.transport.web import WebTransport` работают отсюда.
+- `/slonagent` — read-only: этот SKILLS.md, `agent.py`, `docs/*.md`.
+  Импорты `from agent import ...` работают отсюда.
 - Смонтированные папки хоста (read-only) — см. секцию Sandbox в
   системном промпте.

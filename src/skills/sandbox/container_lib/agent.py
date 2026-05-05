@@ -2,7 +2,6 @@
 
 Usage:
     from agent import Skill, tool, get_agent
-    from src.transport.web import WebTransport
 """
 
 import json
@@ -93,11 +92,16 @@ def tool(description: str):
 
 
 class Skill:
-    def __init__(self):
-        self.agent = None  # set by runner to a Proxy
+    _thread_id: str = ""  # выставляется runner'ом перед вызовом тула
 
-    async def register(self, agent):
-        self.agent = agent
+    @property
+    def agent(self):
+        """Прокси на host-агента для текущего thread_id. Лениво открывает
+        WS на /agent-rpc при первом обращении, кеширует на инстансе —
+        тулы не трогающие агента не платят за RPC-канал."""
+        if not hasattr(self, "_agent_cache"):
+            self._agent_cache = get_agent(self._thread_id)
+        return self._agent_cache
 
     async def start(self):
         pass

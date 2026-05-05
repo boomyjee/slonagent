@@ -1,4 +1,4 @@
-import asyncio, base64, hashlib, json, os, re, logging, shlex, subprocess, threading
+import asyncio, base64, hashlib, json, os, re, logging, shlex, subprocess
 from typing import Annotated
 from agent import Skill, tool
 
@@ -70,91 +70,30 @@ class SandboxSkill(Skill):
             return await self._dispatch_skill_script(script_path, name.removeprefix("sandbox_"), args)
         return await super().dispatch_tool_call(tool_call)
 
-    async def _dispatch_skill_script(self, script_path, tool_name, args):
-        from src.skills.sandbox.container_lib.rpc import Channel, Proxy
-        from src.skills.sandbox.web_transport_bridge import WebTransportBridge
-        from src.transport.base import BaseTransport
-        from src.transport.multi import MultiTransport
-        from src.transport.web import WebTransport as HostWebTransport
-        from src.memory.memory import Memory
-        from agent import Agent
+    _RESULT_MARKER = "__SLONAGENT_RESULT__"
 
+    async def _dispatch_skill_script(self, script_path, tool_name, args):
         try:
             await self._ensure_container()
         except Exception as e:
             return {"error": f"Не удалось запустить контейнер: {e}"}
 
         rel = os.path.relpath(script_path, self.workspace_dir).replace("\\", "/")
-        cmd = [self.runtime, "exec", "-i", "-e", "PYTHONPATH=/slonagent", "-w", "/workspace",
-               self.container_name, "python", "/slonagent/runner.py", f"/workspace/{rel}"]
+        thread_id = self.agent.thread_id or ""
+        cmd = [self.runtime, "exec", "-e", "PYTHONPATH=/slonagent", "-w", "/workspace",
+               self.container_name, "python", "/slonagent/runner.py",
+               f"/workspace/{rel}", tool_name,
+               json.dumps(args, ensure_ascii=False), thread_id]
 
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
-        )
+        proc = await self._run(cmd, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+        if proc.returncode != 0:
+            return {"error": (proc.stderr or "").strip() or f"runner exit {proc.returncode}"}
 
-        # Drain stderr in a background thread — if the pipe buffer fills (~64KB
-        # on Windows) the container blocks on its next stderr write, and since
-        # our RPC reply also goes to stdout we'd deadlock. We also keep a copy
-        # so that if the script dies before Channel starts (e.g. ImportError),
-        # the RPC reader sees EOF and fails pending calls with generic "channel
-        # closed" — we can still surface the real traceback from stderr.
-        stderr_buf: list[str] = []
-        def _drain_stderr():
-            for line in iter(proc.stderr.readline, b""):
-                decoded = line.decode("utf-8", errors="replace").rstrip()
-                stderr_buf.append(decoded)
-                logging.info("[sandbox-err] %s", decoded)
-        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True, name="sandbox-stderr")
-        stderr_thread.start()
-
-        def readline():
-            line = proc.stdout.readline()
-            return line.decode("utf-8") if line else ""
-
-        def writeline(msg):
-            proc.stdin.write(json.dumps(msg, ensure_ascii=False).encode() + b"\n")
-            proc.stdin.flush()
-
-        allowed = {
-            Agent: {"transport", "memory", "spawn_subagent", "next_message",
-                    "loop", "get_agent_dir", "process_message", "llm", "close"},
-            BaseTransport: {
-                "send_message", "send_thinking", "send_memory_info", "send_processing",
-                "send_system_prompt", "on_tool_call", "on_tool_result",
-                "inject_message", "send_app_url", "send_images"
-            },
-            HostWebTransport: None,
-            Memory: {"clear", "add_turn"},
-        }
-
-        # Pin async handlers to the host's main loop — aiogram, uvicorn and
-        # friends create sessions bound to whichever loop started them, so
-        # callbacks like transport.send_message MUST run on that loop.
-        ch = Channel(readline, writeline, ref_prefix="h", allowed=allowed,
-                     async_loop=asyncio.get_running_loop())
-        ch.register("WebTransportBridge", WebTransportBridge(self))
-        ch.register("MultiTransport", MultiTransport)
-        ch.start()
-
-        call_error: Exception | None = None
-        result: dict | None = None
-        try:
-            r = await Proxy(ch, "runner").run_tool(name=tool_name, args=args, agent=self.agent)
-            result = r if isinstance(r, dict) else {"result": r}
-        except Exception as e:
-            call_error = e
-        finally:
-            ch.close()
-            try: proc.stdin.close()
-            except Exception: pass
-            await asyncio.to_thread(proc.wait)
-            stderr_thread.join(timeout=2.0)
-
-        if call_error is not None:
-            err_text = "\n".join(stderr_buf).strip()
-            result = {"error": err_text or str(call_error)}
-
-        return result
+        for line in proc.stdout.splitlines():
+            if line.startswith(self._RESULT_MARKER):
+                return json.loads(line[len(self._RESULT_MARKER):])
+        return {"error": f"runner output без маркера результата:\n{proc.stdout}"}
 
     def _mounts(self) -> list[tuple[str, str, bool]]:
         """[(host_path, container_path, readonly)] из конфига sandbox.ro / sandbox.rw."""
