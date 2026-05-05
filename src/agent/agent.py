@@ -77,11 +77,17 @@ class Agent:
                 self.skills.insert(0, skill)
 
     async def spawn_subagent(self, name: str, **cfg_overrides) -> "Agent":
-        if self.agent_dir is None:
-            raise RuntimeError("ephemeral agent (agent_dir=None) can't spawn subagents — nowhere to persist them")
-        subagent_dir = os.path.join(self.agent_dir, "memory", "subagents", name)
+        # По умолчанию subagent персистится под parent'ом. Caller может явно
+        # передать agent_dir=None чтобы сделать эфемерного subagent, или свой путь.
+        if "agent_dir" not in cfg_overrides:
+            if self.agent_dir is None:
+                raise RuntimeError(
+                    "parent — эфемерный (agent_dir=None), не могу сам вычислить путь "
+                    "под subagent. Передай agent_dir явно (None для эфемерного, путь — для персистентного)."
+                )
+            cfg_overrides["agent_dir"] = os.path.join(self.agent_dir, "memory", "subagents", name)
         cfg_overrides.setdefault("transport", self.transport)
-        agent = Agent.from_config(self._config, id=f"{self.id}:{name}", agent_dir=subagent_dir, **cfg_overrides)
+        agent = Agent.from_config(self._config, id=f"{self.id}:{name}", **cfg_overrides)
 
         sub_skill = SubagentSkill()
         agent.skills.insert(0,sub_skill)
