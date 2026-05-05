@@ -360,7 +360,7 @@ class Agent:
                 return
         await self._message_queue.put((content_parts, user_message_id, trigger_answer))
 
-    async def dispatch_tool_calls(self, turn: dict) -> list[dict]:
+    async def dispatch_tool_calls(self, turn: dict, emit_transport_events: bool = True) -> list[dict]:
         tool_calls = turn.get("tool_calls") or []
         tool_to_skill = {decl["function"]["name"]: skill for skill in self.skills for decl in skill.get_tools()}
         extra_parts = []
@@ -376,12 +376,14 @@ class Agent:
                                    "content": json.dumps({"error": f"Tool {name} not found"})})
                 continue
 
-            await self.transport.on_tool_call(name, args)
-            try: 
+            if emit_transport_events:
+                await self.transport.on_tool_call(name, args)
+            try:
                 result = await skill.dispatch_tool_call(fc)
-            finally: 
+            finally:
                 if self.transport.get_agent() is not self: self.transport.set_agent(self)
-            await self.transport.on_tool_result(name, result)
+            if emit_transport_events:
+                await self.transport.on_tool_result(name, result)
             extra_parts.extend(result.pop("_parts", []) if isinstance(result, dict) else [])
             tool_turns.append({
                 "role": "tool", "tool_call_id": fc["id"], "name": name,

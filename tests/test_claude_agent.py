@@ -232,25 +232,32 @@ class TestMcpHandlerContent:
 
     @pytest.mark.asyncio
     async def test_image_url_part_becomes_image_block(self):
+        # dispatch_tool_calls эмитит tool_turn (с пустым '{}' когда у result'a были
+        # только _parts) + user_turn с самими parts. MCP отдаёт оба честно.
         content = await self._call(_ImgSkill(), "_img_pic")
-        assert len(content) == 1
-        assert content[0].type == "image"
-        assert content[0].mimeType == "image/png"
-        assert content[0].data == _FAKE_B64
+        assert len(content) == 2
+        assert content[0].type == "text" and content[0].text == "{}"
+        assert content[1].type == "image"
+        assert content[1].mimeType == "image/png"
+        assert content[1].data == _FAKE_B64
 
     @pytest.mark.asyncio
     async def test_mixed_text_and_image_parts(self):
         content = await self._call(_MixSkill(), "_mix_both")
-        assert len(content) == 2
-        assert content[0].type == "text" and content[0].text == "look at this:"
-        assert content[1].type == "image" and content[1].data == _FAKE_B64
+        assert len(content) == 3
+        assert content[0].type == "text" and content[0].text == "{}"
+        assert content[1].type == "text" and content[1].text == "look at this:"
+        assert content[2].type == "image" and content[2].data == _FAKE_B64
 
     @pytest.mark.asyncio
     async def test_string_result_becomes_text_block(self):
         content = await self._call(_StrSkill(), "_str_msg")
         assert len(content) == 1
         assert content[0].type == "text"
-        assert content[0].text == "plain text result"
+        # MCP handler идёт через agent.dispatch_tool_calls, который JSON-сериализует
+        # tool-result. Не-dict результаты оборачиваются в {"result": ...} для
+        # унификации с OpenAI-форматом tool turns.
+        assert content[0].text == '{"result": "plain text result"}'
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
