@@ -64,7 +64,9 @@ class TestThreadRename:
         await a.thread_rename("u1", "Hello")
         with open(tmp_path / "memory" / "THREADS.json") as f:
             data = json.load(f)
-        assert data == {"u1": {"name": "Hello"}}
+        # Agent.__init__ авто-регистрирует свой thread_id ("" по дефолту) через
+        # thread_ensure → в файле помимо нашего "u1" будет ещё "".
+        assert data["u1"] == {"name": "Hello"}
 
     @pytest.mark.asyncio
     async def test_thread_name_reads(self, tmp_path):

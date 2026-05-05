@@ -146,6 +146,7 @@ class Agent:
         self._stop_event = asyncio.Event()
         self._restrictions_file = os.path.join(memory_dir, ".restrictions.json") if memory_dir else None
         self._restrictions: dict = self._load_restrictions()
+        self.thread_ensure(self.thread_id)
 
     def _load_restrictions(self) -> dict:
         if not self._restrictions_file:
@@ -192,6 +193,13 @@ class Agent:
 
     def thread_list(self) -> dict:
         return self._load_threads()
+
+    def thread_ensure(self, uuid: str):
+        if not self.memory.memory_dir: return
+        threads = self._load_threads()
+        if uuid in threads: return
+        threads[uuid] = {"name": ""}
+        self._save_threads(threads)
 
     async def thread_rename(self, uuid: str, name: str):
         threads = self._load_threads()
@@ -295,7 +303,6 @@ class Agent:
     async def start(self, run_loop=True):
         for skill in self.skills:
             await skill.start()
-        await self.thread_rename(self.thread_id, self.thread_name(self.thread_id) or "")
         if run_loop:
             asyncio.create_task(self.loop())
 
