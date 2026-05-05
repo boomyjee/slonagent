@@ -116,7 +116,7 @@ class SandboxSkill(Skill):
 
         allowed = {
             Agent: {"transport", "memory", "spawn_subagent", "next_message",
-                    "loop", "get_agent_dir", "process_message", "llm"},
+                    "loop", "get_agent_dir", "process_message", "llm", "close"},
             BaseTransport: {
                 "send_message", "send_thinking", "send_memory_info", "send_processing",
                 "send_system_prompt", "on_tool_call", "on_tool_result",
