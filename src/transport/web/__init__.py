@@ -84,6 +84,9 @@ class WebTransport(BaseTransport):
     async def thread_rename(self, uuid: str, name: str):
         await self._transport_event("thread_rename", uuid=uuid, name=name)
 
+    async def thread_delete(self, uuid: str):
+        await self.fork.thread_delete(uuid)
+
     async def send_images(self, paths: list[str]):
         items = [self.fork.publish_file(p, compress_image=True) for p in paths]
         await self._transport_event("send_images", items=items)

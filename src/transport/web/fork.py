@@ -256,6 +256,8 @@ class WebFork:
             uuid_, name = msg.get("uuid"), msg.get("name")
             if uuid_ is not None and name is not None:
                 await self.ref_agent.thread_rename(uuid_, name)
+        if msg.get("type") == "transport" and msg.get("method") == "thread_delete":
+            await self.ref_agent.thread_delete(msg.get("uuid", ""))
 
     # ─── Outbound — fan-out to clients ───────────────────────────────────
 
@@ -286,6 +288,12 @@ class WebFork:
     def _history_path(self, thread_id: str) -> str:
         fname = f"WEB_{thread_id}.json" if thread_id else "WEB.json"
         return os.path.join(self.ref_agent.memory.memory_dir, fname)
+
+    async def thread_delete(self, uuid: str):
+        self.transports.pop(uuid, None)
+        await self.send({"type": "transport", "method": "thread_delete","thread_id": uuid}, replay=True)
+        path = self._history_path(uuid)
+        if os.path.exists(path): os.remove(path)
 
     def _append_history(self, event: dict):
         path = self._history_path(event.get("thread_id", ""))

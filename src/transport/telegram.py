@@ -351,6 +351,44 @@ class TelegramTransport(BaseTransport):
                     self.thread_name = name
                 return
 
+    async def thread_delete(self, uuid: str):
+        b = self.load_bindings()
+        # Main тред: General топик удалить нельзя, bulk-delete сообщений тоже
+        # нет. Для форумов переименовываем General в DELETED + шлём пояснение,
+        # для лички (main-агент в DM) просто шлём пояснение.
+        if uuid == "":
+            chat_ids: set[int] = set()
+            if self.agent.id == "main" and TelegramTransport._main_chat_id is not None:
+                chat_ids.add(TelegramTransport._main_chat_id)
+            for chat_str, chat in b.items():
+                if chat.get("agent_id") == self.agent.id:
+                    chat_ids.add(int(chat_str))
+            for chat_id in chat_ids:
+                if chat_id < 0:
+                    try:
+                        await self.bot.edit_general_forum_topic(chat_id, name="DELETED")
+                    except Exception as e:
+                        log.warning("[telegram] edit_general_forum_topic failed: %s", e)
+                try:
+                    await self.bot.send_message(chat_id, "⚠️ История этого треда была удалена в агенте.")
+                except Exception as e:
+                    log.warning("[telegram] send_message failed: %s", e)
+            return
+
+        changed = False
+        for chat_str, chat in b.items():
+            topics = chat.get("topics", {})
+            for tid, tu in list(topics.items()):
+                if tu == uuid:
+                    del topics[tid]
+                    changed = True
+                    try:
+                        await self.bot.delete_forum_topic(int(chat_str), int(tid))
+                    except Exception as e:
+                        log.warning("[telegram] delete_forum_topic failed: %s", e)
+        if changed:
+            self.save_bindings(b)
+
     def set_agent(self, agent):
         super().set_agent(agent)
         if self._update_commands_task is not None: return

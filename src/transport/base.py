@@ -75,4 +75,7 @@ class BaseTransport:
     async def thread_rename(self, uuid: str, name: str):
         pass
 
+    async def thread_delete(self, uuid: str):
+        pass
+
 

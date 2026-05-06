@@ -86,6 +86,16 @@ export class Chat extends Component {
             }));
             return;
         }
+        if (m === 'thread_delete') {
+            this.setState(({ tabs, threads, activeTab, processingByThread }) => {
+                const t = { ...threads }; delete t[ev.uuid];
+                const p = { ...processingByThread }; delete p[ev.uuid];
+                const next = tabs.filter(id => id !== ev.uuid);
+                const active = activeTab === ev.uuid ? (next[0] || '') : activeTab;
+                return { threads: t, tabs: next, activeTab: active, processingByThread: p };
+            }, () => this._persist());
+            return;
+        }
         if (m === 'send_processing') {
             this.setState(({ processingByThread }) => ({
                 processingByThread: { ...processingByThread, [tid]: !!ev.active },
@@ -138,6 +148,13 @@ export class Chat extends Component {
         Dialog.close();
     };
 
+    _deleteThread = (id, label) => {
+        if (!confirm(`Удалить тред "${label || 'Untitled'}"?`)) return;
+        this.props.app.send({ type: 'transport', method: 'thread_delete', uuid: id });
+        // Перерисуем диалог после обновления state (thread_delete event обновит threads)
+        setTimeout(() => this._onShowHistory(), 100);
+    };
+
     _onShowHistory = () => {
         const openIds = new Set(this.state.tabs);
         const closed = Object.entries(this.state.threads).filter(([id]) => !openIds.has(id));
@@ -146,8 +163,9 @@ export class Chat extends Component {
             ${closed.length === 0
                 ? html`<div class=${cl.historyEmpty}>Все треды уже открыты</div>`
                 : html`<div class=${cl.historyList}>${closed.map(([id, label]) => html`
-                    <div key=${id} class=${cl.historyItem} onClick=${() => this._openTabFromHistory(id)}>
-                        <span class=${label ? '' : cl.untitled}>${label || 'Untitled'}</span>
+                    <div key=${id} class=${cl.historyItem}>
+                        <span class=${label ? '' : cl.untitled} onClick=${() => this._openTabFromHistory(id)}>${label || 'Untitled'}</span>
+                        <button class=${cl.deleteBtn} title="Удалить" onClick=${(e) => { e.stopPropagation(); this._deleteThread(id, label); }}><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
                     </div>`)}
                 </div>`}
         `);
@@ -235,7 +253,14 @@ cl.historyList = css`
 `;
 cl.historyItem = css`
   padding: 10px 16px; cursor: pointer; font-size: 13px; color: var(--text);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
   &:hover { background: var(--surface2); }
+  & > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+`;
+cl.deleteBtn = css`
+  flex: 0 0 auto; background: transparent; border: none; color: var(--text-dim);
+  cursor: pointer; font-size: 16px; padding: 4px 8px; border-radius: 4px;
+  &:hover { background: var(--red, #e64553); color: #fff; }
 `;
 cl.historyEmpty = css`padding: 16px; font-size: 13px; color: var(--text-dim); text-align: center;`;
 cl.tabSpinner = css`

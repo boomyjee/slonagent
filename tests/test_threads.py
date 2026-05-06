@@ -39,8 +39,11 @@ class StubTransport(BaseTransport):
     def __init__(self):
         super().__init__()
         self.calls: list[tuple[str, str]] = []
+        self.deletes: list[str] = []
     async def thread_rename(self, uuid, name):
         self.calls.append((uuid, name))
+    async def thread_delete(self, uuid):
+        self.deletes.append(uuid)
 
 
 def _make_agent(tmp_path, thread_id="", transport=None):
@@ -98,6 +101,64 @@ class TestThreadRename:
         a = _make_agent(tmp_path, transport=t)
         await a.thread_rename("u1", "Hi")
         assert t.calls == [("u1", "Hi")]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Agent.thread_delete
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestThreadDelete:
+
+    @pytest.mark.asyncio
+    async def test_removes_from_threads_json_and_deletes_context(self, tmp_path):
+        t = StubTransport()
+        a = _make_agent(tmp_path, transport=t)
+        await a.thread_rename("u1", "Hello")
+
+        # Регистрируем агента для треда u1 в Agent._instances чтоб thread_delete
+        # его нашёл через Agent.get → close → memory.delete.
+        u1 = _make_agent(tmp_path, thread_id="u1")
+        Agent._instances[(a.id, "u1")] = u1
+        u1.memory._turns.append({"role": "user", "content": "x"})
+        u1.memory.save()
+        ctx = u1.memory._state_file
+        assert os.path.exists(ctx)
+
+        await a.thread_delete("u1")
+
+        with open(tmp_path / "memory" / "THREADS.json") as f:
+            data = json.load(f)
+        assert "u1" not in data
+        assert not os.path.exists(ctx)
+        assert t.deletes == ["u1"]
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_memory_dir(self, tmp_path):
+        # У эфемерного агента (memory_dir пустой) удалять нечего — no-op.
+        a = Agent(id="ephemeral", model_name="m", api_key="k", base_url="http://t",
+                  agent_dir=None, memory_compressor=PassthroughCompressor(),
+                  transport=StubTransport())
+        await a.thread_delete("any")  # не падает
+        assert a.transport.deletes == []
+
+    @pytest.mark.asyncio
+    async def test_closes_cached_agent_for_deleted_thread(self, tmp_path):
+        # Если у удаляемого треда живёт закешированный Agent в _instances —
+        # его надо закрыть до удаления файлов, иначе RAM-копия восстановит
+        # их при следующем save(). Файл удаляем через target.memory.delete().
+        t = StubTransport()
+        a = _make_agent(tmp_path, transport=t)
+        await a.thread_rename("u1", "X")
+
+        cached = MagicMock()
+        cached.close = AsyncMock()
+        Agent._instances[(a.id, "u1")] = cached
+        try:
+            await a.thread_delete("u1")
+        finally:
+            Agent._instances.pop((a.id, "u1"), None)
+        cached.close.assert_awaited_once()
+        cached.memory.delete.assert_called_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

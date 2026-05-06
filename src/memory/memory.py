@@ -148,6 +148,10 @@ class Memory:
         self._turns = []
         self.save()
 
+    def delete(self):
+        if self._state_file and os.path.exists(self._state_file):
+            os.remove(self._state_file)
+
     def copy_from(self, src: "Memory"):
         import shutil
         if os.path.exists(src._state_file):

@@ -87,3 +87,7 @@ class MultiTransport(BaseTransport):
     async def thread_rename(self, uuid, name):
         for t in self.transports:
             await t.thread_rename(uuid, name)
+
+    async def thread_delete(self, uuid):
+        for t in self.transports:
+            await t.thread_delete(uuid)

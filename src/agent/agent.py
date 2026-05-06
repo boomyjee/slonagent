@@ -286,6 +286,17 @@ class Agent:
         self._save_threads(threads)
         await self.transport.thread_rename(uuid, name)
 
+    async def thread_delete(self, uuid: str):
+        if not self.memory.memory_dir: return
+        target = await Agent.get(self.id, uuid)
+        if target is not None:
+            await target.close()
+            target.memory.delete()
+        threads = self._load_threads()
+        threads.pop(uuid, None)
+        self._save_threads(threads)
+        await self.transport.thread_delete(uuid)
+
     def apply_error_restriction(self, model_name: str, e: Exception, messages: list) -> list:
         """Выставляет ограничение на основе ошибки и возвращает обновлённые messages."""
         err = str(e)
