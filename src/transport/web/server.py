@@ -132,25 +132,21 @@ class WebTransportServer:
             "No password configured. Set password_hash in config.", status_code=503,
         )
 
-        # Регистрируем ДО auth_middleware: Starlette крутит middleware в
-        # обратном порядке регистрации, поэтому auth (зарегистрирован позже)
-        # будет outer, lazy_spawn — inner. Спавним только после успешной auth.
-        @cls._app.middleware("http")
-        async def lazy_spawn(request: Request, call_next):
-            # /<id>/... → ensure агент поднят (thread_id=""). Agent.get сам
-            # кэширует и возвращает None для несуществующих папок, нам
-            # достаточно сериализовать одновременные запросы локом. main
-            # поднимается из main.py при старте — здесь его не трогаем.
-            m = re.match(r"^/([^/]+)/", request.url.path)
-            if m and (agent_id := m.group(1)) != "main":
-                from agent import Agent
-                lock = cls._spawn_locks.setdefault(agent_id, asyncio.Lock())
-                async with lock:
-                    try:
-                        await Agent.get(agent_id, "")
-                    except Exception:
-                        logging.exception("[lazy-spawn] failed for %s", agent_id)
-            return await call_next(request)
+        def _lazy_spawn(app):
+            async def lazy_spawn(scope, receive, send):
+                if scope["type"] in ("http", "websocket"):
+                    m = re.match(r"^/([^/]+)/", scope.get("path", ""))
+                    if m and (agent_id := m.group(1)) != "main":
+                        from agent import Agent
+                        lock = cls._spawn_locks.setdefault(agent_id, asyncio.Lock())
+                        async with lock:
+                            try:
+                                await Agent.get(agent_id, "")
+                            except Exception:
+                                log.exception("[lazy-spawn] failed for %s", agent_id)
+                await app(scope, receive, send)
+            return lazy_spawn
+        cls._app.add_middleware(_lazy_spawn)
 
         @cls._app.middleware("http")
         async def auth_middleware(request: Request, call_next):
