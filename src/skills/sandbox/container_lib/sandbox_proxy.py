@@ -54,6 +54,14 @@ async def handle_cgi(tunnel, frame):
         "request": request, "header": header,
     }
 
+    # Worker долгоживущий → sys.modules кеширует импорты CGI-скриптов между
+    # вызовами. Меняешь helper.py — изменения не подтягиваются. Сбрасываем
+    # workspace-модули перед каждым exec'ом: следующий import прочтёт с диска.
+    for name in list(sys.modules):
+        mf = getattr(sys.modules.get(name), "__file__", None) or ""
+        if mf.startswith("/workspace/"):
+            sys.modules.pop(name, None)
+
     try:
         with open(fpath, encoding="utf-8") as f:
             code = compile(f.read(), fpath, "exec")

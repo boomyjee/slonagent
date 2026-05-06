@@ -219,6 +219,29 @@ class TestCGI:
         assert "v2" in r2.text
         assert "v1" not in r2.text
 
+    async def test_imported_module_edit_reflected(self, dash, http_client):
+        """Регрессия: worker долгоживущий, sys.modules кешировал импорты —
+        правки в helper.py не подтягивались. Сбрасываем workspace-модули перед
+        каждым exec'ом → следующий import читает с диска."""
+        helper = os.path.join(dash["web_dir"], "cgi_helper_mod.py")
+        cgi = os.path.join(dash["web_dir"], "cgi_uses_helper.py")
+        with open(helper, "w", encoding="utf-8") as f:
+            f.write("VALUE = 'first'\n")
+        with open(cgi, "w", encoding="utf-8") as f:
+            f.write(
+                "import sys; sys.path.insert(0, '/workspace/web')\n"
+                "import cgi_helper_mod\n"
+                "print(cgi_helper_mod.VALUE)\n"
+            )
+        r1 = await http_client.get(f"{dash['base']}/~/workspace/web/cgi_uses_helper.py")
+        assert "first" in r1.text
+
+        with open(helper, "w", encoding="utf-8") as f:
+            f.write("VALUE = 'second'\n")
+        r2 = await http_client.get(f"{dash['base']}/~/workspace/web/cgi_uses_helper.py")
+        assert "second" in r2.text, r2.text
+        assert "first" not in r2.text
+
     async def test_script_exception_returns_500(self, dash, http_client):
         with open(os.path.join(dash["web_dir"], "cgi_boom.py"), "w", encoding="utf-8") as f:
             f.write("raise ValueError('nope')\n")
