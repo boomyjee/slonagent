@@ -4,10 +4,12 @@
 Запуск:
     venv\\Scripts\\python -m pytest tests/test_skill.py -v
 """
+import asyncio
 import json
 import os
 import sys
 from typing import Annotated
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -184,3 +186,38 @@ class TestBypass:
     async def test_dispatch_echo(self):
         result = await self.skill.dispatch_bypass("/echo test message")
         assert result == "test message"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AgentSkill.restart_command — сообщение должно уйти ДО os.execv
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestRestartCommand:
+
+    @pytest.mark.asyncio
+    async def test_message_sent_before_exec(self, monkeypatch):
+        """Регрессия: раньше restart_command делал call_later(1, execv) и
+        return-string. Если send_message в транспорте занимал >1 сек (TG-очередь
+        + сеть), execv срабатывал до доставки и юзер не видел подтверждения.
+        Теперь функция async, await send_message → execv: гарантированный порядок."""
+        from src.agent.agent_skill import AgentSkill
+
+        events: list[tuple] = []
+
+        skill = AgentSkill()
+        skill.agent = MagicMock()
+
+        async def slow_send(text, **kw):
+            await asyncio.sleep(0.05)
+            events.append(("sent", text))
+        skill.agent.transport.send_message = slow_send
+
+        def fake_execv(*a):
+            events.append(("exec", a))
+        monkeypatch.setattr("os.execv", fake_execv)
+
+        await skill.restart_command("")
+
+        # Сообщение ушло до execv'а
+        assert [e[0] for e in events] == ["sent", "exec"]
+        assert "Перезапуск" in events[0][1]

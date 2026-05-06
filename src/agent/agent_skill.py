@@ -17,9 +17,9 @@ class AgentSkill(Skill):
     """Встроенный скилл агента: базовые управляющие команды."""
 
     @bypass("restart", "Перезапустить бота", standalone=True)
-    def restart_command(self, args: str) -> str:
-        asyncio.get_event_loop().call_later(1, os.execv, sys.executable, [sys.executable] + sys.argv)
-        return "🔄 Перезапускаюсь..."
+    async def restart_command(self, args: str) -> str:
+        await self.agent.transport.send_message("🔄 Перезапускаюсь...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
     
     @bypass("stop", "Остановить текущий ответ", standalone=True)
     def stop_command(self, args: str) -> str:
