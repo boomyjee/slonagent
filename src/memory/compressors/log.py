@@ -732,8 +732,11 @@ class LogCompressor(BaseProvider):
         turns = [t for t in turns if not t.get("_observation_message")]
         kept = []
         recent_size = 0
+        seen_observed = False
         for turn in reversed(turns):
             if turn.get("_observed"):
+                seen_observed = True
+            if seen_observed:
                 cost = Memory.count_tokens([turn])
                 if recent_size + cost > self._max_recent_turns_tokens:  break
                 if recent_size + cost > self._recent_tokens and len(kept) >= self._min_recent_turns: break
