@@ -137,20 +137,19 @@ class WebTransportServer:
         # будет outer, lazy_spawn — inner. Спавним только после успешной auth.
         @cls._app.middleware("http")
         async def lazy_spawn(request: Request, call_next):
-            # /<id>/... → ensure агент поднят (thread_id=""). make_agent сам
+            # /<id>/... → ensure агент поднят (thread_id=""). Agent.get сам
             # кэширует и возвращает None для несуществующих папок, нам
             # достаточно сериализовать одновременные запросы локом. main
             # поднимается из main.py при старте — здесь его не трогаем.
             m = re.match(r"^/([^/]+)/", request.url.path)
             if m and (agent_id := m.group(1)) != "main":
-                from src.transport.web import WebTransport
-                if WebTransport.make_agent is not None:
-                    lock = cls._spawn_locks.setdefault(agent_id, asyncio.Lock())
-                    async with lock:
-                        try:
-                            await WebTransport.make_agent(agent_id, "")
-                        except Exception:
-                            logging.exception("[lazy-spawn] failed for %s", agent_id)
+                from agent import Agent
+                lock = cls._spawn_locks.setdefault(agent_id, asyncio.Lock())
+                async with lock:
+                    try:
+                        await Agent.get(agent_id, "")
+                    except Exception:
+                        logging.exception("[lazy-spawn] failed for %s", agent_id)
             return await call_next(request)
 
         @cls._app.middleware("http")

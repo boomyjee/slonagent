@@ -105,12 +105,10 @@ async def dash():
     )
     await agent.start(run_loop=False)
 
-    # /agent-rpc хендлер резолвит agent через WebTransport.make_agent;
-    # в production его регистрирует main.py, в тесте подсовываем заглушку
-    # которая отдаёт нашего test-агента.
-    async def _make_agent(agent_id, _thread_id=""):
-        return agent if agent_id == agent.id else None
-    WebTransport.make_agent = staticmethod(_make_agent)
+    # /agent-rpc хендлер резолвит агента через Agent.get → Agent._instances.
+    # В тесте просто кладём созданного агента в реестр — Agent.get вернёт его
+    # из кеша без обращения к factory.
+    Agent._instances[(agent.id, "")] = agent
 
     base = f"http://127.0.0.1:{port}"
     async with httpx.AsyncClient(timeout=5.0) as cl:

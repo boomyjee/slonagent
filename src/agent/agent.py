@@ -33,7 +33,85 @@ async def stoppable(coro, *stop_events: asyncio.Event):
         return None
     return task.result()
 
+def _load_config() -> dict:
+    """Eager-load .config.json при импорте модуля + применение env-блока.
+    Возвращает пустой dict если файла нет (e.g. тесты в чистой папке)."""
+    cfg = {}
+    if os.path.exists(".config.json"):
+        with open(".config.json", encoding="utf-8") as f:
+            cfg = json.load(f)
+    os.environ.update(cfg.get("env", {}))
+    return cfg
+
+
 class Agent:
+    # Process-wide реестр агентов: один (agent_id, thread_id) — один Agent.
+    # Заполняется через Agent.get; чистится в Agent.close.
+    _instances: dict[tuple[str, str], "Agent"] = {}
+    # Корневой .config.json — доступен отовсюду как Agent.config.
+    config: dict = _load_config()
+    # Фабрика транспорта для агентов из Agent.get. Ставит main.py на старте.
+    # `() -> BaseTransport`. None → агенту достанется голый BaseTransport.
+    transport_factory = None
+
+    @staticmethod
+    def _resolve_refs(value, root: dict):
+        """`$path.in.config` → object из root."""
+        if isinstance(value, str) and value.startswith("$"):
+            obj = root
+            for part in value[1:].split("."):
+                obj = obj[part]
+            return obj
+        if isinstance(value, dict):
+            return {k: Agent._resolve_refs(v, root) for k, v in value.items()}
+        if isinstance(value, list):
+            return [Agent._resolve_refs(v, root) for v in value]
+        return value
+
+    @classmethod
+    async def get(cls, agent_id: str, thread_id: str = "", force_create: bool = False, copy_memory_from: "Agent | None" = None):
+        """Получить (или создать-и-закешировать) агента для (agent_id, thread_id).
+
+        Конвенция: main-агент в cwd, fork-агенты в forks/<agent_id>/. fork-config
+        синтезируется из root[agent] + root[fork_agent] на первом обращении.
+        Транспорт берётся из cls.transport_factory (None → агент без транспорта)."""
+        key = (agent_id, thread_id)
+        if not force_create and key in cls._instances:
+            return cls._instances[key]
+
+        is_main = (agent_id == "main")
+        agent_dir = os.getcwd() if is_main else os.path.join(os.getcwd(), "forks", agent_id)
+        if not force_create and not os.path.exists(agent_dir):
+            return None
+
+        config_path = os.path.join(agent_dir, ".config.json")
+        if is_main:
+            agent_cfg = cls.config["agent"]
+        else:
+            if not os.path.exists(config_path):
+                from src.skills.config import _format_json
+                os.makedirs(agent_dir, exist_ok=True)
+                merged = {**cls.config["agent"],
+                          **cls._resolve_refs(cls.config.get("fork_agent", {}), cls.config)}
+                fork_config = {}
+                if "sandbox" in cls.config:
+                    fork_config["sandbox"] = cls.config["sandbox"]
+                fork_config["agent"] = merged
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(_format_json(fork_config))
+            with open(config_path, encoding="utf-8") as f:
+                agent_cfg = json.load(f)["agent"]
+
+        transport = cls.transport_factory() if cls.transport_factory else None
+        agent = cls.from_config(cls._resolve_refs(agent_cfg, cls.config),
+                                id=agent_id, thread_id=thread_id,
+                                agent_dir=agent_dir, transport=transport)
+        if copy_memory_from is not None:
+            agent.memory.copy_from(copy_memory_from.memory)
+        await agent.start()
+        cls._instances[key] = agent
+        return agent
+
     @staticmethod
     def OpenAI(api_key, base_url, sync=False):
         from openai import AsyncOpenAI, OpenAI
@@ -223,6 +301,7 @@ class Agent:
 
     async def close(self):
         await self.backend_impl.close()
+        Agent._instances.pop((self.id, self.thread_id), None)
 
     def strip_contents_private(self, turns: list, model_name: str = None) -> list:
         model = model_name or self.model_name

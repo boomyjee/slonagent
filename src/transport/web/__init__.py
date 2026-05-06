@@ -15,13 +15,10 @@ log = logging.getLogger(__name__)
 
 class WebTransport(BaseTransport):
     _forks: dict[str, WebFork] = {}
-    make_agent = None
 
     @classmethod
-    def start(cls, config: dict, make_agent=None):
+    def start(cls, config: dict):
         WebTransportServer.start(config)
-        if make_agent is not None:
-            WebTransport.make_agent = staticmethod(make_agent)
 
     def __init__(self, verbose: bool = True):
         super().__init__()

@@ -21,23 +21,16 @@ _FILE_RE = re.compile(r"^CRON(?:_(.+))?\.json$")
 
 class CronSkill(Skill):
     _root_dir: str | None = None
-    _make_agent = None
     _loop_task: asyncio.Task | None = None
-    # Loaded агенты (registered через Skill.start). Lookup до фабрики:
-    # CLI mode без factory работает через этот реестр.
-    _agents: dict[tuple[str, str], object] = {}
 
     @classmethod
-    def start_daemon(cls, root_dir: str | None = None, make_agent=None):
-        if make_agent is not None:
-            cls._make_agent = staticmethod(make_agent)
+    def start_daemon(cls, root_dir: str | None = None):
         if cls._loop_task is not None:
             return
         cls._root_dir = root_dir or cls._root_dir or os.getcwd()
         cls._loop_task = asyncio.create_task(cls._loop())
 
     async def start(self):
-        CronSkill._agents[(self.agent.id, self.agent.thread_id)] = self.agent
         CronSkill.start_daemon()
 
     @classmethod
@@ -94,15 +87,11 @@ class CronSkill(Skill):
 
     @classmethod
     async def _resolve_agent(cls, agent_id: str, thread_id: str):
-        cached = cls._agents.get((agent_id, thread_id))
-        if cached is not None:
-            return cached
-        if cls._make_agent is None:
-            return None
+        from agent import Agent
         try:
-            return await cls._make_agent(agent_id, thread_id)
+            return await Agent.get(agent_id, thread_id)
         except Exception as e:
-            log.warning("[cron] make_agent(%s, %s) failed: %s", agent_id, thread_id, e, exc_info=True)
+            log.warning("[cron] Agent.get(%s, %s) failed: %s", agent_id, thread_id, e, exc_info=True)
             return None
 
     # ─── helpers ─────────────────────────────────────────────────────────────

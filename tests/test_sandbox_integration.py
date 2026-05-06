@@ -70,8 +70,8 @@ def _free_port() -> int:
 
 
 async def _bring_up_server_for(agent) -> None:
-    """Поднимает uvicorn и регистрирует make_agent-stub для тестов, где
-    sandbox-скрипт лезет в self.agent — это идёт через /agent-rpc."""
+    """Поднимает uvicorn и кладёт agent в Agent._instances — sandbox-скрипт
+    через /agent-rpc → Agent.get берёт его из реестра."""
     port = _free_port()
     WebTransportServer._app = None
     WebTransportServer._tunnel_url = None
@@ -81,9 +81,7 @@ async def _bring_up_server_for(agent) -> None:
     WebTransport._forks.clear()
     WebTransport.start({"port": port, "password_hash": ""})
 
-    async def _make_agent(agent_id, _tid=""):
-        return agent if agent_id == agent.id else None
-    WebTransport.make_agent = staticmethod(_make_agent)
+    Agent._instances[(agent.id, "")] = agent
 
     base = f"http://127.0.0.1:{port}"
     async with httpx.AsyncClient(timeout=5.0) as cl:

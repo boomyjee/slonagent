@@ -767,7 +767,8 @@ class TelegramTransport(BaseTransport):
         return None
 
     @classmethod
-    def start(cls, config: dict, make_agent):
+    def start(cls, config: dict):
+        from agent import Agent
         proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         cls.bot = Bot(token=config["bot_token"], session=AiohttpSession(proxy=proxy) if proxy else None)
         dp = Dispatcher()
@@ -823,7 +824,7 @@ class TelegramTransport(BaseTransport):
             binding = cls.lookup_binding(chat_id, telegram_thread_id)
             if not binding: return None
             agent_id, agent_thread_id = binding
-            agent = await make_agent(agent_id, agent_thread_id)
+            agent = await Agent.get(agent_id, agent_thread_id)
             if not agent: return None
             transports = getattr(agent.transport, "transports", [agent.transport])
             tg = next((t for t in transports if isinstance(t, cls)), None)
@@ -920,10 +921,10 @@ class TelegramTransport(BaseTransport):
                     return
                 name = state["name"]
                 choice = callback.data[len("clone_from:"):]
-                # Биндинг сохраняем ДО make_agent: set_agent внутри прочитает его.
+                # Биндинг сохраняем ДО Agent.get: set_agent внутри прочитает его.
                 _save_binding(chat_id, name)
-                copy_from = None if choice == "_none_" else await make_agent(choice)
-                agent = await make_agent(name, "", force_create=True, copy_memory_from=copy_from)
+                copy_from = None if choice == "_none_" else await Agent.get(choice)
+                agent = await Agent.get(name, "", force_create=True, copy_memory_from=copy_from)
                 if not agent:
                     await callback.message.answer(f"❌ Не удалось создать агента {name}.")
                     pending.pop(key, None)
@@ -943,7 +944,7 @@ class TelegramTransport(BaseTransport):
             binding = cls.lookup_binding(message.chat.id, message.message_thread_id)
             if not binding: return
             agent_id, thread_uuid = binding
-            agent = await make_agent(agent_id, thread_uuid)
+            agent = await Agent.get(agent_id, thread_uuid)
             if not agent: return
             await agent.thread_rename(thread_uuid, edited.name)
 

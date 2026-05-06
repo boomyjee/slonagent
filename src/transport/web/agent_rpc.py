@@ -10,7 +10,6 @@ from agent import Agent
 from src.memory.memory import Memory
 from src.skills.sandbox.container_lib.rpc import Channel
 from src.transport.base import BaseTransport
-from src.transport.web import WebTransport
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +19,7 @@ class _Host:
         self._agent_id = agent_id
 
     async def get_agent(self, thread_id: str | None = None):
-        return await WebTransport.make_agent(self._agent_id, thread_id or "")
+        return await Agent.get(self._agent_id, thread_id or "")
 
 
 _ALLOWED = {

@@ -205,8 +205,8 @@ class DashboardFork(WebFork):
             "thread_id": "", "text": text,
         }, replay=True)
         if "" not in self.transports:
-            from src.transport.web import WebTransport
-            await WebTransport.make_agent(self.ref_agent.id, "")
+            from agent import Agent
+            await Agent.get(self.ref_agent.id, "")
         await self.transports[""].process_message(
             content_parts=[{"type": "text", "text": text}],
             trigger_answer=True,

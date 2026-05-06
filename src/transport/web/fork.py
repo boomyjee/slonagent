@@ -241,8 +241,8 @@ class WebFork:
             try:
                 tid = msg.get("thread_id", "")
                 if tid not in self.transports:
-                    from src.transport.web import WebTransport
-                    await WebTransport.make_agent(self.ref_agent.id, tid)
+                    from agent import Agent
+                    await Agent.get(self.ref_agent.id, tid)
 
                 await self.transports[tid].process_message(
                     content_parts=content_parts,
