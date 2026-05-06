@@ -42,7 +42,7 @@ class TrackingProvider(BaseProvider):
         super().__init__(consolidate_tokens=consolidate_tokens)
         self.consolidated_batches: list[list] = []
 
-    async def _consolidate(self, pending):
+    async def _consolidate(self, pending, cutoff: str = ""):
         self.consolidated_batches.append(list(pending))
 
 

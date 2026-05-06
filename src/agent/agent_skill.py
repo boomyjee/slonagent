@@ -26,6 +26,15 @@ class AgentSkill(Skill):
         if self.agent:
             self.agent.stop()
         return "⚠️ Ответ прерван пользователем."
+
+    @bypass("anonymous", "Переключить анонимный режим треда (не пишется в LOG.md)", standalone=True)
+    def anonymous_command(self, args: str) -> str:
+        threads = self.agent._load_threads()
+        rec = threads.setdefault(self.agent.thread_id, {"name": ""})
+        rec["anonymous"] = not rec.get("anonymous", False)
+        self.agent._save_threads(threads)
+        self.agent.memory.anonymous = rec["anonymous"]
+        return f"🕶 Анонимный режим: {'включён' if rec['anonymous'] else 'выключен'}"
     
     @bypass("tool", "Вызвать тул")
     async def tool_command(self, args: str):

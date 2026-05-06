@@ -217,6 +217,8 @@ class Memory:
             if "_timestamp" not in turn:
                 turn = {**turn, "_timestamp": datetime.now(timezone.utc).isoformat()}
             turn = {**turn, "_thread_id": self.thread_id}
+            if self.anonymous:
+                turn["_anonymous"] = True
             self._turns.append(turn)
             if turn.get("role") == "assistant" and not turn.get("tool_calls"):
                 self.save()

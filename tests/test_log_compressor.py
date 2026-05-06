@@ -321,20 +321,27 @@ class TestLogCompressorConsolidate:
         c = self._make_compressor(tmp_path)
         self._mock_llm(c, "")
         turns = make_turns(4, chars=200)
-        await c._consolidate(turns)
-        # LOG.md не появился
+        for i, t in enumerate(turns):
+            t["_timestamp"] = f"2025-01-01T00:00:0{i}"
+        c.agent.memory._turns.extend(turns)
+        await c._consolidate(turns, cutoff=turns[-1]["_timestamp"])
+        # LOG.md не появился — observer вернул пусто
         assert not os.path.exists(c._log_path())
-        # _observed не проставлен (observer вернул пусто)
-        assert not any(t.get("_observed") for t in turns)
+        # Турны всё равно помечены _observed: pending уже очищен BaseProvider'ом
+        # до вызова _consolidate, не пометить = сделать зомби.
+        assert all(t.get("_observed") for t in c.agent.memory._turns)
 
     @pytest.mark.asyncio
     async def test_observer_writes_log_and_marks_observed(self, tmp_path):
         c = self._make_compressor(tmp_path)
         self._mock_llm(c, "<observations>\n* 🔴 hello\n</observations>")
         turns = make_turns(4, chars=200)
-        await c._consolidate(turns)
+        for i, t in enumerate(turns):
+            t["_timestamp"] = f"2025-01-01T00:00:0{i}"
+        c.agent.memory._turns.extend(turns)
+        await c._consolidate(turns, cutoff=turns[-1]["_timestamp"])
         assert os.path.exists(c._log_path())
-        assert all(t.get("_observed") for t in turns)
+        assert all(t.get("_observed") for t in c.agent.memory._turns)
         log_content = c._read_log()
         assert "hello" in log_content
 

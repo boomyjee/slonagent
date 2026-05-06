@@ -746,7 +746,14 @@ class LogCompressor(BaseProvider):
         while kept and kept[0].get("role") == "tool": kept.pop(0)
         return kept
 
-    async def _consolidate(self, turns: list) -> None:
+    async def _consolidate(self, turns: list, cutoff: str = "") -> None:
+        if cutoff:
+            for t in self.agent.memory._turns:
+                ts = t.get("_timestamp", "")
+                if ts and ts <= cutoff:
+                    t["_observed"] = True
+            self.agent.memory.save()
+
         by_thread = {}
         for turn in turns:
             by_thread.setdefault(turn.get("_thread_id", ""), []).append(turn)
@@ -777,9 +784,6 @@ class LogCompressor(BaseProvider):
             updated = await self._run_reflector(updated) or updated
 
         self._write_log(updated)
-        for t in turns:
-            if isinstance(t, dict):
-                t["_observed"] = True
         log.info("[LogCompressor] %d turns from %d thread(s) → LOG.md", len(turns), len(by_thread))
         await self.send_memory_info(final=True)
 

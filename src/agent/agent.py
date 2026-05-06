@@ -225,6 +225,7 @@ class Agent:
         self._restrictions_file = os.path.join(memory_dir, ".restrictions.json") if memory_dir else None
         self._restrictions: dict = self._load_restrictions()
         self.thread_ensure(self.thread_id)
+        self.memory.anonymous = self._load_threads().get(self.thread_id, {}).get("anonymous", False)
 
     def _load_restrictions(self) -> dict:
         if not self._restrictions_file:

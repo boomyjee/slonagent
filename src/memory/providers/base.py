@@ -45,12 +45,17 @@ class BaseProvider(Skill):
         self._pending.append(turn)
         if turn.get("role") == "assistant" and not turn.get("tool_calls"):
             if Memory.count_tokens(self._pending) >= self.consolidate_tokens:
-                snapshot = list(self._pending)
+                # cutoff = время самого свежего турна в pending до фильтра.
+                # Подкласс может им пометить «обработано до этой точки» в Memory,
+                # чтобы анонимные турны (выкинутые из snapshot фильтром) тоже
+                # попали под зачистку — они в Memory есть, в snapshot нет.
+                cutoff = self._pending[-1].get("_timestamp", "")
+                snapshot = [t for t in self._pending if not t.get("_anonymous")]
                 self._pending.clear()
                 md = self.agent.memory.memory_dir
                 async with self.cls._locks.setdefault(md, asyncio.Lock()):
-                    await self._consolidate(snapshot)
+                    await self._consolidate(snapshot, cutoff=cutoff)
             save_turns_json(self._pending_file, self._pending)
 
-    async def _consolidate(self, pending):
+    async def _consolidate(self, pending, cutoff: str = ""):
         pass

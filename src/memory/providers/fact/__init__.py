@@ -112,7 +112,7 @@ class FactProvider(BaseProvider):
 
     # ── Consolidate (retain pipeline) ────────────────────────────────────────────
 
-    async def _consolidate(self, pending: list) -> None:
+    async def _consolidate(self, pending: list, cutoff: str = "") -> None:
         """
         Конвертирует накопленные ходы в RetainItem и запускает retain pipeline.
         Pending группируется по треду — чтобы чанкер видел когерентный разговор,
