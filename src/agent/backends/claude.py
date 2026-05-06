@@ -444,6 +444,10 @@ class ClaudeBackend(BaseBackend):
                 "extra_args": extra_args,
                 "mcp_servers": {"slon": self._mcp_server} if self._mcp_server else {},
                 "stderr": _on_stderr,
+                # SDK дефолт 1MB. С include_partial_messages клод эхает в stdout
+                # накопленный контент (включая base64 картинок из tool-result'ов)
+                # — на ~700KB изображении одна partial-строка переваливает 1MB.
+                "max_buffer_size": 10 * 1024 * 1024,
             }
             options_kwargs.update(self._sdk_options)
 
