@@ -3,7 +3,7 @@ import { api, currentRoot } from './api.js';
 import { IdeContext } from './common/ChatDialog.js';
 
 const cl = {};
-const LANG = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'typescript',json:'json',md:'markdown',html:'html',css:'css',yaml:'yaml',yml:'yaml',sh:'shell',bash:'shell',rs:'rust',go:'go',java:'java',rb:'ruby',c:'c',cpp:'cpp',h:'c',hpp:'cpp',toml:'ini',cfg:'ini',txt:'plaintext'};
+const LANG = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'typescript',json:'json',md:'markdown',html:'html',css:'css',yaml:'yaml',yml:'yaml',sh:'shell',bash:'shell',rs:'rust',go:'go',java:'java',rb:'ruby',c:'c',cpp:'cpp',h:'c',hpp:'cpp',toml:'ini',cfg:'ini',txt:'plaintext',php:'php',sql:'sql',xml:'xml',svg:'xml',dockerfile:'dockerfile'};
 
 // Virtual paths used to view files at git refs / with blame decorations.
 // Format: <scheme>:<encoded-repo>:<encoded-ref>:<encoded-file>.
