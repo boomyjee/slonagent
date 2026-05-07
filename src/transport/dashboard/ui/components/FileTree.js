@@ -83,7 +83,7 @@ const tree = {
 function DirNode({ entry, depth, onOpen, onContextMenu, onFileClick, selected, dnd, dragOver }) {
     const open = tree.isOpen(entry.path);
     const children = tree.children[entry.path];
-    const pad = (8 + depth * 8) + 'px';
+    const pad = (8 + depth * 14) + 'px';
     const dirHover = dragOver === entry.path ? ' ' + cl.dropTarget : '';
     return html`<div>
         <div class="${cl.node}${dirHover}"
@@ -100,12 +100,12 @@ function DirNode({ entry, depth, onOpen, onContextMenu, onFileClick, selected, d
         ${open && children && children.map(e => e.is_dir
             ? html`<${DirNode} key=${e.path} entry=${e} depth=${depth + 1} onOpen=${onOpen} onContextMenu=${onContextMenu} onFileClick=${onFileClick} selected=${selected} dnd=${dnd} dragOver=${dragOver} />`
             : html`<div class="${cl.node}${selected.has(e.path) ? ' ' + cl.selected : ''}"
-                        style=${{paddingLeft: (8 + (depth+1) * 8) + 'px'}}
+                        style=${{paddingLeft: (8 + (depth+1) * 14) + 'px'}}
                         draggable="true"
                         onDragStart=${ev => dnd.start(ev, e)}
                         onClick=${ev => onFileClick(ev, e)}
                         onContextMenu=${ev => onContextMenu(ev, e)}>
-                        <span class=${cl.chevron}></span>${fileIcon(e.name)}<span>${e.name}</span></div>`
+                        ${fileIcon(e.name)}<span>${e.name}</span></div>`
         )}
     </div>`;
 }
@@ -366,9 +366,12 @@ cl.node = css`
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   &:hover { background: var(--surface2); }
 `;
-cl.chevron = css`width: 12px; text-align: center; font-size: 10px; flex-shrink: 0; color: var(--text-dim);`;
+cl.chevron = css`
+  width: 18px; text-align: center; margin-right: 1px; flex-shrink: 0;
+  font-size: 18px; line-height: 1; color: var(--text-dim);
+`;
 cl.fileIcon = css`
-  width: 18px; text-align: center; margin-right: 3px; flex-shrink: 0;
+  width: 18px; text-align: center; margin-right: 1px; flex-shrink: 0;
   font-size: 9px; font-weight: 700; font-family: monospace; letter-spacing: -0.5px;
 `;
 cl.empty = css`padding: 16px; color: var(--text-dim); font-size: 12px; font-style: italic;`;
