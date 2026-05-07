@@ -1,4 +1,5 @@
 import asyncio, base64, hashlib, json, os, re, logging, shlex, subprocess
+from contextlib import suppress
 from typing import Annotated
 from agent import Skill, tool
 
@@ -175,8 +176,24 @@ class SandboxSkill(Skill):
         return "\n".join(lines)
 
     @staticmethod
-    async def _run(*args, **kwargs):
-        return await asyncio.to_thread(subprocess.run, *args, **kwargs)
+    async def _run(cmd, *, capture_output=False, text=True, encoding="utf-8",
+                   errors="replace", timeout=None, check=False):
+        """Cancel-aware drop-in для subprocess.run. На cancel/timeout грохает proc."""
+        PIPE = asyncio.subprocess.PIPE if capture_output else None
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+            with suppress(ProcessLookupError): proc.kill()
+            with suppress(Exception): await proc.wait()
+            if isinstance(e, asyncio.TimeoutError):
+                raise subprocess.TimeoutExpired(cmd, timeout) from None
+            raise
+        dec = lambda b: b.decode(encoding, errors=errors) if (b is not None and text) else b
+        r = subprocess.CompletedProcess(cmd, proc.returncode, dec(out), dec(err))
+        if check and proc.returncode:
+            raise subprocess.CalledProcessError(proc.returncode, cmd, r.stdout, r.stderr)
+        return r
 
     def stop(self):
         # `-t 0` пропускает 10-секундное ожидание SIGTERM. Контейнер крутит
@@ -371,7 +388,14 @@ class SandboxSkill(Skill):
 
         if timeout is None:
             timeout = self.default_timeout
-        docker_cmd = [self.runtime, "exec", "-e", "PYTHONPATH=/slonagent", "-w", workdir, self.container_name, "bash", "-lc", command]
+        # Маркер в env'е процесса — чтоб на cancel найти и прибить нашу команду
+        # внутри контейнера (см. except CancelledError ниже).
+        marker = f"slon_exec_{base64.b32encode(os.urandom(6)).decode().rstrip('=').lower()}"
+        docker_cmd = [
+            self.runtime, "exec", "-e", "PYTHONPATH=/slonagent",
+            "-e", f"_SLON_MARKER={marker}", "-w", workdir, self.container_name,
+            "bash", "-lc", command,
+        ]
         logging.info("[exec] Запуск команды: %s", command)
 
         try:
@@ -388,6 +412,23 @@ class SandboxSkill(Skill):
             err = f"Команда превысила таймаут {timeout} секунд и была прервана."
             logging.error("[exec] %s", err)
             return {"error": err}
+        except asyncio.CancelledError:
+            # _run грохнул хостовый podman exec, но команда внутри контейнера
+            # осиротела (namespace-изоляция, без TTY signals не пробрасываются).
+            # Добиваем её через /proc/*/environ — pgrep/pkill в slim-образе нет.
+            kill_script = (
+                f"for d in /proc/[0-9]*; do "
+                f"  if grep -aqz '_SLON_MARKER={marker}' $d/environ 2>/dev/null; then "
+                f"    kill -9 $(basename $d) 2>/dev/null; "
+                f"  fi; "
+                f"done"
+            )
+            with suppress(Exception):
+                await self._run(
+                    [self.runtime, "exec", self.container_name, "sh", "-c", kill_script],
+                    timeout=5,
+                )
+            raise
         except Exception as e:
             err = f"Ошибка при запуске {self.runtime}: {e}"
             logging.error("[exec] %s", err)

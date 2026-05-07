@@ -8,6 +8,7 @@ session_id state, переиспользование клиента.
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -788,3 +789,410 @@ class TestClaudeAgentIntegration:
         tool_call = agent.transport.on_tool_call.call_args
         assert "add" in tool_call.args[0]
         assert tool_call.args[1] == {"a": 17, "b": 25}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Integration — agent.stop() прерывает реального claude
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from src.transport.base import BaseTransport
+from src.memory.providers.base import BaseProvider as MemBaseProvider
+
+
+class _StopTestTransport(BaseTransport):
+    """Транспорт-«ждалка» для stop-тестов: события streaming_started /
+    tool_called / agent_tool_called / processing_done — чтоб тест мог дождаться
+    нужного момента и дёрнуть agent.stop()."""
+
+    def __init__(self):
+        super().__init__()
+        self.streaming_started = asyncio.Event()
+        self.tool_called = asyncio.Event()
+        self.agent_tool_called = asyncio.Event()
+        self.processing_done = asyncio.Event()
+        self.messages: list[str] = []
+        self.tool_calls: list[tuple[str, dict]] = []
+        self.tool_results: list[tuple[str, object]] = []
+
+    async def send_message(self, text, stream_id=None, final=True):
+        self.messages.append(text)
+        if stream_id:
+            self.streaming_started.set()
+
+    async def send_thinking(self, text, stream_id=None, final=False): pass
+    async def send_memory_info(self, text): pass
+
+    async def on_tool_call(self, name, args):
+        self.tool_calls.append((name, args))
+        self.tool_called.set()
+        if name == "Agent":
+            self.agent_tool_called.set()
+
+    async def on_tool_result(self, name, result):
+        self.tool_results.append((name, result))
+
+    async def send_processing(self, active):
+        if not active:
+            self.processing_done.set()
+
+
+class _PassthroughCompressor(MemBaseProvider):
+    def __init__(self): super().__init__(consolidate_tokens=0)
+    async def compress(self, turns): return turns
+
+
+class _SlowSkill(Skill):
+    """Тулза которая надолго засыпает — чтоб успеть прервать пока она работает.
+    Сигналит entered когда вошла в тело и completed если успела закончиться (в
+    норме теста не должна — её прерывает stop())."""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.completed = False
+
+    @tool("Долгая операция. Используй когда тебя просят 'медленную тулзу'.")
+    async def slow_thing(self, marker: str = "x") -> dict:
+        self.entered.set()
+        await asyncio.sleep(60)
+        self.completed = True
+        return {"marker": marker, "done": True}
+
+
+def _make_stop_test_agent(skills=None, sdk_options=None):
+    """Агент с реальным CLAUDE_MODEL, кастомным транспортом-ждалкой и
+    PassthroughCompressor (чтоб не вмешивалась в добавление турнов)."""
+    from src.agent.agent import Agent
+    transport = _StopTestTransport()
+    agent = Agent(
+        id="stop_test",
+        model_name=CLAUDE_MODEL,
+        backend="claude",
+        backend_params={"sdk_options": sdk_options} if sdk_options else None,
+        agent_dir=tempfile.mkdtemp(),
+        memory_compressor=_PassthroughCompressor(),
+        skills=skills or [],
+        transport=transport,
+    )
+    return agent, transport
+
+
+@pytest.mark.integration
+class TestClaudeStop:
+    """Реальный claude должен корректно прерываться по agent.stop() в трёх
+    моментах: во время стрима текста родителя, во время выполнения тула, во
+    время работы субагента. После прерывания память должна быть сбалансирована
+    (никаких висящих tool_calls без result'ов) и заканчиваться interrupt-маркером."""
+
+    @staticmethod
+    async def _run_until(agent, transport, text: str, wait_event: asyncio.Event,
+                         wait_timeout: float = 30.0):
+        """Стартует loop, посылает text, ждёт wait_event, дёргает stop, ждёт
+        processing_done. Возвращает агента (НЕ закрывает — caller сам)."""
+        await agent.start(run_loop=True)
+        await agent.process_message([{"type": "text", "text": text}])
+        await asyncio.wait_for(wait_event.wait(), timeout=wait_timeout)
+        agent.stop()
+        await asyncio.wait_for(transport.processing_done.wait(), timeout=30.0)
+
+    @pytest.mark.asyncio
+    async def test_stop_during_text_stream(self):
+        agent, transport = _make_stop_test_agent()
+        try:
+            await self._run_until(
+                agent, transport,
+                "Напиши очень длинный рассказ про осенний лес, минимум 1000 слов. "
+                "Не останавливайся, пиши развёрнуто.",
+                transport.streaming_started,
+            )
+        finally:
+            await agent.close()
+
+        turns = list(agent.memory._turns)
+        # Последний assistant-turn — interrupt-маркер
+        assistant_turns = [t for t in turns if t.get("role") == "assistant" and isinstance(t.get("content"), str)]
+        assert assistant_turns, f"нет assistant-турнов, turns={turns}"
+        assert "прерван" in assistant_turns[-1]["content"], (
+            f"ожидаем interrupt-маркер, получили: {assistant_turns[-1]['content']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_during_tool_call(self):
+        """Прерываем когда тул УЖЕ ВЫПОЛНЯЕТСЯ (вошёл в тело, спит). Проверяем
+        что тул не успел завершиться (slow.completed остался False) и память
+        сбалансирована."""
+        slow = _SlowSkill()
+        agent, transport = _make_stop_test_agent(skills=[slow])
+        try:
+            await agent.start(run_loop=True)
+            await agent.process_message([{"type": "text", "text":
+                "Используй тулзу slow_thing с marker='hello'. Это медленная операция, "
+                "просто запусти её и дождись результата."
+            }])
+            # Ждём пока тул реально вошёл в тело и спит
+            await asyncio.wait_for(slow.entered.wait(), timeout=30.0)
+            # Даём ему чуть-чуть «поработать»
+            await asyncio.sleep(0.5)
+            agent.stop()
+            await asyncio.wait_for(transport.processing_done.wait(), timeout=30.0)
+        finally:
+            await agent.close()
+
+        # Тул не должен был успеть завершиться (60-секундный сон)
+        assert not slow.completed, "slow_thing завершилась до того как stop её прервал"
+
+        turns = list(agent.memory._turns)
+        tool_use_turns = [t for t in turns if t.get("tool_calls")]
+        tool_result_turns = [t for t in turns if t.get("role") == "tool"]
+        assert tool_use_turns, f"нет turn с tool_calls, turns={turns}"
+
+        used_ids = {tc["id"] for t in tool_use_turns for tc in t.get("tool_calls", [])}
+        result_ids = {t.get("tool_call_id") for t in tool_result_turns}
+        assert used_ids <= result_ids, (
+            f"висячие tool_calls без results: {used_ids - result_ids}, turns={turns}"
+        )
+
+        assert any("прерван" in str(t.get("content", "")) for t in turns[-3:]), (
+            f"ожидаем interrupt-маркер в хвосте памяти, turns={turns}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_phantom_done_after_interrupt(self):
+        """Bug-репро: после stop() недообработанный ResultMessage прерванного
+        query'а остаётся в SDK-очереди — при следующем сообщении в чат вылетает
+        «✅ Готово» за СТАРЫЙ query, до того как пришёл ответ на новый.
+
+        Сценарий пользователя: LLM вызвала тул → прерываю → ничего не происходит
+        → пишу что-то ещё → внезапно «✅ Готово (5 turns, $X)»."""
+        slow = _SlowSkill()
+        agent, transport = _make_stop_test_agent(skills=[slow])
+        try:
+            await agent.start(run_loop=True)
+
+            # 1) Запрос дёргает медленный тул, прерываем пока тул работает
+            await agent.process_message([{"type": "text", "text":
+                "Используй тулзу slow_thing с marker='hi' и дождись результата."
+            }])
+            await asyncio.wait_for(slow.entered.wait(), timeout=30.0)
+            await asyncio.sleep(0.5)
+            agent.stop()
+            await asyncio.wait_for(transport.processing_done.wait(), timeout=30.0)
+
+            done_after_interrupt = sum(1 for m in transport.messages if "Готово" in m)
+            assert done_after_interrupt == 0, (
+                f"за прерванный query прилетело Готово (не должно): {done_after_interrupt}"
+            )
+
+            # 2) Второй короткий запрос. Если бы был баг — увидели бы ДВА Готово
+            # (фантомный за прерванный + новый за этот).
+            transport.processing_done.clear()
+            await agent.process_message([{"type": "text", "text":
+                "Ответь одним словом: 'ок'. Без тулов."
+            }])
+            await asyncio.wait_for(transport.processing_done.wait(), timeout=60.0)
+
+            done_total = sum(1 for m in transport.messages if "Готово" in m)
+            done_msgs = [m for m in transport.messages if "Готово" in m]
+            assert done_total == 1, (
+                f"phantom Готово detected: всего {done_total} Готово (ожидаем 1).\n"
+                f"Готово-сообщения: {done_msgs}"
+            )
+
+            # Главная проверка: на 2-й запрос реально пришёл содержательный ответ.
+            # Если был phantom Готово — receive_response() терминируется на старом
+            # ResultMessage'е, новый запрос нормального ответа не получит.
+            turns = list(agent.memory._turns)
+            assistant_texts = [
+                t["content"] for t in turns
+                if t.get("role") == "assistant" and isinstance(t.get("content"), str)
+                and "прерван" not in t["content"]
+            ]
+            assert assistant_texts, f"нет содержательных assistant-ответов, turns={turns}"
+            last = assistant_texts[-1].lower()
+            assert "ок" in last or "ok" in last, (
+                f"на 2-й запрос не пришёл содержательный ответ: {assistant_texts[-1]!r}"
+            )
+        finally:
+            await agent.close()
+
+    @pytest.mark.asyncio
+    async def test_stop_during_real_builtin_bash(self):
+        """Реальный встроенный Bash тул клода со sleep 30. Проверяем что после
+        stop() он ДЕЙСТВИТЕЛЬНО убит, а не висит — drain receive_response()
+        должен прочитать ResultMessage быстро (<5s), не упереться в свой
+        10-секундный таймаут."""
+        import time
+        sdk_options = {
+            "system_prompt": {"type": "preset", "preset": "claude_code"},
+            "setting_sources": None,
+            "tools": None,
+        }
+        agent, transport = _make_stop_test_agent(sdk_options=sdk_options)
+        try:
+            await agent.start(run_loop=True)
+            await agent.process_message([{"type": "text", "text":
+                "Запусти Bash с командой `sleep 30 && echo done`. Просто запусти."
+            }])
+            await asyncio.wait_for(transport.tool_called.wait(), timeout=60.0)
+            await asyncio.sleep(1.0)  # bash успел стартануть и начать sleep
+            t0 = time.monotonic()
+            agent.stop()
+            await asyncio.wait_for(transport.processing_done.wait(), timeout=15.0)
+            elapsed = time.monotonic() - t0
+        finally:
+            await agent.close()
+
+        # Если CLI убил Bash — ResultMessage пришёл быстро. Если bash висит,
+        # drain упрётся в свой 10-секундный timeout.
+        assert elapsed < 5.0, (
+            f"Bash не прервался: от stop до processing_done {elapsed:.1f}s "
+            f"(близко к 10s drain-timeout — значит CLI не убил bash)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_during_sandbox_exec(self):
+        """Реальный sandbox_exec со sleep 60 в контейнере. Проверяем что после
+        stop() docker-команда УБИТА, а не доработала в фоне.
+
+        Использует asyncio.to_thread(subprocess.run) — у Python нет способа
+        прервать блокирующий syscall в треде, так что подпроцесс может пережить
+        cancel asyncio-задачи. Тест ловит этот случай через `podman exec ps`."""
+        import shutil
+        if shutil.which("podman") is None:
+            pytest.skip("podman not available")
+
+        from src.skills.sandbox import SandboxSkill
+        sandbox = SandboxSkill()
+        agent, transport = _make_stop_test_agent(skills=[sandbox])
+
+        # Кастомное ожидание: ловим именно sandbox_exec, не другие тулы
+        # SandboxSkill (read/glob/grep — может дёрнуть claude перед exec'ом).
+        exec_called = asyncio.Event()
+        orig_on_tool_call = transport.on_tool_call
+
+        async def watch_for_exec(name, args):
+            await orig_on_tool_call(name, args)
+            if name == "sandbox_exec":
+                exec_called.set()
+        transport.on_tool_call = watch_for_exec
+
+        try:
+            await agent.start(run_loop=True)
+            await agent.process_message([{"type": "text", "text":
+                "Используй тулзу sandbox_exec с command='sleep 60' и timeout=120. "
+                "Просто запусти и подожди результат, ничего не проверяй заранее."
+            }])
+            await asyncio.wait_for(exec_called.wait(), timeout=120.0)
+
+            # Контейнер мог ещё подниматься — поллим пока sleep не появится в нём.
+            # python:3.11-slim без procps. Искать через cmdline, но НЕ через
+            # grep по тексту скрипта — сам sh-процесс имеет "sleep 60" в своём
+            # cmdline (часть передаваемого скрипта). Проверяем точное совпадение.
+            check_sleep_cmd = [
+                "podman", "exec", sandbox.container_name, "sh", "-c",
+                "for f in /proc/[0-9]*/cmdline; do "
+                "  [ \"$(tr '\\0' ' ' < $f)\" = 'sleep 60 ' ] && exit 0; "
+                "done; exit 1",
+            ]
+            async def wait_for_sleep_running():
+                for _ in range(120):  # 60s максимум
+                    proc = await asyncio.to_thread(
+                        subprocess.run, check_sleep_cmd,
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if proc.returncode == 0:
+                        return
+                    await asyncio.sleep(0.5)
+                raise TimeoutError("sleep so не появился в контейнере")
+            await wait_for_sleep_running()
+
+            agent.stop()
+            await asyncio.wait_for(transport.processing_done.wait(), timeout=15.0)
+
+            # Дать пару секунд на распространение SIGKILL внутри контейнера
+            await asyncio.sleep(2.0)
+
+            post = subprocess.run(check_sleep_cmd, capture_output=True, text=True, timeout=10)
+            assert post.returncode != 0, (
+                f"sandbox_exec не убил sleep в контейнере после stop"
+            )
+        finally:
+            sandbox.stop()  # снести контейнер
+            await agent.close()
+
+    @pytest.mark.asyncio
+    async def test_stop_during_subagent(self):
+        """Прерываем когда субагент УЖЕ ЧТО-ТО ДЕЛАЕТ (запустил внутри себя
+        Bash). Ждём: parent дёрнул Agent → субагент дёрнул Bash → стоп. После
+        stop() — parent's tool_call для Agent паренный синтетическим result'ом,
+        внутренний Bash-вызов в parent's память не попал."""
+        from claude_agent_sdk import AgentDefinition
+
+        sdk_options = {
+            "system_prompt": {"type": "preset", "preset": "claude_code"},
+            "agents": {
+                "slow-bash": AgentDefinition(
+                    description="Запускает медленные bash команды",
+                    prompt="Ты — bash-helper. Когда тебя зовут — обязательно "
+                           "запусти Bash с командой 'sleep 30 && echo done'.",
+                    tools=["Bash"],
+                    model="haiku",
+                ),
+            },
+            "setting_sources": None,
+            # Дефолт claude.py — tools=[] (голый клод). Для Task-тула нужен None
+            # (= все встроенные доступны).
+            "tools": None,
+        }
+        agent, transport = _make_stop_test_agent(sdk_options=sdk_options)
+        try:
+            await agent.start(run_loop=True)
+            await agent.process_message([{"type": "text", "text":
+                "Используй Task tool с subagent_type='slow-bash'. "
+                "Передай ему задачу: запустить медленную bash команду."
+            }])
+            # Сначала ждём что parent дёрнул Agent
+            await asyncio.wait_for(transport.agent_tool_called.wait(), timeout=60.0)
+            # Очищаем общий tool_called и ждём СЛЕДУЮЩИЙ on_tool_call — это уже
+            # будет вызов внутри субагента (Bash).
+            transport.tool_called.clear()
+            await asyncio.wait_for(transport.tool_called.wait(), timeout=60.0)
+            # Bash действительно стартанул в субагенте. Дадим ему чуть-чуть
+            # повисеть на sleep и прерываем.
+            await asyncio.sleep(0.5)
+            agent.stop()
+            await asyncio.wait_for(transport.processing_done.wait(), timeout=30.0)
+        finally:
+            await agent.close()
+
+        turns = list(agent.memory._turns)
+        tool_use_turns = [t for t in turns if t.get("tool_calls")]
+        tool_result_turns = [t for t in turns if t.get("role") == "tool"]
+
+        # Parent's tool_call для Agent должен быть в памяти. Внутренние Bash —
+        # нет (по нашему фильтру parent_tool_use_id).
+        agent_calls = [
+            tc for t in tool_use_turns for tc in t.get("tool_calls", [])
+            if tc["function"]["name"] == "Agent"
+        ]
+        assert agent_calls, f"нет tool_call для Agent в памяти, turns={turns}"
+
+        bash_calls = [
+            tc for t in tool_use_turns for tc in t.get("tool_calls", [])
+            if tc["function"]["name"] == "Bash"
+        ]
+        assert not bash_calls, (
+            f"внутренний Bash-вызов субагента попал в parent's память: {bash_calls}"
+        )
+
+        # Каждый Agent-вызов имеет паренный tool_result
+        agent_ids = {tc["id"] for tc in agent_calls}
+        result_ids = {t.get("tool_call_id") for t in tool_result_turns}
+        assert agent_ids <= result_ids, (
+            f"висячие Agent-tool_calls без results: {agent_ids - result_ids}, turns={turns}"
+        )
+
+        # Interrupt-маркер в хвосте
+        assert any("прерван" in str(t.get("content", "")) for t in turns[-3:]), (
+            f"ожидаем interrupt-маркер в хвосте, turns={turns}"
+        )

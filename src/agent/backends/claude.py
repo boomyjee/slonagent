@@ -76,6 +76,7 @@ class ClaudeBackend(BaseBackend):
         self._client_append: str | None = None  # текст системки в живом клиенте
         self._client_skills_fp: str | None = None  # fingerprint скилов в живом клиенте
         self._mcp_server = None  # построится лениво из agent.skills
+        self._active_tool_tasks: set[asyncio.Task] = set()  # in-flight MCP handlers
         # Эфемерный агент: session_id живёт в памяти инстанса, на диск ничего не пишем.
         self._memory_state: dict = {}
 
@@ -119,16 +120,23 @@ class ClaudeBackend(BaseBackend):
                 schema = fn.get("parameters") or {"type": "object", "properties": {}}
 
                 async def handler(args, _name=name):
-                    fake_turn = {
-                        "tool_calls": [{
-                            "id": f"mcp_{_name}",
-                            "function": {
-                                "name": _name,
-                                "arguments": json.dumps(args, ensure_ascii=False),
-                            },
-                        }],
-                    }
-                    tool_turns = await self.agent.dispatch_tool_calls(fake_turn, emit_transport_events=False)
+                    # Регистрируемся в backend'е чтоб llm() мог отменить нас на
+                    # CancelledError — SDK сам активные MCP-таски на interrupt()
+                    # не отменяет, только на disconnect.
+                    self._active_tool_tasks.add(asyncio.current_task())
+                    try:
+                        fake_turn = {
+                            "tool_calls": [{
+                                "id": f"mcp_{_name}",
+                                "function": {
+                                    "name": _name,
+                                    "arguments": json.dumps(args, ensure_ascii=False),
+                                },
+                            }],
+                        }
+                        tool_turns = await self.agent.dispatch_tool_calls(fake_turn, emit_transport_events=False)
+                    finally:
+                        self._active_tool_tasks.discard(asyncio.current_task())
                     blocks = []
                     for t in tool_turns:
                         c = t.get("content")
@@ -606,8 +614,30 @@ class ClaudeBackend(BaseBackend):
                     return turns
         except asyncio.CancelledError:
             asyncio.current_task().uncancel()
-            with suppress(Exception):
+            # SDK сам не отменяет активные MCP handler tasks на interrupt()
+            # (только на disconnect) — отменяем сами, иначе sandbox_exec и
+            # прочие тулы крутятся в фоне после stop'а.
+            for t in list(self._active_tool_tasks):
+                t.cancel()
+            with suppress(Exception, asyncio.CancelledError):
                 await self._client.interrupt()
+            # SDK после interrupt оставляет финальный ResultMessage в своей очереди.
+            # Не вычитаешь — он всплывёт в receive_response() следующего llm() и
+            # терминирует новый запрос до того как тот получит ответ.
+            cancelled_result: ResultMessage | None = None
+            async def _drain():
+                nonlocal cancelled_result
+                async for _msg in self._client.receive_response():
+                    if isinstance(_msg, ResultMessage):
+                        cancelled_result = _msg
+            with suppress(Exception, asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(_drain(), timeout=10.0)
+            if cancelled_result is not None:
+                cost = (f"${cancelled_result.total_cost_usd:.4f}"
+                        if cancelled_result.total_cost_usd else "n/a")
+                await agent.transport.send_message(
+                    f"⚠️ Прервано ({cancelled_result.num_turns} turns, {cost})",
+                )
             # Pair any dangling tool_calls with synthetic results — иначе
             # turns несбалансированы: assistant.tool_calls без matching
             # role=tool ломает компрессию и openai-style вызовы.
