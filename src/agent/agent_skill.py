@@ -16,6 +16,10 @@ class SubagentSkill(Skill):
 class AgentSkill(Skill):
     """Встроенный скилл агента: базовые управляющие команды."""
 
+    async def get_context_prompt(self, user_text: str = "") -> str:
+        thread = self.agent.thread_id or "main"
+        return f"Ты — агент `{self.agent.id}`, текущий тред — `{thread}`."
+
     @bypass("restart", "Перезапустить бота", standalone=True)
     async def restart_command(self, args: str) -> str:
         await self.agent.transport.send_message("🔄 Перезапускаюсь...")
