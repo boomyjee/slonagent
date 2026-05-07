@@ -543,34 +543,45 @@ class ClaudeBackend(BaseBackend):
                         block_type = None
 
                 elif isinstance(message, AssistantMessage):
+                    # Сообщения с parent_tool_use_id — изнутри встроенного Agent-тула
+                    # (subagent). Их в parent's turns не пишем (иначе память засоряется
+                    # действиями, которые делал не сам родитель), но в transport шлём
+                    # — для UI. У субагента StreamEvent'ов нет, текст приходит цельным
+                    # TextBlock'ом, так что send_message делаем здесь.
+                    is_sub = message.parent_tool_use_id is not None
                     for block in message.content:
                         if isinstance(block, TextBlock):
-                            turns.append({
-                                "role": "assistant",
-                                "content": block.text,
-                                "_uuid": message.uuid,
-                            })
+                            if is_sub:
+                                await agent.transport.send_message(block.text)
+                            else:
+                                turns.append({
+                                    "role": "assistant",
+                                    "content": block.text,
+                                    "_uuid": message.uuid,
+                                })
                         elif isinstance(block, ToolUseBlock):
                             # MCP-обёртки наших скиллов прилетают как mcp__slon__<name>,
                             # внутренний учёт ведём по короткому имени.
                             name = block.name.removeprefix("mcp__slon__")
                             await agent.transport.on_tool_call(name, block.input)
                             tool_use_names[block.id] = name
-                            turns.append({
-                                "role": "assistant",
-                                "tool_calls": [{
-                                    "id": block.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": name,
-                                        "arguments": json.dumps(block.input, ensure_ascii=False),
-                                    },
-                                }],
-                                "_uuid": message.uuid,
-                            })
+                            if not is_sub:
+                                turns.append({
+                                    "role": "assistant",
+                                    "tool_calls": [{
+                                        "id": block.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": json.dumps(block.input, ensure_ascii=False),
+                                        },
+                                    }],
+                                    "_uuid": message.uuid,
+                                })
                         # ThinkingBlock — пропускаем
 
                 elif isinstance(message, UserMessage):
+                    is_sub = message.parent_tool_use_id is not None
                     for block in message.content:
                         if isinstance(block, ToolResultBlock):
                             raw = block.content or ""
@@ -579,13 +590,14 @@ class ClaudeBackend(BaseBackend):
                             else:
                                 result = raw
                             await agent.transport.on_tool_result(tool_use_names.get(block.tool_use_id, block.tool_use_id), result)
-                            turns.append({
-                                "role": "tool",
-                                "tool_call_id": block.tool_use_id,
-                                "name": tool_use_names.get(block.tool_use_id, block.tool_use_id),
-                                "content": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
-                                "_uuid": message.uuid,
-                            })
+                            if not is_sub:
+                                turns.append({
+                                    "role": "tool",
+                                    "tool_call_id": block.tool_use_id,
+                                    "name": tool_use_names.get(block.tool_use_id, block.tool_use_id),
+                                    "content": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
+                                    "_uuid": message.uuid,
+                                })
 
                 elif isinstance(message, ResultMessage):
                     cost = f"${message.total_cost_usd:.4f}" if message.total_cost_usd else "n/a"

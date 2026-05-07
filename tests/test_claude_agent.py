@@ -434,6 +434,163 @@ class TestLlmBlockConversion:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# llm() — субагенты (встроенный Claude Code Agent-тул)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSubagentMessages:
+    """Сообщения с parent_tool_use_id != None — это активность изнутри встроенного
+    Agent-тула. В parent's turns не пишем (иначе родитель «помнит» как делал
+    Glob/Read которые на самом деле делал субагент), но в transport шлём — иначе
+    в чате тишина пока субагент работает."""
+
+    @pytest.fixture
+    def mock_client_class(self):
+        with patch("src.agent.backends.claude.ClaudeSDKClient") as cls:
+            instance = MagicMock()
+            instance.connect = AsyncMock()
+            instance.query = AsyncMock()
+            instance.disconnect = AsyncMock()
+            cls.return_value = instance
+            yield cls, instance
+
+    @pytest.mark.asyncio
+    async def test_subagent_textblock_goes_to_transport_not_turns(self, mock_client_class):
+        """TextBlock субагента — send_message в transport, в turns не пишется.
+        У субагента StreamEvent'ов нет (probe подтвердил), поэтому текст приходит
+        целым TextBlock'ом и из этой ветки должен уйти в чат."""
+        _, client = mock_client_class
+        client.receive_response = lambda: aiter_messages([
+            AssistantMessage(
+                content=[ToolUseBlock(id="agent_call", name="Agent", input={"subagent_type": "haiku"})],
+                model="claude", parent_tool_use_id=None, error=None,
+                usage={}, message_id="m1", stop_reason="tool_use",
+                session_id="s", uuid="u_parent_call",
+            ),
+            # Текст изнутри субагента
+            AssistantMessage(
+                content=[TextBlock(text="осенний лист падает")],
+                model="claude", parent_tool_use_id="agent_call", error=None,
+                usage={}, message_id="m2", stop_reason="end_turn",
+                session_id="s", uuid="u_sub_text",
+            ),
+            # Финальный tool_result Agent-тула для родителя
+            UserMessage(
+                content=[ToolResultBlock(tool_use_id="agent_call", content="осенний лист падает", is_error=False)],
+                parent_tool_use_id=None, tool_use_result=None, uuid="u_parent_result",
+            ),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="s",
+                total_cost_usd=0.0, usage={}, result=None, uuid="r1",
+            ),
+        ])
+
+        agent = make_agent()
+        agent.memory._turns.append({"role": "user", "content": "сделай хайку"})
+        turns = await agent.llm()
+
+        # В turns: только parent's ToolUse(Agent) и финальный ToolResult — без TextBlock субагента
+        uuids = [t.get("_uuid") for t in turns]
+        assert "u_sub_text" not in uuids, "TextBlock субагента не должен попасть в turns"
+        assert "u_parent_call" in uuids and "u_parent_result" in uuids
+
+        # В transport: текст субагента ушёл send_message'ом
+        sent_texts = [c.args[0] for c in agent.transport.send_message.call_args_list]
+        assert "осенний лист падает" in sent_texts
+
+    @pytest.mark.asyncio
+    async def test_subagent_tooluse_calls_transport_not_turns(self, mock_client_class):
+        """ToolUseBlock субагента — on_tool_call зовётся (как и раньше), но в
+        turns не пишется."""
+        _, client = mock_client_class
+        client.receive_response = lambda: aiter_messages([
+            AssistantMessage(
+                content=[ToolUseBlock(id="agent_call", name="Agent", input={})],
+                model="claude", parent_tool_use_id=None, error=None,
+                usage={}, message_id="m1", stop_reason="tool_use",
+                session_id="s", uuid="u_parent_call",
+            ),
+            # Внутренний Glob субагента
+            AssistantMessage(
+                content=[ToolUseBlock(id="sub_glob", name="Glob", input={"pattern": "**/*.py"})],
+                model="claude", parent_tool_use_id="agent_call", error=None,
+                usage={}, message_id="m2", stop_reason="tool_use",
+                session_id="s", uuid="u_sub_tool",
+            ),
+            # ToolResult субагентского Glob
+            UserMessage(
+                content=[ToolResultBlock(tool_use_id="sub_glob", content="found 62 files", is_error=False)],
+                parent_tool_use_id="agent_call", tool_use_result=None, uuid="u_sub_result",
+            ),
+            UserMessage(
+                content=[ToolResultBlock(tool_use_id="agent_call", content="62", is_error=False)],
+                parent_tool_use_id=None, tool_use_result=None, uuid="u_parent_result",
+            ),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="s",
+                total_cost_usd=0.0, usage={}, result=None, uuid="r1",
+            ),
+        ])
+
+        agent = make_agent()
+        agent.memory._turns.append({"role": "user", "content": "посчитай"})
+        turns = await agent.llm()
+
+        # В turns: НЕТ ни tool_call'а Glob, ни tool_result'а от него
+        uuids = [t.get("_uuid") for t in turns]
+        assert "u_sub_tool" not in uuids
+        assert "u_sub_result" not in uuids
+        # Но parent's вызовы есть
+        assert "u_parent_call" in uuids and "u_parent_result" in uuids
+
+        # transport.on_tool_call вызывался ОБА раза — для Agent (parent) и Glob (sub)
+        tool_call_names = [c.args[0] for c in agent.transport.on_tool_call.call_args_list]
+        assert "Agent" in tool_call_names
+        assert "Glob" in tool_call_names
+
+        # transport.on_tool_result тоже зовётся для обоих
+        tool_result_names = [c.args[0] for c in agent.transport.on_tool_result.call_args_list]
+        assert "Glob" in tool_result_names
+        assert "Agent" in tool_result_names
+
+    @pytest.mark.asyncio
+    async def test_subagent_initial_prompt_usermessage_ignored(self, mock_client_class):
+        """SDK эхает initial prompt субагенту как UserMessage(parent_tool_use_id=X)
+        с TextBlock внутри. В turns не идёт (там обрабатываются только ToolResult'ы),
+        в transport тоже не шлём."""
+        _, client = mock_client_class
+        client.receive_response = lambda: aiter_messages([
+            AssistantMessage(
+                content=[ToolUseBlock(id="agent_call", name="Agent", input={})],
+                model="claude", parent_tool_use_id=None, error=None,
+                usage={}, message_id="m1", stop_reason="tool_use",
+                session_id="s", uuid="u_parent_call",
+            ),
+            UserMessage(
+                content=[TextBlock(text="initial prompt to subagent")],
+                parent_tool_use_id="agent_call", tool_use_result=None, uuid="u_sub_initial",
+            ),
+            UserMessage(
+                content=[ToolResultBlock(tool_use_id="agent_call", content="done", is_error=False)],
+                parent_tool_use_id=None, tool_use_result=None, uuid="u_parent_result",
+            ),
+            ResultMessage(
+                subtype="success", duration_ms=0, duration_api_ms=0,
+                is_error=False, num_turns=1, session_id="s",
+                total_cost_usd=0.0, usage={}, result=None, uuid="r1",
+            ),
+        ])
+
+        agent = make_agent()
+        agent.memory._turns.append({"role": "user", "content": "go"})
+        turns = await agent.llm()
+
+        uuids = [t.get("_uuid") for t in turns]
+        assert "u_sub_initial" not in uuids
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # llm() — session_id (resume vs fresh)
 # ═══════════════════════════════════════════════════════════════════════════════
 
