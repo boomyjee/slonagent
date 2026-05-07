@@ -532,7 +532,7 @@ class SandboxSkill(Skill):
             if count > 1 and not replace_all:
                 return {"error": f"old_string найден {count} раз — используй replace_all=true или передай более длинный фрагмент"}
             new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
-            with open(host_path, "w", encoding="utf-8") as f:
+            with open(host_path, "w", encoding="utf-8", newline="") as f:
                 f.write(new_content)
             return {"status": "ok", "replacements": count if replace_all else 1}
         except Exception as e:
@@ -570,7 +570,7 @@ class SandboxSkill(Skill):
                     return {"error": f"edit #{i}: old_string найден {count} раз — установи replace_all=true или дай больше контекста"}
                 content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
                 replacements.append(count if replace_all else 1)
-            with open(host_path, "w", encoding="utf-8") as f:
+            with open(host_path, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
             return {"status": "ok", "edits": len(edits), "replacements": replacements}
         except Exception as e:
@@ -587,7 +587,7 @@ class SandboxSkill(Skill):
             return {"error": f"Доступ запрещён: {path}"}
         try:
             os.makedirs(os.path.dirname(host_path), exist_ok=True)
-            with open(host_path, "w", encoding="utf-8") as f:
+            with open(host_path, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
             return {"status": "ok", "path": path}
         except Exception as e:
