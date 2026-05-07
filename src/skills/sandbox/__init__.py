@@ -524,7 +524,7 @@ class SandboxSkill(Skill):
         if err:
             return err
         try:
-            with open(host_path, encoding="utf-8") as f:
+            with open(host_path, encoding="utf-8", newline="") as f:
                 content = f.read()
             count = content.count(old_string)
             if count == 0:
@@ -552,7 +552,7 @@ class SandboxSkill(Skill):
         if not edits:
             return {"error": "edits пустой"}
         try:
-            with open(host_path, encoding="utf-8") as f:
+            with open(host_path, encoding="utf-8", newline="") as f:
                 content = f.read()
             replacements = []
             for i, edit in enumerate(edits, 1):
