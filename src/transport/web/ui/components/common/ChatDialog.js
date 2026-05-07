@@ -511,6 +511,19 @@ export class ChatDialog extends Component {
         return path.split(/[/\\]/).pop() || path;
     }
 
+    // Извлекает строки-комментарии из bash-команды (модель часто
+    // складывает rationale в `# ...`-строки внутри command). Используется
+    // как preview в свёрнутом виде sandbox_exec — чтоб не разворачивать
+    // всю команду чтобы понять что она делает.
+    static _bashComments(command) {
+        if (typeof command !== 'string' || !command) return '';
+        return command.split('\n')
+            .map(l => l.trim())
+            .filter(l => l.startsWith('#') && !l.startsWith('#!'))
+            .map(l => l.replace(/^#+\s*/, ''))
+            .join('\n');
+    }
+
     // Распознаёт ide-теги в тексте user-item'а — нужно рендеру баббла, чтоб
     // вместо raw <ide_*>...</...> показать чип.
     static _parseIdeTag(text) {
@@ -587,6 +600,8 @@ export class ChatDialog extends Component {
                             const argsText = this._formatArgs(m.args);
                             const resultText = this._formatResult(m.result);
                             const hint = ChatDialog._toolHint(m.args);
+                            const comments = m.name === 'sandbox_exec' && !open
+                                ? ChatDialog._bashComments(m.args?.command) : '';
                             return html`
                                 <div class=${cl.tool}>
                                     <div class="hdr" onClick=${() => this.setState(({ expanded: e }) => ({ expanded: { ...e, [i]: !open } }))}>
@@ -594,6 +609,7 @@ export class ChatDialog extends Component {
                                         <span>⚙ ${m.name}</span>
                                         ${hint && html`<span class=${cl.toolHint}>${hint}</span>`}
                                     </div>
+                                    ${comments && html`<div class="comments">${comments}</div>`}
                                     ${open && argsText && html`<div class="body">${argsText}</div>`}
                                     ${open && resultText && html`<div class="result">${resultText}</div>`}
                                 </div>
@@ -756,6 +772,8 @@ cl.tool = css`
   & .arr { font-size: 9px; }
   & .body { padding: 8px 10px; white-space: pre-wrap; color: var(--accent);
             border-top: 1px solid var(--border); max-height: 400px; overflow-y: auto; word-break: break-word; }
+  & .comments { padding: 8px 10px; white-space: pre-wrap; color: var(--green); font-style: italic;
+                border-top: 1px solid var(--border); max-height: 400px; overflow-y: auto; word-break: break-word; }
   & .result { padding: 8px 10px; white-space: pre-wrap; color: var(--text);
               border-top: 1px solid var(--border); max-height: 400px; overflow-y: auto; word-break: break-word;
               background: var(--bg); }
