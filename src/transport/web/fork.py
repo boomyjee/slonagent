@@ -291,7 +291,7 @@ class WebFork:
 
     async def thread_delete(self, uuid: str):
         self.transports.pop(uuid, None)
-        await self.send({"type": "transport", "method": "thread_delete","thread_id": uuid}, replay=True)
+        await self.send({"type": "transport", "method": "thread_delete", "uuid": uuid}, replay=True)
         path = self._history_path(uuid)
         if os.path.exists(path): os.remove(path)
 
