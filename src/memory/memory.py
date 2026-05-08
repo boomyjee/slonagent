@@ -128,6 +128,7 @@ class Memory:
         self.providers = (providers or []) + ([compressor] if compressor else [])
         self.compressor = compressor
         self.thread_id = thread_id
+        self.anonymous = False
         if memory_dir is None:
             memory_dir = os.path.join(os.getcwd(), "memory")
         self.memory_dir = memory_dir
