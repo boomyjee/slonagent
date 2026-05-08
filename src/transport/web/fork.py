@@ -18,7 +18,7 @@ _TEXT_EXT_RE = re.compile(
     re.I,
 )
 _WEB_FILE_RE = re.compile(r"^WEB(?:_(.+))?\.json$")
-_HISTORY_TAIL = 50
+_HISTORY_TAIL = 100
 
 class WebFork:
     """Per-agent.id fork: shared HTTP routes, ws clients, replay buffers,
@@ -309,9 +309,12 @@ class WebFork:
         if not os.path.exists(path):
             return []
         try:
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()[-_HISTORY_TAIL:]
-            return [json.loads(line) for line in lines if line.strip()]
+            with open(path, "rb") as f:
+                pos, buf = f.seek(0, 2), b""
+                while buf.count(b"\n") <= _HISTORY_TAIL and pos > 0:
+                    f.seek(pos := pos - (jump := min(pos, 4096)))
+                    buf = f.read(jump) + buf
+            return [json.loads(line) for line in buf.splitlines()[-_HISTORY_TAIL:] if line.strip()]
         except Exception as e:
             log.warning("[fork] load %s failed: %s", path, e, exc_info=True)
             return []
