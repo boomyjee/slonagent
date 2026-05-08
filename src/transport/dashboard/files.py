@@ -54,7 +54,7 @@ class FilesAPI:
             return JSONResponse({"error": "No root resolvable"}, 400)
         if not os.path.isdir(host):
             return JSONResponse({"error": f"Not a directory: {path}"}, 400)
-        sandbox = self.fork._sandbox
+        sandbox = self.fork.ref_agent.sandbox
         entries = []
         for name in sorted(os.listdir(host)):
             full = os.path.join(host, name)

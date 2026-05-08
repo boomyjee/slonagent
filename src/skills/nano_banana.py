@@ -31,7 +31,7 @@ class NanoBananaSkill(Skill):
         model_id = model_map[model]
 
         container_path = filename if filename.startswith('/') else f"/workspace/{filename}"
-        sandbox = next((s for s in self.agent.skills if s.__class__.__name__ == 'SandboxSkill'), None)
+        sandbox = self.agent.sandbox
         host_path = sandbox.resolve_path(container_path) if sandbox else None
         if host_path is None:
             return {"error": f"Доступ запрещён: {container_path}"}

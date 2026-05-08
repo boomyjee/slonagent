@@ -371,10 +371,8 @@ async def test_nested_dict_and_list_roundtrip(pair_async):
 # ── интеграция с Runner (как в реальном sandbox) ──────────────────────────────
 
 async def test_runner_dispatches_skill_tool(tmp_path):
-    """Runner.run_tool находит нужный Skill-подкласс в модуле и зовёт его.
-    Полностью имитируем то, что делает реальный runner внутри контейнера."""
-    import importlib.util
-    from src.skills.sandbox.container_lib.runner import Runner
+    """_find_tool находит нужный Skill-подкласс в модуле, инстанс зовёт tool."""
+    from src.skills.sandbox.container_lib.runner import _load, _find_tool
 
     script = tmp_path / "mini.py"
     script.write_text(
@@ -389,26 +387,22 @@ async def test_runner_dispatches_skill_tool(tmp_path):
         "        raise ValueError(m)\n",
         encoding="utf-8",
     )
-    spec = importlib.util.spec_from_file_location("_mini", script)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _load(str(script))
 
-    runner = Runner(mod)
-    result = await runner.run_tool("mini_dbl", {"x": 21}, agent=None)
-    assert result == 42
+    cls, fn = _find_tool(mod, "mini_dbl")
+    assert await fn(cls(), x=21) == 42
 
+    cls, fn = _find_tool(mod, "mini_boom")
     with pytest.raises(ValueError) as exc_info:
-        await runner.run_tool("mini_boom", {"m": "nope"}, agent=None)
+        await fn(cls(), m="nope")
     assert "nope" in str(exc_info.value)
 
 
 async def test_runner_error_propagates_with_traceback_over_rpc(tmp_path):
-    """Полный end-to-end: Runner регистрируется в Channel (как в контейнере),
-    хост зовёт run_tool, тулза кидает — трейс доезжает до хоста с указанием
+    """End-to-end: тонкая обёртка вокруг _find_tool регистрируется в Channel,
+    хост зовёт её, тулза кидает — трейс доезжает до хоста с указанием
     пользовательского файла."""
-    import importlib.util
-    from src.skills.sandbox.container_lib.runner import Runner
-    from agent import Skill
+    from src.skills.sandbox.container_lib.runner import _load, _find_tool
 
     script = tmp_path / "boom.py"
     script.write_text(
@@ -420,27 +414,27 @@ async def test_runner_error_propagates_with_traceback_over_rpc(tmp_path):
         "        raise RuntimeError(m)\n",
         encoding="utf-8",
     )
-    spec = importlib.util.spec_from_file_location("_boom", script)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _load(str(script))
+
+    class _Runner:
+        async def run_tool(self, name, args, agent=None):
+            cls, fn = _find_tool(mod, name)
+            return await fn(cls(), **args)
 
     loop = asyncio.get_running_loop()
     p = _Pair(
-        # peer-сторона (sandbox) разрешает Runner.run_tool — как реальный runner.
-        allowed_peer={Runner: {"run_tool"}},
+        allowed_peer={_Runner: {"run_tool"}},
         host_loop=loop,
     )
     p.start()
     try:
-        p.peer.register("runner", Runner(mod))
+        p.peer.register("runner", _Runner())
         with pytest.raises(RuntimeError) as exc_info:
             await p.host.call("runner", "run_tool",
                               name="boom_crash", args={"m": "ой"}, agent=None)
         msg = str(exc_info.value)
-        # Проверяем, что дошёл именно трейс, а не только текст.
         assert "Traceback (most recent call last)" in msg
         assert "RuntimeError: ой" in msg
-        # И что в трейсе виден файл с пользовательским кодом.
         assert "boom.py" in msg
     finally:
         p.close()

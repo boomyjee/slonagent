@@ -15,12 +15,7 @@ class WebTransportSkill(Skill):
 
     def __init__(self, transport):
         self.transport = transport
-        self.sandbox = None
         super().__init__()
-
-    async def start(self):
-        from src.skills.sandbox import SandboxSkill
-        self.sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
 
     @bypass("web", "Ссылка на веб-интерфейс", standalone=True)
     async def web_command(self, args: str) -> str:
@@ -29,7 +24,7 @@ class WebTransportSkill(Skill):
     @tool(lambda self: (
         "Скачать файл, прикреплённый пользователем в чате. "
         "dest_path — путь внутри контейнера (напр. /workspace/file.jpg)."
-        if self.sandbox
+        if self.agent.sandbox
         else "Скачать файл, прикреплённый пользователем в чате. "
         "dest_path — абсолютный путь на хост-машине."
     ))
@@ -46,8 +41,8 @@ class WebTransportSkill(Skill):
             return {"error": f"Файл с id={file_id} не найден (возможно, удалён по TTL=24h)"}
         src = matches[0]
 
-        if self.sandbox:
-            host_dest = self.sandbox.resolve_path(dest_path)
+        if self.agent.sandbox:
+            host_dest = self.agent.sandbox.resolve_path(dest_path)
             if host_dest is None:
                 return {"error": f"Путь запрещён или недоступен: {dest_path}"}
         else:

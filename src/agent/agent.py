@@ -199,6 +199,8 @@ class Agent:
         memory_dir = os.path.join(agent_dir, "memory") if agent_dir else ""
         self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [], memory_dir=memory_dir, thread_id=thread_id)
         self.skills = self.memory.providers + (skills or []) + [AgentSkill()]
+        from src.skills.sandbox import SandboxSkill
+        self.sandbox = next((s for s in self.skills if isinstance(s, SandboxSkill)), None)
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)

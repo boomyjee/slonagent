@@ -28,7 +28,7 @@ class ClaudeCodeSkill(Skill):
         from src.skills.sandbox import SandboxSkill
         from src.transport.dashboard import DashboardTransport
 
-        sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
+        sandbox = self.agent.sandbox
         if not sandbox:
             return {"error": "Требуется SandboxSkill с Docker-контейнером"}
 

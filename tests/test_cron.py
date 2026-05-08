@@ -72,13 +72,19 @@ class TestNextRun:
         assert CronSkill._next_run("2026-01-01T10:00:00", "once") is None
 
     def test_hourly(self):
-        assert "11:00" in CronSkill._next_run("2026-01-01T10:00:00", "hourly")
+        base = (datetime.now() + timedelta(days=365)).astimezone()
+        result = CronSkill._next_run(base.isoformat(), "hourly")
+        assert result == (base + timedelta(hours=1)).isoformat()
 
     def test_daily(self):
-        assert "2026-01-02" in CronSkill._next_run("2026-01-01T10:00:00", "daily")
+        base = (datetime.now() + timedelta(days=365)).astimezone()
+        result = CronSkill._next_run(base.isoformat(), "daily")
+        assert result == (base + timedelta(days=1)).isoformat()
 
     def test_weekly(self):
-        assert "2026-01-08" in CronSkill._next_run("2026-01-01T10:00:00", "weekly")
+        base = (datetime.now() + timedelta(days=365)).astimezone()
+        result = CronSkill._next_run(base.isoformat(), "weekly")
+        assert result == (base + timedelta(weeks=1)).isoformat()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -107,12 +107,9 @@ class TelegramSkill(Skill):
         self.transport = transport
         self._chat_title: str = ""
         self._is_private: bool = False
-        self.sandbox = None
         super().__init__()
 
     async def start(self):
-        from src.skills.sandbox import SandboxSkill
-        self.sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
         t = self.transport
         if t.chat_id is None:
             return
@@ -145,7 +142,7 @@ class TelegramSkill(Skill):
     @tool(lambda self: (
         "Скачать файл, отправленный пользователем. "
         "dest_path — путь внутри контейнера (напр. /workspace/file.jpg)."
-        if self.sandbox
+        if self.agent.sandbox
         else "Скачать файл, отправленный пользователем. "
         "dest_path — абсолютный путь на хост-машине."
     ))
@@ -154,8 +151,8 @@ class TelegramSkill(Skill):
         tg_file_id: Annotated[str, "tg_file_id из метаданных прикреплённого файла."],
         dest_path: Annotated[str, "Путь назначения для сохранения файла."],
     ):
-        if self.sandbox:
-            host_dest = self.sandbox.resolve_path(dest_path)
+        if self.agent.sandbox:
+            host_dest = self.agent.sandbox.resolve_path(dest_path)
             if host_dest is None:
                 return {"error": f"Путь запрещён или недоступен: {dest_path}"}
         else:

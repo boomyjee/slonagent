@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from src.transport.web import WebTransport, WebTransportServer
-from src.transport.dashboard import DashboardTransport, DashboardFork
+from src.transport.dashboard import DashboardTransport
 
 
 class _Sandbox:
@@ -40,7 +40,8 @@ class _Agent:
     def __init__(self, workspace_dir: str):
         self.id = "test"
         self.thread_id = ""
-        self.skills = [_Sandbox(workspace_dir)]
+        self.sandbox = _Sandbox(workspace_dir)
+        self.skills = [self.sandbox]
 
     def thread_list(self):
         return {}
@@ -56,7 +57,7 @@ def workspace(tmp_path):
 
 
 @pytest.fixture
-def transport(workspace, monkeypatch):
+def transport(workspace):
     # Pre-build the FastAPI app so WebTransportServer.start short-circuits
     # and never tries to spawn uvicorn / a tunnel.
     WebTransportServer._app = FastAPI()
@@ -64,12 +65,6 @@ def transport(workspace, monkeypatch):
     # tests pass `auth` cookie matching it, which mimics the prod login.
     WebTransportServer._password_hash = "test"
     WebTransport._forks.clear()
-
-    # DashboardFork._sandbox looks for a SandboxSkill in ref_agent.skills;
-    # tests just stub the property to a fixed object.
-    sandbox_obj = _Sandbox(workspace)
-    monkeypatch.setattr(DashboardFork, "_sandbox",
-                        property(lambda self: sandbox_obj))
 
     t = DashboardTransport()
     t.set_agent(_Agent(workspace))

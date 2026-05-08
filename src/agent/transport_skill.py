@@ -13,21 +13,13 @@ from src.agent.skill import Skill, tool
 
 
 class TransportSkill(Skill):
-    def __init__(self):
-        super().__init__()
-        self.sandbox = None
-
-    async def start(self):
-        from src.skills.sandbox import SandboxSkill
-        self.sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
-
     def _resolve_paths(self, paths: list[str]) -> tuple[list[str] | None, dict | None]:
         host_paths = []
         for p in paths:
             # С sandbox'ом — резолвим container-path в host. Без — принимаем
             # host-абсолютный путь как есть.
-            if self.sandbox:
-                host_path = self.sandbox.resolve_path(p)
+            if self.agent.sandbox:
+                host_path = self.agent.sandbox.resolve_path(p)
                 if host_path is None:
                     return None, {"error": f"Доступ запрещён: {p}"}
             else:

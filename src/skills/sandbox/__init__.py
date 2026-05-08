@@ -99,9 +99,11 @@ class SandboxSkill(Skill):
 
     def _mounts(self) -> list[tuple[str, str, bool]]:
         """[(host_path, container_path, readonly)] из конфига sandbox.ro / sandbox.rw."""
-        from src.skills.config import ConfigSkill
-        config = next((s for s in self.agent.skills if isinstance(s, ConfigSkill)), None) if self.agent else None
-        if not config:
+        if not self.agent.agent_dir: return []
+        try:
+            with open(os.path.join(self.agent.agent_dir, ".config.json"), encoding="utf-8") as f:
+                config = json.load(f)
+        except FileNotFoundError:
             return []
 
         def container_subpath(host: str) -> str:
@@ -111,9 +113,9 @@ class SandboxSkill(Skill):
             return p.lstrip("/")
 
         result: list[tuple[str, str, bool]] = []
-        for p in config.get("sandbox.ro") or []:
+        for p in config.get("sandbox",{}).get("ro") or []:
             result.append((p, f"/mnt/ro/{container_subpath(p)}", True))
-        for p in config.get("sandbox.rw") or []:
+        for p in config.get("sandbox",{}).get("rw") or []:
             result.append((p, f"/mnt/rw/{container_subpath(p)}", False))
         return result
 

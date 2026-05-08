@@ -246,7 +246,6 @@ async def test_sandbox_exec(tmp_path):
         container_name=container_name,
         image="python:3.11-slim",
         default_timeout=60,
-        runtime="podman",
     )
     agent, _ = make_agent(tmp_path, get_default_llm_config())
     skill.register(agent)
@@ -269,7 +268,6 @@ async def test_sandbox_python(tmp_path):
     skill = SandboxSkill(
         workspace_dir=str(tmp_path / "workspace"),
         container_name=container_name,
-        runtime="podman",
     )
     agent, _ = make_agent(tmp_path, get_default_llm_config())
     skill.register(agent)
@@ -292,7 +290,6 @@ async def test_sandbox_timeout(tmp_path):
     skill = SandboxSkill(
         workspace_dir=str(tmp_path / "workspace"),
         container_name=container_name,
-        runtime="podman",
     )
     agent, _ = make_agent(tmp_path, get_default_llm_config())
     skill.register(agent)
@@ -316,7 +313,7 @@ async def test_sandbox_read_file(tmp_path):
     (workspace / "notes.txt").write_text("test content\nline two\n", encoding="utf-8")
 
     container_name = f"slonagent_test_rf_{os.getpid()}"
-    skill = SandboxSkill(workspace_dir=str(workspace), container_name=container_name, runtime="podman")
+    skill = SandboxSkill(workspace_dir=str(workspace), container_name=container_name)
     agent, _ = make_agent(tmp_path, get_default_llm_config())
     skill.register(agent)
     await skill.start()

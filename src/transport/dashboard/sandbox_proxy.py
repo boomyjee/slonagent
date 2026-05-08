@@ -218,7 +218,7 @@ class SandboxProxy:
         return self.tunnel is not None
 
     async def _start_worker(self) -> bool:
-        sandbox = self.fork._sandbox
+        sandbox = self.fork.ref_agent.sandbox
         if sandbox is None:
             return False
         url = await self._worker_url()

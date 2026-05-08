@@ -25,7 +25,7 @@ class CodingModeSkill(Skill):
         from src.skills.sandbox import SandboxSkill
         from src.skills.web import WebSkill
 
-        parent_sandbox = next((s for s in self.agent.skills if isinstance(s, SandboxSkill)), None)
+        parent_sandbox = self.agent.sandbox
         parent_web = next((s for s in self.agent.skills if isinstance(s, WebSkill)), None)
         workspace_dir = parent_sandbox.workspace_dir if parent_sandbox else None
 

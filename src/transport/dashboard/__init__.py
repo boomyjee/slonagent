@@ -68,7 +68,7 @@ class DashboardSkill(Skill):
 
     async def get_context_prompt(self, user_text: str = "") -> str:
         fork = self.transport.fork
-        if not fork._sandbox:
+        if not fork.ref_agent.sandbox:
             return ""
         url = await fork.get_url("")
         return (
@@ -135,17 +135,10 @@ class DashboardFork(WebFork):
         _LogHandler._instances.pop(self.ref_agent.id, None)
         super().cleanup()
 
-    # ─── lookup helpers ────────────────────────────────────────────────────
-
-    @property
-    def _sandbox(self):
-        from src.skills.sandbox import SandboxSkill
-        return next((s for s in self.ref_agent.skills if isinstance(s, SandboxSkill)), None)
-
     @property
     def default_root(self) -> str:
         if self._default_root is None:
-            sandbox = self._sandbox
+            sandbox = self.ref_agent.sandbox
             self._default_root = sandbox.workspace_dir if sandbox \
                 else os.path.join(self.ref_agent.memory.memory_dir, "workspace")
             os.makedirs(self._default_root, exist_ok=True)
@@ -174,7 +167,7 @@ class DashboardFork(WebFork):
         super().register_routes()
 
     async def _serve_sandbox_fs(self, filepath: str, request: Request):
-        sandbox = self._sandbox
+        sandbox = self.ref_agent.sandbox
         if not sandbox:
             return Response("No sandbox", status_code=404)
         container_path = "/" + filepath.rstrip("/")
