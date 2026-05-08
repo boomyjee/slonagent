@@ -35,7 +35,8 @@ class SandboxSkill(Skill):
             raise RuntimeError("SandboxSkill requires agent_dir — can't be used on ephemeral agents")
         self.workspace_dir = self.workspace_dir or os.path.join(self.agent.memory.memory_dir, "workspace")
         os.makedirs(self.workspace_dir, exist_ok=True)
-        sanitized = re.sub(r"[^a-z0-9]+", "_", self.agent.agent_dir.lower()).strip("_")
+        trans = str.maketrans("абвгдеёжзийклмнопрстуфхцчшщъыьэюя","abvgdeejziyklmnoprstufhc4w6_y_eua")
+        sanitized = re.sub(r"[^a-z0-9]+", "_", self.agent.agent_dir.lower().translate(trans)).strip("_")
         self.container_name = self.container_name or f"slonagent_{sanitized}"
         self.tools_dir = os.path.join(self.workspace_dir, "tools")
         os.makedirs(self.tools_dir, exist_ok=True)
@@ -408,11 +409,7 @@ class SandboxSkill(Skill):
             err = f"{self.runtime} not found. Установи {self.runtime} и добавь его в PATH."
             logging.error("[exec] %s", err)
             return {"error": err}
-        except subprocess.TimeoutExpired:
-            err = f"Команда превысила таймаут {timeout} секунд и была прервана."
-            logging.error("[exec] %s", err)
-            return {"error": err}
-        except asyncio.CancelledError:
+        except (subprocess.TimeoutExpired, asyncio.CancelledError) as e:
             # _run грохнул хостовый podman exec, но команда внутри контейнера
             # осиротела (namespace-изоляция, без TTY signals не пробрасываются).
             # Добиваем её через /proc/*/environ — pgrep/pkill в slim-образе нет.
@@ -428,7 +425,11 @@ class SandboxSkill(Skill):
                     [self.runtime, "exec", self.container_name, "sh", "-c", kill_script],
                     timeout=5,
                 )
-            raise
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            err = f"Команда превысила таймаут {timeout} секунд и была прервана."
+            logging.error("[exec] %s", err)
+            return {"error": err}
         except Exception as e:
             err = f"Ошибка при запуске {self.runtime}: {e}"
             logging.error("[exec] %s", err)
