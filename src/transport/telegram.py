@@ -206,6 +206,8 @@ class TelegramTransport(BaseTransport):
             cls._main_chat_id = new
         log.info("[telegram] migrated chat %s → %s", old, new)
 
+    _topic_warned: set[tuple] = set()
+
     async def _ensure_chat_and_topic(self) -> bool:
         """True — можно слать. False — у агента нет группы или не удалось создать топик."""
         if self.chat_id is None:
@@ -225,7 +227,14 @@ class TelegramTransport(BaseTransport):
             self.chat_id = e.migrate_to_chat_id
             return await self._ensure_chat_and_topic()
         except Exception as e:
-            log.warning("create_forum_topic failed: %s", e)
+            key = (self.chat_id, self.agent.thread_id)
+            if key not in self._topic_warned:
+                self._topic_warned.add(key)
+                log.warning("create_forum_topic failed: %s", e)
+                if self.agent and self.agent.transport:
+                    asyncio.create_task(self.agent.transport.send_message(
+                        f"⚠️ Telegram: не удалось создать топик «{self.agent.thread_id[:8]}» — {e}"
+                    ))
             return False
         self.thread_id = topic.message_thread_id
         self.thread_name = name
