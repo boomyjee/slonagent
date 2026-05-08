@@ -198,7 +198,7 @@ class Agent:
             memory_providers = list(memory_providers.values())
         memory_dir = os.path.join(agent_dir, "memory") if agent_dir else ""
         self.memory = Memory(compressor=memory_compressor, providers=memory_providers or [], memory_dir=memory_dir, thread_id=thread_id)
-        self.skills = ([memory_compressor] if memory_compressor else []) + self.memory.providers + (skills or []) + [AgentSkill()]
+        self.skills = self.memory.providers + (skills or []) + [AgentSkill()]
         self.max_iterations = max_iterations
         for skill in self.skills:
             skill.register(self)

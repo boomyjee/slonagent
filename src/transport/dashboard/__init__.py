@@ -131,6 +131,10 @@ class DashboardFork(WebFork):
             _LogHandler._installed = handler
         _LogHandler._instances[ref_agent.id] = self
 
+    def cleanup(self):
+        _LogHandler._instances.pop(self.ref_agent.id, None)
+        super().cleanup()
+
     # ─── lookup helpers ────────────────────────────────────────────────────
 
     @property

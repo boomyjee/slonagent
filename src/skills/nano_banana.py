@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 import os
 import base64
 import asyncio
+import logging
 import requests
 
 class NanoBananaSkill(Skill):
@@ -76,11 +77,12 @@ class NanoBananaSkill(Skill):
                         with open(host_path, "wb") as f:
                             f.write(img_data)
 
-                        message_extra = ''
-                        transport_skill = getattr(self.agent.transport, "_skill", None)
-                        if transport_skill and transport_skill.send_images:
-                            await transport_skill.send_images([container_path])
+                        try:
+                            await self.agent.transport.send_images([host_path])
                             message_extra = " и отправлено пользователю"
+                        except Exception as e:
+                            logging.warning("[nano_banana] send_images failed: %s", e)
+                            message_extra = ""
 
 
                         b64 = base64.b64encode(img_data).decode()
