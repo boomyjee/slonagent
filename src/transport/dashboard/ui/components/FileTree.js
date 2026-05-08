@@ -130,6 +130,18 @@ export class FileTree extends Component {
 
     _closeMenu = () => { if (this.state.menu) this.setState({ menu: null }); };
 
+    // Mobile long-press → context menu (contextmenu doesn't fire when draggable="true")
+    _touchTimer = null;
+    _onTouchStart = (e) => {
+        const { clientX: x, clientY: y } = e.touches[0];
+        this._touchTimer = setTimeout(() => {
+            this._touchTimer = null;
+            const el = document.elementFromPoint(x, y)?.closest('.' + cl.node);
+            if (el) el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: x, clientY: y }));
+        }, 500);
+    };
+    _onTouchCancel = () => { clearTimeout(this._touchTimer); };
+
     _onFileClick = (e, entry) => {
         // Ctrl/Cmd-click — toggle selection. Plain click — clear selection
         // and open file as before.
@@ -305,7 +317,10 @@ export class FileTree extends Component {
             start: this._onDragStart, over: this._onDragOver,
             leave: this._onDragLeave, drop: this._onDrop,
         };
-        return html`<div class=${cl.treeRoot}>
+        return html`<div class=${cl.treeRoot}
+            onTouchStart=${this._onTouchStart}
+            onTouchMove=${this._onTouchCancel}
+            onTouchEnd=${this._onTouchCancel}>
             <${DirNode} entry=${root} depth=${0} onOpen=${onOpen}
                         onContextMenu=${this._onContextMenu}
                         onFileClick=${this._onFileClick}
