@@ -1,5 +1,6 @@
-import { html, Component, Fragment, css, persist } from '../lib.js';
+import { html, Component, Fragment, css, persist, useState, useEffect } from '../lib.js';
 import { api } from './api.js';
+import { loadMonaco, fileLang } from './Editor.js';
 
 const cl = {};
 const post = (path, body) => api(path, {
@@ -455,18 +456,54 @@ function Diff({ text, parts, file, onLineClick }) {
         return html`<div class=${cl.diffEmpty}>${summary}</div>`;
     }
 
+    return html`<${HighlightedDiff} hunks=${hunks} file=${file} parts=${parts} onLineClick=${onLineClick} />`;
+}
+
+// Каждая строка прогоняется через monaco.editor.colorize, который читает
+// активную глобальную тему (vs-slon, ставится в loadMonaco). Подсветка делается
+// построчно — без многострочного контекста; для diff это нормальный компромисс,
+// мульти-строчные конструкции (heredoc'и, тройные кавычки) могут локально путаться.
+function HighlightedDiff({ hunks, file, parts, onLineClick }) {
+    const [colored, setColored] = useState({});
+
+    useEffect(() => {
+        let alive = true;
+        setColored({});
+        (async () => {
+            const monaco = await loadMonaco();
+            const lang = fileLang(file);
+            const tasks = [];
+            hunks.forEach((h, i) => h.rows.forEach((r, j) => {
+                tasks.push(monaco.editor.colorize(r.text || ' ', lang, { tabSize: 4 })
+                    .then(out => [`${i}_${j}`, out]));
+            }));
+            const results = await Promise.all(tasks);
+            if (!alive) return;
+            const map = {};
+            for (const [k, v] of results) map[k] = v;
+            setColored(map);
+        })();
+        return () => { alive = false; };
+    }, [hunks, file]);
+
     return html`<div class=${cl.diff}>
         ${hunks.map((h, i) => html`<div key=${i} class=${cl.hunk}>
             <div class="hdr">${h.header}</div>
-            ${h.rows.map((r, j) => html`<div key=${j} class="row ${r.kind}"
-                onClick=${() => {
-                    if (r.kind === 'add' || r.kind === 'ctx') onLineClick?.(file, r.newN, parts[1]);
-                    else onLineClick?.(file, r.oldN, parts[0]);
-                }}>
-                <span class="numDel">${r.oldN}</span>
-                <span class="numAdd">${r.newN}</span>
-                <span class="content">${r.text || ' '}</span>
-            </div>`)}
+            ${h.rows.map((r, j) => {
+                const htmlOut = colored[`${i}_${j}`];
+                const content = htmlOut !== undefined
+                    ? html`<span class="content" dangerouslySetInnerHTML=${{ __html: htmlOut }}></span>`
+                    : html`<span class="content">${r.text || ' '}</span>`;
+                return html`<div key=${j} class="row ${r.kind}"
+                    onClick=${() => {
+                        if (r.kind === 'add' || r.kind === 'ctx') onLineClick?.(file, r.newN, parts[1]);
+                        else onLineClick?.(file, r.oldN, parts[0]);
+                    }}>
+                    <span class="numDel">${r.oldN}</span>
+                    <span class="numAdd">${r.newN}</span>
+                    ${content}
+                </div>`;
+            })}
         </div>`)}
     </div>`;
 }
@@ -547,9 +584,11 @@ cl.hunk = css`
   }
   & .content { padding: 0 8px; white-space: pre; }
   & .row.add .content { color: var(--green); }
-  & .row.add { background: rgba(166,227,161,0.05); }
+  & .row.add { background: rgba(46,100,67,0.25); }
+  & .row.add:hover { background: rgba(46,100,67,0.40); }
   & .row.del .content { color: var(--red); }
-  & .row.del { background: rgba(243,139,168,0.05); }
+  & .row.del { background: rgba(100,20,15,0.25); }
+  & .row.del:hover { background: rgba(100,20,15,0.40); }
 `;
 cl.menu = css`
   position: fixed; z-index: 200; max-width: 480px;

@@ -20,7 +20,7 @@ function parseGitPath(path) {
         file: decodeURIComponent(parts[2] || ''),
     };
 }
-function fileLang(file) {
+export function fileLang(file) {
     return LANG[file.split('.').pop()] || 'plaintext';
 }
 
@@ -36,7 +36,7 @@ function mediaKind(path) {
 }
 
 let monacoPromise = null;
-function loadMonaco() {
+export function loadMonaco() {
     if (monacoPromise) return monacoPromise;
     monacoPromise = (async () => {
         await new Promise(resolve => {
@@ -81,6 +81,9 @@ function loadMonaco() {
                 'scrollbarSlider.hoverBackground': '#646464b3',
             },
         });
+        // Делаем тему глобальной — monaco.editor.colorize() (без своего instance)
+        // не принимает theme в options и читает её из активной глобальной.
+        monaco.editor.setTheme('vs-slon');
         return monaco;
     })();
     return monacoPromise;
