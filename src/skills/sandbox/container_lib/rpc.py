@@ -476,7 +476,17 @@ class Channel:
         if isinstance(result, concurrent.futures.Future):
             fref = self._new_fref()
             self._send({"t": "ok_fut", "i": cid, "f": fref})
-            result.add_done_callback(lambda f: self._send_fut_done(fref, f))
+            # done-callback от concurrent future, полученного через
+            # run_coroutine_threadsafe, гарантированно прилетает в тред
+            # _async_loop'а. Контракт writeline — sync блокирующая, не из loop.
+            # Переселяем в дефолтный executor loop'а (shared thread pool).
+            loop = self._async_loop
+            if loop is not None:
+                result.add_done_callback(
+                    lambda f: loop.run_in_executor(None, self._send_fut_done, fref, f)
+                )
+            else:
+                result.add_done_callback(lambda f: self._send_fut_done(fref, f))
             return
         self._send({"t": "ok", "i": cid, "v": self._pack(result)})
 

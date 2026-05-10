@@ -438,3 +438,56 @@ async def test_runner_error_propagates_with_traceback_over_rpc(tmp_path):
         assert "boom.py" in msg
     finally:
         p.close()
+
+
+async def test_async_handler_no_deadlock_when_writeline_blocks_same_loop():
+    """Регрессия: при async_loop + writeline, который блокирует этот же loop через
+    run_coroutine_threadsafe(...).result() (схема websocket-транспорта), fut_done
+    через add_done_callback приходил в loop-тред и попадал в дедлок: .result()
+    ждал, когда loop выполнит send-корутину, а loop стоял внутри этого callback'а.
+    """
+    loop = asyncio.get_running_loop()
+    q_h2p, q_p2h = queue.Queue(), queue.Queue()
+
+    async def _send_via_loop(msg_str):
+        q_h2p.put(msg_str)
+
+    def host_readline():
+        line = q_p2h.get()
+        return "" if line is None else line
+
+    def host_writeline(msg):
+        msg_str = json.dumps(msg, ensure_ascii=False) + "\n"
+        asyncio.run_coroutine_threadsafe(_send_via_loop(msg_str), loop).result()
+
+    def peer_readline():
+        line = q_h2p.get()
+        return "" if line is None else line
+
+    def peer_writeline(msg):
+        q_p2h.put(json.dumps(msg, ensure_ascii=False) + "\n")
+
+    host = Channel(host_readline, host_writeline, allowed={object: None},
+                   ref_prefix="h", async_loop=loop)
+    peer = Channel(peer_readline, peer_writeline, allowed={object: None},
+                   ref_prefix="s")
+    host.start()
+    peer.start()
+
+    class SlowAsync:
+        async def aadd(self, a, b):
+            # Достаточно долго, чтобы rpc-call thread успел навесить
+            # add_done_callback ДО завершения cfut. Иначе callback дёрнется
+            # inline в rpc-call thread (не в loop), и дедлока не будет.
+            await asyncio.sleep(0.05)
+            return a + b
+
+    try:
+        host.register("calc", SlowAsync())
+        result = await asyncio.wait_for(peer.call("calc", "aadd", 40, 2), timeout=2.0)
+        assert result == 42
+    finally:
+        q_h2p.put(None)
+        q_p2h.put(None)
+        host.close()
+        peer.close()
