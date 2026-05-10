@@ -44,7 +44,7 @@ export function openSettingsDialog() {
 }
 
 cl.dialog = css`
-  width: 420px;
+  width: 420px; max-width: 100%;
   display: flex; flex-direction: column;
 `;
 cl.header = css`
