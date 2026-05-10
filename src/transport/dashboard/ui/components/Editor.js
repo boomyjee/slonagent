@@ -1,6 +1,7 @@
 import { html, Component, css, persist } from '../lib.js';
 import { api, currentRoot } from './api.js';
 import { IdeContext } from './common/ChatDialog.js';
+import { buildMonacoTheme, getMonacoThemeName, getFontSize, registerEditor } from '../theme.js';
 
 const cl = {};
 const LANG = {py:'python',js:'javascript',ts:'typescript',jsx:'javascript',tsx:'typescript',json:'json',md:'markdown',html:'html',css:'css',yaml:'yaml',yml:'yaml',sh:'shell',bash:'shell',rs:'rust',go:'go',java:'java',rb:'ruby',c:'c',cpp:'cpp',h:'c',hpp:'cpp',toml:'ini',cfg:'ini',txt:'plaintext',php:'php',sql:'sql',xml:'xml',svg:'xml',dockerfile:'dockerfile'};
@@ -49,41 +50,11 @@ export function loadMonaco() {
             window.require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs' }});
             window.require(['vs/editor/editor.main'], () => resolve(window.monaco));
         });
-        monaco.editor.defineTheme('vs-slon', {
-            base: 'vs-dark',
-            inherit: true,
-            rules: [
-                { token: 'comment', foreground: '6a9955', fontStyle: 'italic' },
-                { token: 'keyword', foreground: '569cd6' },
-                { token: 'string', foreground: 'ce9178' },
-                { token: 'number', foreground: 'b5cea8' },
-                { token: 'type', foreground: '4ec9b0' },
-                { token: 'function', foreground: 'dcdcaa' },
-                { token: 'variable', foreground: '9cdcfe' },
-                { token: 'operator', foreground: 'd4d4d4' },
-                { token: 'delimiter', foreground: 'd4d4d4' },
-            ],
-            colors: {
-                'editor.background': '#1e1e1e',
-                'editor.foreground': '#d4d4d4',
-                'editor.lineHighlightBackground': '#2d2d30',
-                'editor.selectionBackground': '#264f78',
-                'editor.inactiveSelectionBackground': '#3a3d41',
-                'editorCursor.foreground': '#aeafad',
-                'editorLineNumber.foreground': '#858585',
-                'editorLineNumber.activeForeground': '#d4d4d4',
-                'editorIndentGuide.background': '#404040',
-                'editorIndentGuide.activeBackground': '#707070',
-                'editorWidget.background': '#252526',
-                'editorWidget.border': '#3c3c3c',
-                'minimap.background': '#1e1e1e',
-                'scrollbarSlider.background': '#79797966',
-                'scrollbarSlider.hoverBackground': '#646464b3',
-            },
-        });
-        // Делаем тему глобальной — monaco.editor.colorize() (без своего instance)
-        // не принимает theme в options и читает её из активной глобальной.
-        monaco.editor.setTheme('vs-slon');
+        // Тема одна — пересобирается из CSS-переменных при каждой смене темы
+        // (см. applyTheme в theme.js). monaco.editor.colorize() читает её
+        // из активной глобальной — поэтому setTheme обязателен.
+        monaco.editor.defineTheme(getMonacoThemeName(), buildMonacoTheme());
+        monaco.editor.setTheme(getMonacoThemeName());
         return monaco;
     })();
     return monacoPromise;
@@ -105,10 +76,11 @@ export class Editor extends Component {
     async componentDidMount() {
         this.monaco = await loadMonaco();
         this._editor = this.monaco.editor.create(this._el, {
-            value: '', language: 'plaintext', theme: 'vs-slon',
-            minimap: { enabled: true }, fontSize: 13,
+            value: '', language: 'plaintext', theme: getMonacoThemeName(),
+            minimap: { enabled: true }, fontSize: getFontSize(),
             automaticLayout: true, scrollBeyondLastLine: false,
         });
+        registerEditor(this._editor);
         this._editor.onDidChangeCursorSelection(() => this._emitIdeContext());
         this.setState({ ready: true });
         this._handleActive();

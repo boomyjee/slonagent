@@ -10,6 +10,11 @@ import { Logs } from './components/Logs.js';
 import { Git } from './components/Git.js';
 import { WebView } from './components/WebView.js';
 import { currentRoot, setCurrentRoot } from './components/api.js';
+import { applyAll } from './theme.js';
+import { openSettingsDialog } from './components/SettingsDialog.js';
+
+// Применяем сохранённые тему и размер шрифта до первого рендера, чтобы избежать flash.
+applyAll();
 
 const cl = {};
 const LOGS_TAB = { id: 'logs', label: '☰', closable: false };
@@ -347,7 +352,11 @@ class App extends Component {
             <${IdeContext.Provider} value=${ideContext}>
             <div class="${cl.app} mobile-${mobileView}">
                 <div class="${cl.sidebar} dash-sidebar">
-                    <div class=${cl.sidebarHdr}>Explorer</div>
+                    <div class=${cl.sidebarHdr}>
+                        <span>Explorer</span>
+                        <button class=${cl.gear} onClick=${() => openSettingsDialog()}
+                                title="Settings">⚙</button>
+                    </div>
                     <div class=${cl.tree}>
                         <${FileTree} rootPath="/"
                                      rootName=${rootBasename(root)}
@@ -431,6 +440,13 @@ cl.sidebar = css`
 cl.sidebarHdr = css`
   padding: 10px 12px; font-size: 11px; text-transform: uppercase;
   letter-spacing: 1px; color: var(--text-dim); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+`;
+cl.gear = css`
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 14px; padding: 0 2px;
+  line-height: 1; user-select: none;
+  &:hover { color: var(--text); }
 `;
 cl.tree = css`flex: 1; overflow-y: auto; padding: 4px 0;`;
 cl.main = css`flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0;`;

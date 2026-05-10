@@ -13,10 +13,79 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <title>SlonAgent</title>
 <style>
+  /* Дефолтная палитра = dark-vscode. Дашборд переключает темы через
+     [data-theme] на <html> (см. dashboard/ui/components/theme.js). */
   :root {
     --bg: #1e1e1e; --surface: #252526; --surface2: #2d2d30; --surface3: #3e3e42;
     --border: #3c3c3c; --text: #d4d4d4; --text-dim: #858585;
-    --accent: #569cd6; --green: #6a9955; --warn: #dcdcaa; --red: #f14c4c;
+    --accent: #569cd6; --accent-fg: #1e1e1e;
+    --green: #6a9955; --warn: #dcdcaa; --red: #f14c4c;
+    --diff-add-bg: rgba(46,100,67,0.25); --diff-add-bg-hover: rgba(46,100,67,0.40);
+    --diff-del-bg: rgba(100,20,15,0.25); --diff-del-bg-hover: rgba(100,20,15,0.40);
+    --shadow: rgba(0,0,0,0.4);
+    --font-size-mono: 13px;
+    --user-msg-bg: var(--accent); --user-msg-fg: var(--accent-fg);
+    --syntax-comment: #6a9955; --syntax-keyword: #569cd6; --syntax-string: #ce9178;
+    --syntax-number: #b5cea8; --syntax-type: #4ec9b0; --syntax-function: #dcdcaa;
+    --syntax-variable: #9cdcfe; --syntax-operator: #d4d4d4; --syntax-delimiter: #d4d4d4;
+    --editor-selection: #264f78; --editor-selection-inactive: #3a3d41;
+    --editor-cursor: #aeafad;
+    --editor-indent-guide: #404040; --editor-indent-guide-active: #707070;
+    --editor-scrollbar: #79797966; --editor-scrollbar-hover: #646464b3;
+    --monaco-base: vs-dark;
+  }
+  :root[data-theme="dark-catppuccin"] {
+    --bg: #1e1e2e; --surface: #181825; --surface2: #313244; --surface3: #45475a;
+    --border: #45475a; --text: #cdd6f4; --text-dim: #a6adc8;
+    --accent: #89b4fa; --accent-fg: #1e1e2e;
+    --green: #a6e3a1; --warn: #f9e2af; --red: #f38ba8;
+    --diff-add-bg: rgba(166,227,161,0.15); --diff-add-bg-hover: rgba(166,227,161,0.30);
+    --diff-del-bg: rgba(243,139,168,0.18); --diff-del-bg-hover: rgba(243,139,168,0.32);
+    --shadow: rgba(0,0,0,0.5);
+    --syntax-comment: #6c7086; --syntax-keyword: #cba6f7; --syntax-string: #a6e3a1;
+    --syntax-number: #fab387; --syntax-type: #f9e2af; --syntax-function: #89b4fa;
+    --syntax-variable: #cdd6f4; --syntax-operator: #94e2d5; --syntax-delimiter: #9399b2;
+    --editor-selection: #585b70; --editor-selection-inactive: #45475a;
+    --editor-cursor: #f5e0dc;
+    --editor-indent-guide: #45475a; --editor-indent-guide-active: #7f849c;
+    --editor-scrollbar: #585b7066; --editor-scrollbar-hover: #7f849cb3;
+    --monaco-base: vs-dark;
+  }
+  :root[data-theme="light-vscode"] {
+    --bg: #ffffff; --surface: #f3f3f3; --surface2: #ebebeb; --surface3: #dbdbdb;
+    --border: #e1e1e1; --text: #1e1e1e; --text-dim: #717171;
+    --accent: #0066bf; --accent-fg: #ffffff;
+    --green: #098658; --warn: #b89500; --red: #d73a49;
+    --diff-add-bg: rgba(46,160,67,0.18); --diff-add-bg-hover: rgba(46,160,67,0.32);
+    --diff-del-bg: rgba(248,81,73,0.18); --diff-del-bg-hover: rgba(248,81,73,0.32);
+    --shadow: rgba(0,0,0,0.15);
+    --user-msg-bg: #d8e8f7; --user-msg-fg: #1e1e1e;
+    --syntax-comment: #008000; --syntax-keyword: #0000ff; --syntax-string: #a31515;
+    --syntax-number: #098658; --syntax-type: #267f99; --syntax-function: #795e26;
+    --syntax-variable: #001080; --syntax-operator: #383838; --syntax-delimiter: #383838;
+    --editor-selection: #add6ff; --editor-selection-inactive: #e5ebf1;
+    --editor-cursor: #000000;
+    --editor-indent-guide: #e1e1e1; --editor-indent-guide-active: #a8a8a8;
+    --editor-scrollbar: #64646466; --editor-scrollbar-hover: #646464b3;
+    --monaco-base: vs;
+  }
+  :root[data-theme="light-catppuccin"] {
+    --bg: #eff1f5; --surface: #e6e9ef; --surface2: #ccd0da; --surface3: #bcc0cc;
+    --border: #bcc0cc; --text: #4c4f69; --text-dim: #6c6f85;
+    --accent: #1e66f5; --accent-fg: #eff1f5;
+    --green: #40a02b; --warn: #df8e1d; --red: #d20f39;
+    --diff-add-bg: rgba(64,160,43,0.18); --diff-add-bg-hover: rgba(64,160,43,0.32);
+    --diff-del-bg: rgba(210,15,57,0.15); --diff-del-bg-hover: rgba(210,15,57,0.30);
+    --shadow: rgba(0,0,0,0.15);
+    --user-msg-bg: #c6d0f5; --user-msg-fg: #4c4f69;
+    --syntax-comment: #9ca0b0; --syntax-keyword: #8839ef; --syntax-string: #40a02b;
+    --syntax-number: #fe640b; --syntax-type: #df8e1d; --syntax-function: #1e66f5;
+    --syntax-variable: #4c4f69; --syntax-operator: #179299; --syntax-delimiter: #6c6f85;
+    --editor-selection: #acb0be; --editor-selection-inactive: #ccd0da;
+    --editor-cursor: #dc8a78;
+    --editor-indent-guide: #bcc0cc; --editor-indent-guide-active: #7c7f93;
+    --editor-scrollbar: #acb0be66; --editor-scrollbar-hover: #7c7f93b3;
+    --monaco-base: vs;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text);

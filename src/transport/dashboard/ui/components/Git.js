@@ -572,7 +572,7 @@ cl.emptyRow = css`text-align: center; color: var(--text-dim); padding: 16px; fon
 cl.diffCell = css`padding: 0 !important; background: var(--bg);`;
 cl.loading = css`padding: 8px 12px; color: var(--text-dim); font-size: 12px;`;
 cl.diffEmpty = css`padding: 8px 12px; color: var(--text-dim); font-size: 12px; font-style: italic;`;
-cl.diff = css`font-family: monospace; font-size: 11px; line-height: 1.5;`;
+cl.diff = css`font-family: monospace; font-size: var(--font-size-mono, 13px); line-height: 1.5;`;
 cl.hunk = css`
   border-bottom: 1px solid var(--border);
   & .hdr { background: var(--surface2); color: var(--accent); padding: 2px 8px; }
@@ -584,22 +584,22 @@ cl.hunk = css`
   }
   & .content { padding: 0 8px; white-space: pre; }
   & .row.add .content { color: var(--green); }
-  & .row.add { background: rgba(46,100,67,0.25); }
-  & .row.add:hover { background: rgba(46,100,67,0.40); }
+  & .row.add { background: var(--diff-add-bg); }
+  & .row.add:hover { background: var(--diff-add-bg-hover); }
   & .row.del .content { color: var(--red); }
-  & .row.del { background: rgba(100,20,15,0.25); }
-  & .row.del:hover { background: rgba(100,20,15,0.40); }
+  & .row.del { background: var(--diff-del-bg); }
+  & .row.del:hover { background: var(--diff-del-bg-hover); }
 `;
 cl.menu = css`
   position: fixed; z-index: 200; max-width: 480px;
   max-height: 400px; overflow-y: auto;
   background: var(--surface2); border: 1px solid var(--border);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4); padding: 4px 0; font-size: 12px;
+  box-shadow: 0 4px 12px var(--shadow); padding: 4px 0; font-size: 12px;
 `;
 cl.menuItem = css`
   padding: 4px 12px; color: var(--text); cursor: pointer; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
   &.selected { background: var(--surface3); }
-  &:hover { background: var(--accent); color: #1e1e2e; }
+  &:hover { background: var(--accent); color: var(--accent-fg); }
   & b { font-weight: 700; color: inherit; }
 `;

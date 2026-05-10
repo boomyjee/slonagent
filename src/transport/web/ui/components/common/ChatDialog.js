@@ -731,7 +731,7 @@ cl.msg = css`
   position: relative;
   margin-bottom: 10px; font-size: 13px; line-height: 1.5; padding: 8px 12px;
   border-radius: 8px; max-width: 90%; white-space: pre-wrap; word-break: break-word;
-  &.user, &.inject { background: var(--accent); color: #1e1e2e; margin-left: auto; }
+  &.user, &.inject { background: var(--user-msg-bg); color: var(--user-msg-fg); margin-left: auto; }
   &.pending { opacity: 0.5; }
   &.assistant { background: var(--surface2); }
   &.thinking { background: var(--surface2); font-size: 12px; color: var(--text-dim); font-style: italic; }

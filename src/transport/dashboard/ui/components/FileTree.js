@@ -393,17 +393,17 @@ cl.empty = css`padding: 16px; color: var(--text-dim); font-size: 12px; font-styl
 cl.menu = css`
   position: fixed; z-index: 100; min-width: 160px;
   background: var(--surface2); border: 1px solid var(--border);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4); padding: 4px 0;
+  box-shadow: 0 4px 12px var(--shadow); padding: 4px 0;
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 `;
 cl.menuItem = css`
   padding: 6px 12px; font-size: 12px; color: var(--text); cursor: pointer;
   user-select: none; -webkit-user-select: none;
-  &:hover { background: var(--accent); color: #1e1e2e; }
+  &:hover { background: var(--accent); color: var(--accent-fg); }
 `;
 cl.selected = css`
   background: var(--accent);
-  color: #1e1e2e;
+  color: var(--accent-fg);
   &:hover { background: var(--accent); }
 `;
 cl.dropTarget = css`

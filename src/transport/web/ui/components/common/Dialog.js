@@ -11,14 +11,17 @@ class DialogHost extends Component {
     constructor(props) {
         super(props);
         _host = this;
-        this.state = { content: null };
+        this.state = { content: null, opts: {} };
     }
 
     render() {
-        const { content } = this.state;
+        const { content, opts } = this.state;
         if (!content) return null;
+        const backdropClass = opts.transparent
+            ? `${cl.backdrop} ${cl.backdropTransparent}`
+            : cl.backdrop;
         return html`
-            <div class=${cl.backdrop}
+            <div class=${backdropClass}
                 onMouseDown=${e => { this._downTarget = e.target; }}
                 onMouseUp=${e => { if (e.target === this._downTarget) Dialog.close(); }}>
                 <div class=${cl.modal} onMouseDown=${e => e.stopPropagation()}>${content}</div>
@@ -32,8 +35,10 @@ document.body.appendChild(_root);
 render(html`<${DialogHost} />`, _root);
 
 export const Dialog = {
-    open(content) { _host.setState({ content }); },
-    close() { _host.setState({ content: null }); },
+    // opts: { transparent?: bool } — прозрачный оверлей нужен для preview
+    // (см. SettingsDialog: смена темы/шрифта должна быть видна на UI за диалогом).
+    open(content, opts = {}) { _host.setState({ content, opts }); },
+    close() { _host.setState({ content: null, opts: {} }); },
 };
 
 // --- styles ---
@@ -41,6 +46,9 @@ export const Dialog = {
 cl.backdrop = css`
   position: fixed; inset: 0; background: rgba(0,0,0,0.6);
   display: flex; align-items: center; justify-content: center; z-index: 100;
+`;
+cl.backdropTransparent = css`
+  background: transparent;
 `;
 
 cl.modal = css`
