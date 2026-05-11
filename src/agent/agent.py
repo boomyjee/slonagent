@@ -186,7 +186,7 @@ class Agent:
         weakref.finalize(agent, task.cancel)
         return agent
 
-    def __init__(self, id: str, model_name: str, api_key: str = "", base_url: str = "", backend: str = "openai", backend_params: dict | None = None, agent_dir: str | None = None, thread_id: str = "", memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transcription_whisper: str = "", transport=None):
+    def __init__(self, id: str, model_name: str, api_key: str = "", base_url: str = "", backend: str = "openai", backend_params: dict | None = None, agent_dir: str | None = None, thread_id: str = "", memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transcription_whisper: str = "", transcription_whisper_language: str = "ru", transport=None):
         self.id = id
         self.thread_id = thread_id
         self.model_name = model_name
@@ -223,6 +223,7 @@ class Agent:
 
         self.transcription_client = Agent.OpenAI(transcription_api_key or api_key, transcription_base_url or base_url)
         self.transcription_whisper = transcription_whisper
+        self.transcription_whisper_language = transcription_whisper_language
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
         self._restrictions_file = os.path.join(memory_dir, ".restrictions.json") if memory_dir else None
@@ -420,18 +421,23 @@ class Agent:
                 with open(inp, "wb") as f:
                     f.write(data)
                 out_base = os.path.join(td, "out")
+                args = [cli, "-m", model, "-t", "8", "-otxt", "-of", out_base, "-f", inp]
+                if self.transcription_whisper_language:
+                    args += ["-l", self.transcription_whisper_language]
                 proc = await asyncio.create_subprocess_exec(
-                    cli, "-m", model, "-t", "8", "-otxt", "-of", out_base, "-f", inp,
+                    *args,
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
                 )
                 _, err = await proc.communicate()
                 if proc.returncode != 0:
                     raise RuntimeError(f"whisper-cli failed ({proc.returncode}): {err.decode(errors='replace')[:500]}")
-                txt = out_base + ".txt"
-                if not os.path.exists(txt):
+                txt_path = out_base + ".txt"
+                if not os.path.exists(txt_path):
                     raise RuntimeError(f"whisper-cli produced no output: {err.decode(errors='replace')[:500]}")
-                with open(txt, encoding="utf-8") as f:
-                    return f.read().strip()
+                with open(txt_path, encoding="utf-8") as f:
+                    text = f.read().strip()
+                await self.transport.send_message(f"🎤 {text}")
+                return text
         if fmt not in ("wav", "mp3"):
             audio, sr = sf.read(io.BytesIO(data))
             wav_buf = io.BytesIO()
