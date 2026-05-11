@@ -1,4 +1,4 @@
-import asyncio, base64, io, json, os, logging, weakref
+import asyncio, base64, glob, io, json, os, logging, tempfile, weakref
 import numpy as np
 import soundfile as sf
 from datetime import datetime
@@ -186,7 +186,7 @@ class Agent:
         weakref.finalize(agent, task.cancel)
         return agent
 
-    def __init__(self, id: str, model_name: str, api_key: str = "", base_url: str = "", backend: str = "openai", backend_params: dict | None = None, agent_dir: str | None = None, thread_id: str = "", memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transport=None):
+    def __init__(self, id: str, model_name: str, api_key: str = "", base_url: str = "", backend: str = "openai", backend_params: dict | None = None, agent_dir: str | None = None, thread_id: str = "", memory_compressor = None, memory_providers: list | dict = None, skills: list = None, max_iterations: int = 20, transcription_model_name: str = "gemini-2.5-flash", transcription_api_key: str = None, transcription_base_url: str = None, transcription_whisper: str = "", transport=None):
         self.id = id
         self.thread_id = thread_id
         self.model_name = model_name
@@ -222,6 +222,7 @@ class Agent:
             raise ValueError(f"Unknown backend: {backend!r}")
 
         self.transcription_client = Agent.OpenAI(transcription_api_key or api_key, transcription_base_url or base_url)
+        self.transcription_whisper = transcription_whisper
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
         self._restrictions_file = os.path.join(memory_dir, ".restrictions.json") if memory_dir else None
@@ -401,6 +402,36 @@ class Agent:
 
     async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
         fmt = mime_type.split("/")[-1]
+        if self.transcription_whisper:
+            # Локальный whisper.cpp через subprocess. Модель ищем неявно: предпочитаем
+            # large-v3-turbo, иначе первый ggml-*.bin. ogg/wav/mp3/flac whisper читает
+            # сам — никаких конверсий, пишем входной байт-поток в tempfile и скармливаем.
+            cli = os.path.join(self.transcription_whisper, "whisper-cli.exe")
+            if not os.path.exists(cli):
+                raise RuntimeError(f"whisper-cli.exe not found in {self.transcription_whisper}")
+            model = os.path.join(self.transcription_whisper, "ggml-large-v3-turbo.bin")
+            if not os.path.exists(model):
+                cands = glob.glob(os.path.join(self.transcription_whisper, "ggml-*.bin"))
+                if not cands:
+                    raise RuntimeError(f"no ggml-*.bin in {self.transcription_whisper}")
+                model = cands[0]
+            with tempfile.TemporaryDirectory() as td:
+                inp = os.path.join(td, f"audio.{fmt}")
+                with open(inp, "wb") as f:
+                    f.write(data)
+                out_base = os.path.join(td, "out")
+                proc = await asyncio.create_subprocess_exec(
+                    cli, "-m", model, "-t", "8", "-otxt", "-of", out_base, "-f", inp,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                )
+                _, err = await proc.communicate()
+                if proc.returncode != 0:
+                    raise RuntimeError(f"whisper-cli failed ({proc.returncode}): {err.decode(errors='replace')[:500]}")
+                txt = out_base + ".txt"
+                if not os.path.exists(txt):
+                    raise RuntimeError(f"whisper-cli produced no output: {err.decode(errors='replace')[:500]}")
+                with open(txt, encoding="utf-8") as f:
+                    return f.read().strip()
         if fmt not in ("wav", "mp3"):
             audio, sr = sf.read(io.BytesIO(data))
             wav_buf = io.BytesIO()
