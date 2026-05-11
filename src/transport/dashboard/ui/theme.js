@@ -1,6 +1,7 @@
 // Темы и размер шрифта для дашборда. Все цвета — в CSS-переменных
 // (см. index.html). Monaco-тема собирается на лету из тех же переменных
 // через buildMonacoTheme(), так что один источник правды для всего UI.
+import { persist } from './lib.js';
 
 export const THEMES = ['dark-vscode', 'dark-catppuccin', 'light-vscode', 'light-catppuccin'];
 export const THEME_LABELS = {
@@ -15,8 +16,8 @@ const DEFAULT_FONT_SIZE = 13;
 export const FONT_SIZE_MIN = 10;
 export const FONT_SIZE_MAX = 20;
 
-const KEY_THEME = 'dashboard:theme';
-const KEY_FONT  = 'dashboard:fontSize';
+const KEY_THEME = 'theme';
+const KEY_FONT  = 'fontSize';
 
 const _editorRefs = new Set();
 
@@ -26,12 +27,12 @@ export function registerEditor(editor) {
 }
 
 export function getTheme() {
-    const v = localStorage.getItem(KEY_THEME);
+    const v = persist.get(KEY_THEME, null);
     return THEMES.includes(v) ? v : DEFAULT_THEME;
 }
 
 export function getFontSize() {
-    const v = parseInt(localStorage.getItem(KEY_FONT), 10);
+    const v = persist.get(KEY_FONT, null);
     if (Number.isFinite(v) && v >= FONT_SIZE_MIN && v <= FONT_SIZE_MAX) return v;
     return DEFAULT_FONT_SIZE;
 }
@@ -83,7 +84,7 @@ const MONACO_THEME_NAME = 'vs-slon';
 export function applyTheme(name) {
     if (!THEMES.includes(name)) name = DEFAULT_THEME;
     document.documentElement.dataset.theme = name;
-    localStorage.setItem(KEY_THEME, name);
+    persist.set(KEY_THEME, name);
     if (window.monaco) {
         window.monaco.editor.defineTheme(MONACO_THEME_NAME, buildMonacoTheme());
         window.monaco.editor.setTheme(MONACO_THEME_NAME);
@@ -97,7 +98,7 @@ export function getMonacoThemeName() {
 export function applyFontSize(px) {
     px = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, px | 0));
     document.documentElement.style.setProperty('--font-size-mono', px + 'px');
-    localStorage.setItem(KEY_FONT, String(px));
+    persist.set(KEY_FONT, px);
     for (const ed of _editorRefs) ed.updateOptions({ fontSize: px });
 }
 
