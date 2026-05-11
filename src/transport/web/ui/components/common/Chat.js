@@ -151,8 +151,11 @@ export class Chat extends Component {
     _deleteThread = (id, label) => {
         if (!confirm(`Удалить тред "${label || 'Untitled'}"?`)) return;
         this.props.app.send({ type: 'transport', method: 'thread_delete', uuid: id });
-        // Перерисуем диалог после обновления state (thread_delete event обновит threads)
-        setTimeout(() => this._onShowHistory(), 100);
+        this.setState(s => {
+            const threads = { ...s.threads };
+            delete threads[id];
+            return { threads };
+        }, () => this._onShowHistory());
     };
 
     _onShowHistory = () => {
