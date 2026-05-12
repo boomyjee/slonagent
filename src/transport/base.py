@@ -78,4 +78,7 @@ class BaseTransport:
     async def thread_delete(self, uuid: str):
         pass
 
+    async def close(self):
+        pass
+
 

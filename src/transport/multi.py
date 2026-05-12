@@ -91,3 +91,7 @@ class MultiTransport(BaseTransport):
     async def thread_delete(self, uuid):
         for t in self.transports:
             await t.thread_delete(uuid)
+
+    async def close(self):
+        for t in self.transports:
+            await t.close()

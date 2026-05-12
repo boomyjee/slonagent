@@ -229,9 +229,9 @@ class TelegramTransport(BaseTransport):
                 self._topic_warned.add(key)
                 log.warning("create_forum_topic failed: %s", e)
                 if self.agent and self.agent.transport:
-                    asyncio.create_task(self.agent.transport.send_message(
+                    await self.agent.transport.send_message(
                         f"⚠️ Telegram: не удалось создать топик «{self.agent.thread_id[:8]}» — {e}"
-                    ))
+                    )
             return False
         self.thread_id = topic.message_thread_id
         self.thread_name = name
@@ -394,6 +394,11 @@ class TelegramTransport(BaseTransport):
                         log.warning("[telegram] delete_forum_topic failed: %s", e)
         if changed:
             self.save_bindings(b)
+
+    async def close(self):
+        for t in (self._update_commands_task, self._flush_task, self._typing_task, self._queue_task):
+            if t is not None and not t.done():
+                t.cancel()
 
     def set_agent(self, agent):
         super().set_agent(agent)

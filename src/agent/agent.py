@@ -316,6 +316,7 @@ class Agent:
         self._stop_event.set()
 
     async def close(self):
+        await self.transport.close()
         await self.backend_impl.close()
         Agent._instances.pop((self.id, self.thread_id), None)
 
