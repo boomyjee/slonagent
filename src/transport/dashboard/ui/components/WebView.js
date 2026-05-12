@@ -24,10 +24,18 @@ export class WebView extends Component {
     };
 
     render({ url }) {
+        // Same-origin URLs (workspace files, /~/...) — наши, sandbox мешает:
+        // ломает <a target="..."> между вложенными фреймами (frameset-сайты
+        // открывают ссылки в новом окне вместо смены фрейма). Внешние URL
+        // (url:-вкладки) могут быть untrusted — там sandbox оставляем.
+        const sameOrigin = url.startsWith('/') || url.startsWith(location.origin);
+        const props = sameOrigin ? {} : {
+            sandbox: "allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox",
+        };
         return html`<iframe ref=${e => this._iframe = e}
                             src=${url}
                             onLoad=${this._onLoad}
-                            sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                            ...${props}
                             class=${cl.frame} />`;
     }
 }
