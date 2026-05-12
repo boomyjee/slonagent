@@ -330,6 +330,19 @@ export class ChatDialog extends Component {
         this.setState({ palette: items.length ? { items, selected: -1 } : null });
     }
 
+    _onPaste = (e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        const files = [];
+        for (const item of items) {
+            if (item.kind === 'file') files.push(item.getAsFile());
+        }
+        if (files.length) {
+            e.preventDefault();
+            this._onFiles(files);
+        }
+    };
+
     _onKeyDown = (e) => {
         const { palette } = this.state;
         if (palette && palette.items.length) {
@@ -707,6 +720,7 @@ export class ChatDialog extends Component {
                         value=${input}
                         onInput=${this._onInput}
                         onKeyDown=${this._onKeyDown}
+                        onPaste=${this._onPaste}
                         placeholder="Write a message..."
                         disabled=${!connected}
                     ></textarea>
