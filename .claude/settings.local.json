@@ -6,7 +6,8 @@
       "Skill(claude-api)",
       "Skill(claude-api:*)",
       "WebFetch(*)",
-      "Monitor(*)"
+      "Monitor(*)",
+      "PowerShell(*)"
     ],
     "additionalDirectories": ["e:/dev/claude_slon"]
   }
