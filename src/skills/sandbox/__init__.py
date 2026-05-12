@@ -1,4 +1,4 @@
-import asyncio, base64, hashlib, json, os, re, logging, shlex, subprocess
+import asyncio, base64, hashlib, json, os, re, logging, shlex, subprocess, sys
 from contextlib import suppress
 from typing import Annotated
 from agent import Skill, tool
@@ -290,11 +290,101 @@ class SandboxSkill(Skill):
         if cls._host_ip is not None:
             return cls._host_ip
         if cls.runtime == "podman":
+            if sys.platform == "win32":
+                await cls._ensure_windows_firewall_rule()
             cls._host_ip = await cls._podman_machine_gateway() or "host.containers.internal"
         else:
             cls._host_ip = "host.docker.internal"
         logging.info("[sandbox] host ip (%s): %s", cls.runtime, cls._host_ip)
         return cls._host_ip
+
+    _FIREWALL_RULE_NAME = "slonagent sandbox tunnel"
+
+    @staticmethod
+    def _windows_process_image_path() -> str:
+        """Image path по которому Defender attribute трафик процесса. Для
+        .venv python sys.executable указывает на launcher в venv, но Defender
+        видит реальный base python (тот что в Program Files). sys._base_executable
+        в venv ровно его и хранит; вне venv он совпадает с sys.executable."""
+        return getattr(sys, "_base_executable", None) or sys.executable
+
+    @classmethod
+    async def _ensure_windows_firewall_rule(cls):
+        """Когда основная сеть в профиле Public, Defender блочит входящие к
+        python на vEthernet (WSL) — sandbox_proxy из контейнера не коннектится.
+        Создаём Inbound Allow на реальный image path процесса (см.
+        _windows_process_image_path — sys.executable не годится для .venv).
+        Идемпотентно: если правило уже есть — выходим. Иначе один раз поднимаем
+        UAC. При отказе пользователя логируем команду, чтобы запустил руками.
+
+        Block-правила (Block имеет приоритет над Allow) на тот же python.exe
+        затрут наш Allow, поэтому отключаем все enabled Inbound Block-правила
+        на python.exe в той же транзакции. Такие Block остаются после случайного
+        Deny в UAC-prompt'е первой попытки запуска."""
+        rule_name = cls._FIREWALL_RULE_NAME
+        check = await asyncio.to_thread(
+            subprocess.run,
+            ["powershell", "-NoProfile", "-Command",
+             f"if (Get-NetFirewallRule -DisplayName '{rule_name}' "
+             f"-ErrorAction SilentlyContinue) {{ 'exists' }}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if "exists" in (check.stdout or ""):
+            return
+
+        python_path = cls._windows_process_image_path().replace("'", "''")
+        # disable_blocks отрезает любые конкурирующие Block-правила на этот же
+        # exe — иначе Defender применит Block раньше нашего Allow.
+        disable_blocks = (
+            "Get-NetFirewallApplicationFilter -All | "
+            f"Where-Object {{ $_.Program -ieq '{python_path}' }} | "
+            "ForEach-Object { Get-NetFirewallRule -AssociatedNetFirewallApplicationFilter $_ } | "
+            "Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Block' -and $_.Enabled -eq 'True' } | "
+            "Disable-NetFirewallRule"
+        )
+        inner = (
+            disable_blocks + "; "
+            f"New-NetFirewallRule -DisplayName '{rule_name}' "
+            f"-Direction Inbound -Action Allow "
+            f"-Program '{python_path}' -Profile Any | Out-Null"
+        )
+
+        import ctypes
+        already_admin = False
+        try:
+            already_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            pass
+
+        if already_admin:
+            logging.info("[sandbox] firewall rule '%s' missing; creating (already elevated) for %s",
+                         rule_name, python_path)
+            create = await asyncio.to_thread(
+                subprocess.run,
+                ["powershell", "-NoProfile", "-Command", inner],
+                capture_output=True, text=True, timeout=30,
+            )
+            if create.returncode != 0:
+                logging.warning("[sandbox] firewall rule creation failed: %s",
+                                (create.stderr or create.stdout).strip())
+            return
+
+        # EncodedCommand — UTF-16 LE base64 — снимает квотинговый ад при
+        # двойной вложенности (Start-Process -ArgumentList → inner powershell).
+        encoded = base64.b64encode(inner.encode("utf-16-le")).decode()
+        logging.info("[sandbox] firewall rule '%s' missing; requesting UAC to allow %s",
+                     rule_name, python_path)
+        elevate = await asyncio.to_thread(
+            subprocess.run,
+            ["powershell", "-NoProfile", "-Command",
+             "Start-Process powershell -Verb RunAs -Wait "
+             f"-ArgumentList '-NoProfile','-EncodedCommand','{encoded}'"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if elevate.returncode != 0:
+            logging.warning("[sandbox] firewall rule not created (UAC declined?): %s",
+                            (elevate.stderr or elevate.stdout).strip())
+            logging.warning("[sandbox] run in admin PowerShell to fix: %s", inner)
 
     @classmethod
     async def _podman_machine_gateway(cls) -> str | None:
