@@ -255,7 +255,7 @@ class SandboxSkill(Skill):
         if inspect.returncode != 0:
             img = await self._run([self.runtime, "image", "exists", env_image], capture_output=True)
             image = env_image if img.returncode == 0 else self.image
-            run = await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], capture_output=True, text=True)
+            run = await self._run([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], capture_output=True, text=True)
             if run.returncode != 0:
                 raise RuntimeError(f"podman run failed ({run.returncode}): {run.stderr.strip()}")
             logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
@@ -275,7 +275,7 @@ class SandboxSkill(Skill):
                 logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
                 await self._run([self.runtime, "commit", self.container_name, env_image], check=True)
                 await self._run([self.runtime, "rm", "-f", "-t", "0", self.container_name], capture_output=True)
-                await self._run([self.runtime, "run", "-d", "--no-hosts", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
+                await self._run([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
                 logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
         self._mounts_hash = new_hash
         await self._sync_rpc_url()

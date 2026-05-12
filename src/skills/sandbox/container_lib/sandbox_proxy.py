@@ -18,7 +18,11 @@ worker -> host:
     {id, kind:"ws_closed"}
     {id, kind:"cgi_resp",  status, headers, body_b64}
 """
-import argparse, asyncio, base64, contextlib, io, json, logging, subprocess, sys, traceback, types, http.client
+import argparse, asyncio, base64, contextlib, io, json, logging, os, subprocess, sys, traceback, types, http.client
+
+for k in list(os.environ):
+    if k.lower() in ("http_proxy", "https_proxy", "all_proxy"):
+        del os.environ[k]
 
 try:
     import websockets
