@@ -1,9 +1,9 @@
-import asyncio, logging, os
+import asyncio, logging, os, re
 from contextvars import ContextVar
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
 from typing import Annotated
 
@@ -192,7 +192,14 @@ class DashboardFork(WebFork):
             return Response("Method not allowed", status_code=405)
         mime = self._MIME.get(path.suffix.lstrip("."), "text/plain")
         headers = {"Cache-Control": "no-store"} if path.suffix.lstrip(".") in self._MIME else {}
-        return Response(path.read_bytes(), media_type=mime, headers=headers)
+        # для html тянем кодировку из meta
+        if mime == "text/html":
+            data = path.read_bytes()
+            m = re.search(rb'<meta[^>]+charset=["\']?([\w-]+)', data[:4096], re.I)
+            charset = m.group(1).decode("ascii", errors="ignore") if m else None
+            headers["Content-Type"] = f"text/html; charset={charset}" if charset else "text/html"
+            return Response(data, headers=headers)
+        return FileResponse(path, media_type=mime, headers=headers)
 
     async def _web_hook(self, request: Request):
         body = (await request.body()).decode()

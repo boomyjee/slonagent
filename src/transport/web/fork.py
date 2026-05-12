@@ -29,7 +29,7 @@ class WebFork:
     prefix: str = ""           # DashboardFork.prefix = "/dashboard"
     mount: bool = True         # PageFork и т.п. с pre-accepted ws ставят False
 
-    _MIME = {"js": "application/javascript", "css": "text/css", "html": "text/html",
+    _MIME = {"js": "application/javascript", "css": "text/css", "html": "text/html", "htm": "text/html",
              "json": "application/json", "svg": "image/svg+xml"}
     _STATIC_HEADERS = {
         "Cache-Control": "no-store",
