@@ -332,7 +332,10 @@ class App extends Component {
             { label: 'Close Others', disabled: !others.length, action: () => this._closeOthers(tab.id) },
             { label: 'Close All', action: () => this._closeAll() },
             ...(blameable ? [{ label: 'Git Blame', action: () => this._openGitBlame(tab.id, tab.label) }] : []),
-            ...(isUrl ? [{ label: 'Copy URL', action: () => navigator.clipboard?.writeText(tab.id.slice(4)) }] : []),
+            ...(isUrl ? [
+                { label: 'Refresh', action: () => this._webViews?.[tab.id]?.refresh() },
+                { label: 'Copy URL', action: () => navigator.clipboard?.writeText(tab.id.slice(4)) },
+            ] : []),
         ];
     };
 
