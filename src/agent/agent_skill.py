@@ -23,6 +23,7 @@ class AgentSkill(Skill):
     @bypass("restart", "Перезапустить бота", standalone=True)
     async def restart_command(self, args: str) -> str:
         await self.agent.transport.send_message("🔄 Перезапускаюсь...")
+        await asyncio.sleep(0.3)
         os.execv(sys.executable, [sys.executable] + sys.argv)
     
     @bypass("stop", "Остановить текущий ответ", standalone=True)
