@@ -222,12 +222,13 @@ class SandboxProxy:
         if sandbox is None:
             return False
         url = await self._worker_url()
-        # pkill -f ловит воркер по cmdline-pattern, не по PID-файлу — pid-файл
-        # может быть рассинхрон (зомби, не записался, переживёт рестарт). Sleep
-        # после pkill чтоб процесс успел сняться до того, как мы стартанём новый.
+        # Kill old worker by pattern, but skip processes whose cmdline
+        # contains "pkill" (i.e. the bash wrapper running this very command).
+        # Plain `pkill -f` would match the parent shell's cmdline too.
         cmd = (
-            "pkill -f /slonagent/sandbox_proxy.py 2>/dev/null; "
-            "sleep 0.5; "
+            "for p in $(pgrep -f sandbox_proxy.py); do "
+            "grep -qz pkill /proc/$p/cmdline 2>/dev/null || kill $p 2>/dev/null; "
+            "done; sleep 0.5; "
             "nohup python3 -u /slonagent/sandbox_proxy.py "
             f"--url {shlex.quote(url)} > /tmp/sandbox_proxy.log 2>&1 & "
             "echo $! > /tmp/sandbox_proxy.pid"
