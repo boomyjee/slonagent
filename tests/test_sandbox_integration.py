@@ -291,6 +291,58 @@ class TestRoBind:
         assert "EC=0" not in r["stdout"], "запись в /mnt/ro прошла"
         assert not (src / "out.txt").exists()
 
+    async def test_host_write_to_ro_blocked(self, sandbox, tmp_path):
+        """sandbox_write на ro-маунте не должен записать файл на хост.
+        Без resolve_path(for_write=True) host-тул обходил бы podman ro."""
+        _, sb, cs = sandbox
+        src = tmp_path / "ro_host_write"
+        src.mkdir()
+        cs._save({"sandbox": {"ro": [str(src)]}})
+
+        sub = _container_subpath(str(src))
+        res = sb.write(f"/mnt/ro/{sub}/leak.txt", "evil")
+        assert "error" in res
+        assert "Только чтение" in res["error"]
+        assert not (src / "leak.txt").exists()
+
+    async def test_host_edit_to_ro_blocked(self, sandbox, tmp_path):
+        _, sb, cs = sandbox
+        src = tmp_path / "ro_host_edit"
+        src.mkdir()
+        (src / "f.txt").write_text("original", encoding="utf-8")
+        cs._save({"sandbox": {"ro": [str(src)]}})
+
+        sub = _container_subpath(str(src))
+        res = sb.edit(f"/mnt/ro/{sub}/f.txt", "original", "tampered")
+        assert "error" in res
+        assert "Только чтение" in res["error"]
+        assert (src / "f.txt").read_text(encoding="utf-8") == "original"
+
+    async def test_host_multi_edit_to_ro_blocked(self, sandbox, tmp_path):
+        _, sb, cs = sandbox
+        src = tmp_path / "ro_host_multi"
+        src.mkdir()
+        (src / "f.txt").write_text("a\nb\n", encoding="utf-8")
+        cs._save({"sandbox": {"ro": [str(src)]}})
+
+        sub = _container_subpath(str(src))
+        res = sb.multi_edit(f"/mnt/ro/{sub}/f.txt", [{"old_string": "a", "new_string": "X"}])
+        assert "error" in res
+        assert "Только чтение" in res["error"]
+        assert (src / "f.txt").read_text(encoding="utf-8") == "a\nb\n"
+
+    async def test_host_write_to_rw_allowed(self, sandbox, tmp_path):
+        """Симметрия: на rw-маунте sandbox_write работает на хосте."""
+        _, sb, cs = sandbox
+        src = tmp_path / "rw_host_write"
+        src.mkdir()
+        cs._save({"sandbox": {"rw": [str(src)]}})
+
+        sub = _container_subpath(str(src))
+        res = sb.write(f"/mnt/rw/{sub}/ok.txt", "hello")
+        assert res.get("status") == "ok"
+        assert (src / "ok.txt").read_text(encoding="utf-8") == "hello"
+
 
 # ─── Config changes ──────────────────────────────────────────────────────────
 

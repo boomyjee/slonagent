@@ -119,16 +119,18 @@ class SandboxSkill(Skill):
             result.append((p, f"/mnt/rw/{container_subpath(p)}", False))
         return result
 
-    def resolve_path(self, container_path: str) -> str | None:
+    def resolve_path(self, container_path: str, for_write: bool = False) -> str | None:
         if container_path == "/workspace":
             return self.workspace_dir
         if container_path.startswith("/workspace/"):
             return os.path.join(self.workspace_dir, container_path[len("/workspace/"):])
-        for host, container, _ro in self._mounts():
-            if container_path == container:
-                return host
+        for host, container, ro in self._mounts():
             prefix = container.rstrip("/") + "/"
-            if container_path.startswith(prefix):
+            if container_path == container or container_path.startswith(prefix):
+                if for_write and ro:
+                    return None
+                if container_path == container:
+                    return host
                 return os.path.join(host, container_path[len(prefix):].replace("/", os.sep))
         return None
 
@@ -603,11 +605,15 @@ class SandboxSkill(Skill):
     _IMAGE_MIME = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
                    "gif": "image/gif", "webp": "image/webp"}
 
-    def _check_path(self, path: str) -> tuple[str | None, dict | None]:
-        host_path = self.resolve_path(path)
+    def _check_path(self, path: str, for_write: bool = False,
+                    must_exist: bool = True) -> tuple[str | None, dict | None]:
+        host_path = self.resolve_path(path, for_write=for_write)
         if host_path is None:
+            # Различаем «нет такого маунта» и «ro-маунт» — агенту полезно знать.
+            if for_write and self.resolve_path(path) is not None:
+                return None, {"error": f"Только чтение: {path}"}
             return None, {"error": f"Доступ запрещён: {path}"}
-        if not os.path.exists(host_path):
+        if must_exist and not os.path.exists(host_path):
             return None, {"error": f"Файл не найден: {path}"}
         return host_path, None
 
@@ -655,7 +661,7 @@ class SandboxSkill(Skill):
         new_string: Annotated[str, "Новый текст."],
         replace_all: Annotated[bool, "Заменить все вхождения (по умолчанию false)."] = False,
     ):
-        host_path, err = self._check_path(path)
+        host_path, err = self._check_path(path, for_write=True)
         if err:
             return err
         try:
@@ -681,7 +687,7 @@ class SandboxSkill(Skill):
         path: Annotated[str, "Путь к файлу."],
         edits: Annotated[list[dict], "Список объектов {old_string, new_string, replace_all?:bool}. Применяются последовательно."],
     ):
-        host_path, err = self._check_path(path)
+        host_path, err = self._check_path(path, for_write=True)
         if err:
             return err
         if not edits:
@@ -717,9 +723,9 @@ class SandboxSkill(Skill):
         path: Annotated[str, "Путь к файлу."],
         content: Annotated[str, "Содержимое файла."],
     ):
-        host_path = self.resolve_path(path)
-        if host_path is None:
-            return {"error": f"Доступ запрещён: {path}"}
+        host_path, err = self._check_path(path, for_write=True, must_exist=False)
+        if err:
+            return err
         try:
             os.makedirs(os.path.dirname(host_path), exist_ok=True)
             with open(host_path, "w", encoding="utf-8", newline="") as f:
