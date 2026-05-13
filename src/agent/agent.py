@@ -406,8 +406,8 @@ class Agent:
         fmt = mime_type.split("/")[-1]
         if self.transcription_whisper:
             # Локальный whisper.cpp через subprocess. Модель ищем неявно: предпочитаем
-            # large-v3-turbo, иначе первый ggml-*.bin. ogg/wav/mp3/flac whisper читает
-            # сам — никаких конверсий, пишем входной байт-поток в tempfile и скармливаем.
+            # large-v3-turbo, иначе первый ggml-*.bin. Whisper-cpp без FFmpeg не
+            # читает OGG/Opus — конвертируем в WAV через soundfile.
             cli = os.path.join(self.transcription_whisper, "whisper-cli.exe")
             if not os.path.exists(cli):
                 raise RuntimeError(f"whisper-cli.exe not found in {self.transcription_whisper}")
@@ -417,6 +417,11 @@ class Agent:
                 if not cands:
                     raise RuntimeError(f"no ggml-*.bin in {self.transcription_whisper}")
                 model = cands[0]
+            if fmt not in ("wav", "mp3"):
+                audio, sr = sf.read(io.BytesIO(data))
+                wav_buf = io.BytesIO()
+                sf.write(wav_buf, audio, sr, format='WAV', subtype='PCM_16')
+                data, fmt = wav_buf.getvalue(), "wav"
             with tempfile.TemporaryDirectory() as td:
                 inp = os.path.join(td, f"audio.{fmt}")
                 with open(inp, "wb") as f:
