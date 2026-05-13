@@ -322,12 +322,13 @@ class SandboxSkill(Skill):
         на python.exe в той же транзакции. Такие Block остаются после случайного
         Deny в UAC-prompt'е первой попытки запуска."""
         rule_name = cls._FIREWALL_RULE_NAME
+        ps_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         check = await asyncio.to_thread(
             subprocess.run,
             ["powershell", "-NoProfile", "-Command",
              f"if (Get-NetFirewallRule -DisplayName '{rule_name}' "
              f"-ErrorAction SilentlyContinue) {{ 'exists' }}"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, creationflags=ps_flags,
         )
         if "exists" in (check.stdout or ""):
             return
@@ -362,7 +363,7 @@ class SandboxSkill(Skill):
             create = await asyncio.to_thread(
                 subprocess.run,
                 ["powershell", "-NoProfile", "-Command", inner],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=30, creationflags=ps_flags,
             )
             if create.returncode != 0:
                 logging.warning("[sandbox] firewall rule creation failed: %s",
@@ -379,7 +380,7 @@ class SandboxSkill(Skill):
             ["powershell", "-NoProfile", "-Command",
              "Start-Process powershell -Verb RunAs -Wait "
              f"-ArgumentList '-NoProfile','-EncodedCommand','{encoded}'"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=120, creationflags=ps_flags,
         )
         if elevate.returncode != 0:
             logging.warning("[sandbox] firewall rule not created (UAC declined?): %s",
