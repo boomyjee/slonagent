@@ -124,6 +124,12 @@ class SandboxSkill(Skill):
             return self.workspace_dir
         if container_path.startswith("/workspace/"):
             return os.path.join(self.workspace_dir, container_path[len("/workspace/"):])
+        if container_path == "/slonagent" or container_path.startswith("/slonagent/"):
+            if for_write:
+                return None
+            if container_path == "/slonagent":
+                return self._lib_dir()
+            return os.path.join(self._lib_dir(), container_path[len("/slonagent/"):])
         for host, container, ro in self._mounts():
             prefix = container.rstrip("/") + "/"
             if container_path == container or container_path.startswith(prefix):
@@ -138,7 +144,7 @@ class SandboxSkill(Skill):
         """Обратный маппинг resolve_path: host_path → container_path или
         None если файл вне всех маунтов песочницы."""
         rp = os.path.realpath(host_path)
-        candidates = [(self.workspace_dir, "/workspace")]
+        candidates = [(self.workspace_dir, "/workspace"), (self._lib_dir(), "/slonagent")]
         for host, container, _ro in self._mounts():
             candidates.append((host, container))
         for host, container in candidates:

@@ -134,3 +134,32 @@ def test_read_from_ro_still_works(sb, tmp_path):
     res = sb.read("/mnt/ro/x/f.txt")
     assert "error" not in res
     assert "hello" in res.get("content", "")
+
+
+# ─── /slonagent (хардкоженный ro-маунт container_lib) ─────────────────────
+
+def test_resolve_slonagent_root_read(sb):
+    assert sb.resolve_path("/slonagent") == sb._lib_dir()
+
+
+def test_resolve_slonagent_file_read(sb):
+    expected = os.path.join(sb._lib_dir(), "agent.py")
+    assert sb.resolve_path("/slonagent/agent.py") == expected
+
+
+def test_resolve_slonagent_for_write_blocked(sb):
+    assert sb.resolve_path("/slonagent/agent.py", for_write=True) is None
+
+
+def test_read_slonagent_agent_py(sb):
+    """sandbox_read должен читать /slonagent/agent.py (real stub из container_lib)."""
+    res = sb.read("/slonagent/agent.py")
+    assert "error" not in res
+    assert "get_agent" in res.get("content", "")
+
+
+def test_write_to_slonagent_blocked(sb):
+    res = sb.write("/slonagent/evil.py", "import os; os.system('rm -rf /')")
+    assert "error" in res
+    assert "Только чтение" in res["error"]
+    assert not os.path.exists(os.path.join(sb._lib_dir(), "evil.py"))
