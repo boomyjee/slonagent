@@ -707,7 +707,7 @@ export class ChatDialog extends Component {
                         </div>`}
                     <input type="file" multiple ref=${el => this._fileInput = el}
                            style="display:none"
-                           onChange=${e => { this._onFiles(e.target.files); e.target.value = ''; }} />
+                           onChange=${e => { this._onFiles([...e.target.files]); e.target.value = ''; }} />
                     <button class=${cl.iconBtn} title="Attach files"
                             onClick=${() => this._fileInput?.click()}
                             disabled=${!connected}>${ICON_PAPERCLIP}</button>
