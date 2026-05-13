@@ -9,14 +9,18 @@ API paths are root-relative and start with `/`: `/foo` resolves to
 `<root>/foo`. There are no `..` checks — the dashboard is auth-gated
 and meant for the user themselves.
 """
+from __future__ import annotations
 import os
 import mimetypes
 import shutil
 import string
 import sys
+import tempfile
+import zipfile
 
 from fastapi import Query, Request
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 
 
 class FilesAPI:
@@ -28,6 +32,8 @@ class FilesAPI:
         t.register_route("get", "/api/files", self.list)
         t.register_route("get", "/api/file", self.read)
         t.register_route("get", "/api/file/raw", self.read_raw)
+        t.register_route("get", "/api/dir/zip", self.download_dir)
+        t.register_route("get", "/api/dir/zip/check", self.check_dir_zip)
         t.register_route("put", "/api/file", self.write)
         t.register_route("post", "/api/file/create", self.create)
         t.register_route("patch", "/api/file/rename", self.rename)
@@ -97,6 +103,68 @@ class FilesAPI:
             return JSONResponse({"error": f"Not a file: {path}"}, 400)
         mime, _ = mimetypes.guess_type(host)
         return FileResponse(host, media_type=mime or "application/octet-stream")
+
+    _ZIP_MAX_BYTES = 500 * 1024 * 1024  # 500MB суммарный размер
+    _ZIP_MAX_FILES = 100_000             # защита от миллионов мелочи
+
+    def _scan_for_zip(self, host: str) -> tuple[list[str], int, dict | None]:
+        """Walk + лимиты. (files, total_size, error_dict_or_None)."""
+        total = 0
+        files: list[str] = []
+        for dirpath, _, filenames in os.walk(host):
+            for fname in filenames:
+                full = os.path.join(dirpath, fname)
+                try:
+                    total += os.path.getsize(full)
+                except OSError:
+                    continue
+                files.append(full)
+                if total > self._ZIP_MAX_BYTES:
+                    return files, total, {
+                        "error": f"Папка слишком большая (>{self._ZIP_MAX_BYTES // (1024*1024)}MB)"
+                    }
+                if len(files) > self._ZIP_MAX_FILES:
+                    return files, total, {
+                        "error": f"Слишком много файлов (>{self._ZIP_MAX_FILES})"
+                    }
+        return files, total, None
+
+    async def check_dir_zip(self, root: str = Query(""), path: str = Query(...)):
+        """Pre-flight для UI: проверяет можно ли zip'нуть директорию,
+        возвращает размер и кол-во файлов либо текст ошибки. Нужен, потому что
+        при download через <a href> браузер молча отменяет 413/4xx."""
+        host = self.resolve(root, path)
+        if host is None:
+            return JSONResponse({"error": "No root resolvable"}, 400)
+        if not os.path.isdir(host):
+            return JSONResponse({"error": f"Not a directory: {path}"}, 400)
+        files, total, err = self._scan_for_zip(host)
+        if err:
+            return JSONResponse({**err, "size": total, "files": len(files)}, 200)
+        return JSONResponse({"ok": True, "size": total, "files": len(files)})
+
+    async def download_dir(self, root: str = Query(""), path: str = Query(...)):
+        host = self.resolve(root, path)
+        if host is None or not os.path.isdir(host):
+            return JSONResponse({"error": f"Not a directory: {path}"}, 400)
+        files, _, err = self._scan_for_zip(host)
+        if err:
+            return JSONResponse(err, 413)
+
+        fd, zip_path = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for full in files:
+                    try: zf.write(full, os.path.relpath(full, host).replace(os.sep, "/"))
+                    except (OSError, ValueError): continue
+        except Exception:
+            os.unlink(zip_path)
+            raise
+        base = os.path.basename(host.rstrip(os.sep)) or "download"
+        return FileResponse(zip_path, media_type="application/zip",
+                            filename=f"{base}.zip",
+                            background=BackgroundTask(os.unlink, zip_path))
 
     async def write(self, request: Request):
         data = await request.json()

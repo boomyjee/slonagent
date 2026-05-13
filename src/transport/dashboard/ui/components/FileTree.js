@@ -189,6 +189,9 @@ export class FileTree extends Component {
             items.push({ label: 'Git blame', action: () => this.props.onOpenGitBlame?.(entry.path, entry.name) });
             items.push({ label: 'Download', action: () => this._download(entry) });
         }
+        if (entry.is_dir) {
+            items.push({ label: 'Download as ZIP', action: () => this._download_dir(entry) });
+        }
         if (isRoot && this.props.onChangeRoot) {
             items.push({ label: 'Change Root…', action: () => this.props.onChangeRoot() });
         }
@@ -297,6 +300,21 @@ export class FileTree extends Component {
         const a = document.createElement('a');
         a.href = url;
         a.download = entry.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
+    async _download_dir(entry) {
+        const root = currentRoot();
+        const qs = `path=${encodeURIComponent(entry.path)}${root ? `&root=${encodeURIComponent(root)}` : ''}`;
+        // Pre-check: при 413 браузерный download молча отменяется, юзер ничего
+        // не видит. Заранее спрашиваем сервер можно ли zip'нуть.
+        const check = await api(`api/dir/zip/check?${qs}`);
+        if (check.error) { alert(check.error); return; }
+        const a = document.createElement('a');
+        a.href = `api/dir/zip?${qs}`;
+        a.download = `${entry.name || 'download'}.zip`;
         document.body.appendChild(a);
         a.click();
         a.remove();
