@@ -367,7 +367,7 @@ class App extends Component {
                                      onChangeRoot=${this._onChangeRoot} />
                     </div>
                 </div>
-                <${Resizer} side="left" persistKey="sidebar" className="dash-resizer" />
+                <${Resizer} side="left" persistKey="sidebar" collapseLabel="Explorer" className="dash-resizer" />
                 <div class="${cl.main} dash-main">
                     <${Tabs} tabs=${tabs} active=${activeTab}
                              onSelect=${id => this.setState({ activeTab: id })}
@@ -402,7 +402,7 @@ class App extends Component {
                         </div>
                     </div>
                 </div>
-                <${Resizer} side="right" persistKey="chat" className="dash-resizer" />
+                <${Resizer} side="right" persistKey="chat" collapseLabel="Chat" className="dash-resizer" />
                 <${Chat} ref=${c => this._chat = c} app=${this} connected=${connected}
                          className="dash-chat" />
                 <div class=${cl.bottomNav}>
@@ -428,9 +428,9 @@ cl.app = css`
       min-width: 0; min-height: 0;
     }
     & .dash-sidebar, & .dash-main, & .dash-chat { display: none; }
-    &.mobile-files .dash-sidebar { display: flex; }
+    &.mobile-files .dash-sidebar { display: flex !important; }
     &.mobile-editor .dash-main { display: flex; }
-    &.mobile-chat .dash-chat { display: flex; }
+    &.mobile-chat .dash-chat { display: flex !important; }
   }
 `;
 cl.sidebar = css`
