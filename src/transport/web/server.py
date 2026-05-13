@@ -44,6 +44,7 @@ class WebTransportServer:
     # при agent_token(), запоминается в _token_to_agent для O(1) резолва.
     _secret_seed: bytes | None = None
     _token_to_agent: dict[str, str] = {}
+    _server = None  # uvicorn.Server — для тестов которым нужно остановить процесс
 
     @classmethod
     def agent_token(cls, agent_id: str) -> str:
@@ -219,6 +220,7 @@ class WebTransportServer:
             server = uvicorn.Server(uv_config)
             server.install_signal_handlers = lambda: None
             server.capture_signals = lambda: contextlib.nullcontext()
+            cls._server = server
             log.info("WebTransportServer: http://localhost:%d", cls._port)
             await server.serve()
 

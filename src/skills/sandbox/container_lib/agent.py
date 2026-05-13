@@ -33,11 +33,29 @@ def get_agent(thread_id: str | None = None):
 
 
 def _ensure_channel():
+    """Один канал на процесс с автореконнектом. Проверяем сам ws (state на
+    websockets.sync.client) — если не OPEN, закрываем старый Channel и
+    открываем новый. Reader-thread мёртвого канала уже отработал (read EOF
+    → _fail_pending), pending wait() получили error → caller их обработал."""
     global _channel
     with _channel_lock:
+        if _channel is not None and not _ws_open(_channel._ws):
+            try: _channel.close()
+            except Exception: pass
+            try: _channel._ws.close()
+            except Exception: pass
+            _channel = None
         if _channel is None:
             _channel = _open_channel()
         return _channel
+
+
+def _ws_open(ws) -> bool:
+    try:
+        from websockets.protocol import State
+        return ws.state == State.OPEN
+    except Exception:
+        return False
 
 
 def _read_rpc_url() -> str | None:
@@ -69,16 +87,28 @@ def _open_channel():
     ws = connect(url)
 
     def readline():
+        # Пустая recv (нормальное закрытие) → "" → reader-thread выходит из
+        # цикла → _fail_pending сбрасывает pending wait()'ы с error. Старый
+        # код возвращал "\n" на recv()=="" и reader не выходил.
         try:
-            return ws.recv() + "\n"
+            data = ws.recv()
         except Exception:
             return ""
+        return (data + "\n") if data else ""
 
     def writeline(msg):
-        ws.send(json.dumps(msg, ensure_ascii=False))
+        try:
+            ws.send(json.dumps(msg, ensure_ascii=False))
+        except Exception:
+            # Принудительно закрываем — reader увидит EOF, сбросит pending,
+            # caller на .wait() получит exception (не deadlock).
+            try: ws.close()
+            except Exception: pass
+            raise
 
     from rpc import Channel
     ch = Channel(readline, writeline, ref_prefix="c")
+    ch._ws = ws  # для _ensure_channel: проверять живой ли ws
     ch.start()
     return ch
 

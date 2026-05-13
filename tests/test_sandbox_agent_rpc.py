@@ -177,6 +177,112 @@ class TestAgentRpc:
         contents = [t.get("content") for t in added]
         assert "from-script" in contents, contents
 
+    async def test_channel_reconnects_after_host_restart(self, dash):
+        """Реалистичный сценарий: host-агент перезапускается, WS закрывается
+        со стороны сервера. Следующий get_agent должен открыть новый канал
+        к свежему серверу и продолжить работу.
+
+        Координация через файлы в /workspace (общая FS host↔container):
+          /workspace/_ready — скрипт сделал первый RPC, ждёт рестарт
+          /workspace/_resume — тест поднял новый сервер, скрипт продолжает
+        """
+        sb = dash["sandbox"]
+        transport = dash["transport"]
+        ws_dir = sb.workspace_dir
+        ready = os.path.join(ws_dir, "_ready")
+        resume = os.path.join(ws_dir, "_resume")
+        for p in (ready, resume):
+            if os.path.exists(p):
+                os.remove(p)
+
+        script_path = os.path.join(ws_dir, "rpc_reconnect.py")
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(
+                "import os, time\n"
+                "import agent as agent_mod\n"
+                "from agent import get_agent\n"
+                "a1 = get_agent()\n"
+                "a1.transport.send_message('first').wait()\n"
+                "ch1 = agent_mod._channel\n"
+                "# Сигнал тесту: 'я готов, перезапускай сервер'\n"
+                "open('/workspace/_ready', 'w').close()\n"
+                "# Ждём пока тест поднимет новый сервер\n"
+                "for _ in range(600):\n"
+                "    if os.path.exists('/workspace/_resume'): break\n"
+                "    time.sleep(0.1)\n"
+                "else:\n"
+                "    raise RuntimeError('тест не поднял resume-маркер')\n"
+                "# Следующий get_agent должен переподключиться к свежему серверу\n"
+                "a2 = get_agent()\n"
+                "a2.transport.send_message('second-after-reconnect').wait()\n"
+                "ch2 = agent_mod._channel\n"
+                "assert ch2 is not ch1, 'expected fresh Channel after host restart'\n"
+                "print('OK')\n"
+            )
+
+        # Запускаем скрипт в фоне через background-exec sb.exec не умеет, поэтому
+        # дёргаем podman exec -d напрямую и потом ждём по файлу _ready.
+        proc_task = asyncio.create_task(sb.exec("python /workspace/rpc_reconnect.py", timeout=180))
+
+        # Ждём пока скрипт сигналит готовность.
+        for _ in range(300):
+            if os.path.exists(ready):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            proc_task.cancel()
+            pytest.fail("скрипт не дошёл до _ready")
+
+        # Перезапускаем uvicorn на том же порту — это закрывает все активные WS
+        # с сервера, имитируя реальный shutdown host-агента.
+        port = dash["port"]
+        old_server = WebTransportServer._server
+        old_server.should_exit = True
+        # Дать uvicorn полностью отрулиться
+        for _ in range(50):
+            if old_server.started is False or old_server.servers is None or not any(s.sockets for s in (old_server.servers or [])):
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
+
+        # Reset state и поднимаем заново — ровно как в fixture.
+        WebTransportServer._app = None
+        WebTransportServer._tunnel_url = None
+        WebTransportServer._tunnel_ready = None
+        WebTransportServer._token_to_agent = {}
+        WebTransportServer._secret_seed = None
+        WebTransportServer._server = None
+        WebTransport._forks.clear()
+        WebTransport.start({"port": port, "password_hash": ""})
+
+        # Перерегистрируем агента (Agent._instances пережил рестарт сервера) +
+        # синхронизируем RPC URL в контейнере (новый токен → новый URL).
+        agent = dash["agent"]
+        Agent._instances[(agent.id, "")] = agent
+        await sb._sync_rpc_url()
+
+        async with httpx.AsyncClient(timeout=5.0) as cl:
+            base = f"http://127.0.0.1:{port}"
+            for _ in range(60):
+                try:
+                    r = await cl.get(f"{base}/rpctest/dashboard/web/__probe__")
+                    if r.status_code in (200, 404):
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.25)
+            else:
+                pytest.fail("новый uvicorn не поднялся")
+
+        # Отпускаем скрипт
+        open(resume, "w").close()
+
+        r = await proc_task
+        assert r["exit_code"] == 0, r
+        assert "OK" in r["stdout"], r
+        assert "first" in transport.captured, transport.captured
+        assert "second-after-reconnect" in transport.captured, transport.captured
+
     async def test_no_rpc_url_when_no_fork(self, dash):
         """Sanity: если URL'а нет нигде (ни в файле, ни в env), get_agent()
         даёт понятную ошибку, а не молча виснет."""
