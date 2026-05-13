@@ -447,6 +447,7 @@ class ClaudeBackend(BaseBackend):
                 "include_partial_messages": True,
                 "system_prompt": None,
                 "setting_sources": None,
+                "settings": '{"attribution":{"commit":""}}',
                 "tools": [],
                 "max_turns": agent.max_iterations,
                 "thinking": {"type": "adaptive", "display": "summarized"},
