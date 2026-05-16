@@ -497,6 +497,15 @@ export class ChatDialog extends Component {
         }));
     }
 
+    _downloadAttachment(att) {
+        const a = document.createElement('a');
+        a.href = `data:${att.mime || 'application/octet-stream'};base64,${att.base64}`;
+        a.download = att.name || 'download';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
     static _formatIdeTag(ide) {
         if (!ide) return '';
         if (ide.startLine != null) {
@@ -674,12 +683,14 @@ export class ChatDialog extends Component {
                 ${this.state.attachments.length > 0 && html`
                     <div class=${cl.attachments}>
                         ${this.state.attachments.map((a, i) => html`
-                            <div class=${cl.chip}>
+                            <div class=${cl.chip} title="Скачать"
+                                 onClick=${() => this._downloadAttachment(a)}>
                                 ${a.mime?.startsWith('image/')
                                     ? html`<img src=${`data:${a.mime};base64,${a.base64}`} class=${cl.chipThumb} />`
                                     : html`<span class=${cl.chipIcon}>${a.mime?.startsWith('audio/') ? ICON_MIC : ICON_PAPERCLIP}</span>`}
                                 <span class=${cl.chipName}>${a.name}</span>
-                                <button class=${cl.chipRemove} onClick=${() => this._removeAttachment(i)}>×</button>
+                                <button class=${cl.chipRemove}
+                                        onClick=${(e) => { e.stopPropagation(); this._removeAttachment(i); }}>×</button>
                             </div>
                         `)}
                     </div>
@@ -843,6 +854,8 @@ cl.chip = css`
   padding: 4px 6px 4px 4px; background: var(--surface2);
   border: 1px solid var(--border); border-radius: 4px;
   font-size: 12px; max-width: 240px;
+  cursor: pointer;
+  &:hover { background: var(--surface3); }
 `;
 cl.chipThumb = css`
   width: 28px; height: 28px; object-fit: cover; border-radius: 3px;
