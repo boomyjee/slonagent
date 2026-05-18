@@ -188,6 +188,18 @@ class CodexClient:
         for inst in instances:
             await inst._shutdown()
 
+    async def restart(self):
+        """Kill the subprocess and respawn. Used when the server hangs
+        (e.g. resuming a thread with a bloated rollout)."""
+        log.warning("[codex] restarting app-server subprocess")
+        # Reject all pending requests so callers don't hang
+        for rid, fut in list(self._pending.items()):
+            if not fut.done():
+                fut.set_exception(RuntimeError("codex app-server restarting"))
+        self._pending.clear()
+        await self._shutdown()
+        await self._start()
+
     def __init__(self, enable_features: tuple = ()):
         self._codex_path = _find_codex()
         self._enable_features = enable_features
@@ -236,6 +248,9 @@ class CodexClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Default 64KB readline limit is too small — codex emits JSON
+            # lines with inline base64 images that easily exceed it.
+            limit=10 * 1024 * 1024,  # 10 MB (same as Claude SDK)
             env=os.environ,  # наследуем HTTPS_PROXY и прочее
         )
         self._reader_task = asyncio.create_task(self._reader_loop())
