@@ -554,7 +554,6 @@ cl.fileRow = css`
   & td.state { font-family: monospace; color: var(--accent); user-select: none; }
   & input[type="checkbox"] {
     accent-color: var(--accent);
-    color-scheme: dark;
     cursor: pointer;
   }
 `;

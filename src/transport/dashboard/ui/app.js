@@ -468,6 +468,6 @@ cl.navBtn = css`
   flex: 1; padding: 10px 8px; background: transparent; border: none;
   color: var(--text-dim); cursor: pointer; font-size: 13px;
   border-bottom: 2px solid transparent;
-  &.active { color: var(--accent); border-bottom-color: var(--accent); }
+  &.active, &.active:focus { color: var(--accent); border-bottom-color: var(--accent); }
   &:hover { color: var(--text); }
 `;

@@ -16,6 +16,7 @@
   /* Дефолтная палитра = dark-vscode. Дашборд переключает темы через
      [data-theme] на <html> (см. dashboard/ui/components/theme.js). */
   :root {
+    color-scheme: dark;
     --bg: #1e1e1e; --surface: #252526; --surface2: #2d2d30; --surface3: #3e3e42;
     --border: #3c3c3c; --text: #d4d4d4; --text-dim: #858585;
     --accent: #569cd6; --accent-fg: #1e1e1e;
@@ -52,6 +53,7 @@
     --monaco-base: vs-dark;
   }
   :root[data-theme="light-vscode"] {
+    color-scheme: light;
     --bg: #ffffff; --surface: #f3f3f3; --surface2: #ebebeb; --surface3: #dbdbdb;
     --border: #e1e1e1; --text: #1e1e1e; --text-dim: #717171;
     --accent: #0066bf; --accent-fg: #ffffff;
@@ -70,6 +72,7 @@
     --monaco-base: vs;
   }
   :root[data-theme="light-catppuccin"] {
+    color-scheme: light;
     --bg: #eff1f5; --surface: #e6e9ef; --surface2: #ccd0da; --surface3: #bcc0cc;
     --border: #bcc0cc; --text: #4c4f69; --text-dim: #6c6f85;
     --accent: #1e66f5; --accent-fg: #eff1f5;
