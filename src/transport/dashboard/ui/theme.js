@@ -56,7 +56,8 @@ function hslToRgb(h, s, l) {
 function _hsl(h, s, l) { return rgbToHex(...hslToRgb(h, s, l)); }
 function _hsla(h, s, l, a) {
     const [r, g, b] = hslToRgb(h, s, l);
-    return `rgba(${r},${g},${b},${a})`;
+    const aa = Math.round(Math.max(0, Math.min(1, a)) * 255).toString(16).padStart(2, '0');
+    return rgbToHex(r, g, b) + aa;
 }
 
 // WCAG relative luminance
