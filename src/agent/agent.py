@@ -215,6 +215,9 @@ class Agent:
         elif backend == "claude":
             from src.agent.backends.claude import ClaudeBackend
             self.backend_impl = ClaudeBackend(self, **self.backend_params)
+        elif backend == "codex":
+            from src.agent.backends.codex import CodexBackend
+            self.backend_impl = CodexBackend(self, **self.backend_params)
         elif backend == "echo":
             from src.agent.backends.echo import EchoBackend
             self.backend_impl = EchoBackend(self, **self.backend_params)
