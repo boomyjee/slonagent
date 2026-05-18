@@ -354,8 +354,15 @@ class CodexClient:
     async def _send_raw(self, msg: dict):
         line = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
         async with self._write_lock:
-            self._proc.stdin.write(line)
-            await self._proc.stdin.drain()
+            # Write in chunks — large payloads (base64 images) can exceed
+            # the OS pipe buffer (64KB on Windows). Writing everything at
+            # once and calling drain() can deadlock if codex is trying to
+            # write to stdout at the same time. Chunked writes yield to the
+            # event loop between flushes, letting _reader_loop drain stdout.
+            _CHUNK = 65536
+            for i in range(0, len(line), _CHUNK):
+                self._proc.stdin.write(line[i:i + _CHUNK])
+                await self._proc.stdin.drain()
 
     async def notify(self, method: str, params: dict | None = None):
         msg = {"method": method}
