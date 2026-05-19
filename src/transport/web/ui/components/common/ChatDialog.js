@@ -563,7 +563,7 @@ export class ChatDialog extends Component {
     _renderUserItem(it) {
         if (it.kind === 'image') return html`<img src=${it.url} class=${cl.thumb} />`;
         const ide = ChatDialog._parseIdeTag(it.text || '');
-        if (!ide) return html`<div dangerouslySetInnerHTML=${{__html: mdToHtml(it.text)}}></div>`;
+        if (!ide) return html`<div>${it.text}</div>`;
         const tip = ide.text ? `${ide.file}\n\n${ide.text}` : ide.file;
         return html`<div class="${cl.idePill} ${cl.idePillBubble}" title=${tip}>${ChatDialog._ideChipLabel(ide)}</div>`;
     }
