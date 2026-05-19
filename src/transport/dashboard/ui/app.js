@@ -406,8 +406,10 @@ class App extends Component {
                     </div>
                 </div>
                 <${Resizer} side="right" persistKey="chat" collapseLabel="Chat" className="dash-resizer" />
-                <${Chat} ref=${c => this._chat = c} app=${this} connected=${connected}
-                         className="dash-chat" />
+                <div class="${cl.chatWrap} dash-chat-wrap">
+                    <${Chat} ref=${c => this._chat = c} app=${this} connected=${connected}
+                             className="dash-chat" />
+                </div>
                 <div class=${cl.bottomNav}>
                     ${[['files', '▤ Files'], ['editor', '✎ Editor'], ['chat', '✉ Chat']].map(([k, label]) => html`
                         <button class="${cl.navBtn}${mobileView === k ? ' active' : ''}"
@@ -426,15 +428,19 @@ cl.app = css`
   @media (max-width: 768px) {
     flex-direction: column;
     & .dash-resizer { display: none; }
-    & .dash-sidebar, & .dash-main, & .dash-chat {
+    & .dash-sidebar, & .dash-main, & .dash-chat-wrap {
       flex: 1 1 auto !important; width: 100% !important;
       min-width: 0; min-height: 0;
     }
-    & .dash-sidebar, & .dash-main, & .dash-chat { display: none; }
+    & .dash-sidebar, & .dash-main, & .dash-chat-wrap { display: none; }
     &.mobile-files .dash-sidebar { display: flex !important; }
     &.mobile-editor .dash-main { display: flex; }
-    &.mobile-chat .dash-chat { display: flex !important; }
+    &.mobile-chat .dash-chat-wrap { display: flex !important; }
   }
+`;
+cl.chatWrap = css`
+  display: flex; flex: 1; min-width: 0; overflow: hidden;
+  & > * { flex: 1; min-width: 0; }
 `;
 cl.sidebar = css`
   width: 220px; background: var(--surface); border-right: 1px solid var(--border);
