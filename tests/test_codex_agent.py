@@ -804,6 +804,40 @@ class TestNotificationHandling:
         assert sent == ["Let ", "Let me ", "Let me think"]
 
     @pytest.mark.asyncio
+    async def test_reasoning_item_completed_finalizes_with_buffer(self):
+        """Регрессия (user-facing): на free gpt-5.5 модель эмитит мысли только
+        через summaryTextDelta (item.content пустой в final). Раньше мы
+        вызывали transport.send_thinking(final=True) только если item.content
+        непустой → на free плане finalize не вызывался → web-transport не
+        делал replay при reconnect UI → юзер мысли не видел. Теперь
+        finalize'им накопленным буфером даже если content пустой."""
+        agent, backend, _ = self._setup_backend()
+        # Симулируем стрим summary
+        for delta in ["**Calculating", " primes**\n", "29"]:
+            await backend._handle_notification({
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {"itemId": "r_1", "delta": delta},
+            })
+        # item/completed с ПУСТЫМ content (как на free plane)
+        await backend._handle_notification({
+            "method": "item/completed",
+            "params": {"item": {
+                "type": "reasoning", "id": "r_1",
+                "summary": [], "content": "",
+            }},
+        })
+        # Должен быть финальный вызов с final=True и накопленным текстом
+        final_calls = [c for c in agent.transport.send_thinking.call_args_list
+                       if c.kwargs.get("final") is True]
+        assert final_calls, (
+            "transport.send_thinking никогда не получил final=True — "
+            "web-transport не сделает replay, мысли потеряются для UI"
+        )
+        assert final_calls[-1].args[0] == "**Calculating primes**\n29", (
+            "finalize'ит не накопленным буфером"
+        )
+
+    @pytest.mark.asyncio
     async def test_reasoning_summary_delta_accumulates(self):
         """summaryTextDelta — мысли модели в summary-форме. На free ChatGPT
         (gpt-5.5) raw textDelta никогда не приходит, только summary; раньше

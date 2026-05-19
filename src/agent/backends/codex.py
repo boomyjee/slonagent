@@ -1150,10 +1150,25 @@ class CodexBackend(BaseBackend):
                 return
 
             if t == "reasoning":
-                content = item.get("content") or ""
-                if content:
-                    stream_id = s.get("thinking_stream_ids", {}).get(item_id)
-                    await self.agent.transport.send_thinking(content, stream_id=stream_id, final=True)
+                # На pro плане модель эмитит raw thoughts через textDelta
+                # → item.content заполнено. На free plane (gpt-5.5) raw
+                # thoughts недоступны, есть только summary через
+                # summaryTextDelta → item.content="" / item.summary=[...].
+                # В обоих случаях у нас накоплен буфер в thinking_bufs[item_id]
+                # (один из двух delta-обработчиков положил туда текст).
+                # Финализируем накопленным буфером — иначе web-transport
+                # без `final=True` не делает replay при reconnect UI и
+                # пользователь не видит мысли.
+                stream_id = s.get("thinking_stream_ids", {}).get(item_id)
+                final_text = (
+                    item.get("content")
+                    or s.get("thinking_bufs", {}).get(item_id)
+                    or ""
+                )
+                if final_text and stream_id is not None:
+                    await self.agent.transport.send_thinking(
+                        final_text, stream_id=stream_id, final=True,
+                    )
                 return
 
             if t == "dynamicToolCall":
