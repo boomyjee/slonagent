@@ -67,22 +67,22 @@ _DISABLED_NATIVE_FEATURES = (
 
 # Top-level config keys которые передаём через `-c key=value`.
 # Имена взяты из исходников codex (lib/codex/codex-rs/config/src/
-# config_toml.rs + core/src/session/mod.rs):
+# config_toml.rs + core-skills/src/manager.rs + core/src/session/mod.rs):
 #   - web_search="disabled" → убирает web.run И multi_tool_use.parallel
 #   - include_permissions_instructions=false → нет <permissions instructions>
 #     блока ("sandbox_mode is..." болтовня которая пугает модель)
 #   - include_apps_instructions=false → нет <apps_instructions> блока
 #   - include_environment_context=false → нет <environment_context> envelope
-#
-# В 0.130.0 НЕ поддерживаются (появятся в alpha):
-#   - include_skill_instructions → <skills_instructions> блок про codex'овские
-#     встроенные skills останется (не страшный)
-#   - include_collaboration_mode_instructions
+#   - skills.bundled.enabled=false → нет <skills_instructions> блока про
+#     codex'овские системные skills (imagegen, plugin-creator и т.п.).
+#     Side-effect: codex физически удаляет ~/.codex/skills/.system/ (он сам
+#     её перечтит при запуске codex CLI напрямую без этой опции).
 _DISABLED_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ('web_search', '"disabled"'),
     ('include_permissions_instructions', 'false'),
     ('include_apps_instructions', 'false'),
     ('include_environment_context', 'false'),
+    ('skills.bundled.enabled', 'false'),
 )
 
 # Default sandbox = "danger-full-access" + approval_policy = "untrusted".
@@ -648,12 +648,29 @@ class CodexBackend(BaseBackend):
                 expected.add(("function_call_output", t["tool_call_id"]))
         return expected
 
-    @staticmethod
-    def _is_codex_internal(payload: dict) -> bool:
-        """Codex кладёт в jsonl свои service-сообщения как response_item:
-          - role=developer (permissions / skills instructions)
-          - role=user с XML-обёрткой `<environment_context>...</environment_context>`
-        Их игнорируем при сверке памяти с тредом.
+    # Конкретные codex-internal маркеры, которые он мог вкидывать в jsonl
+    # как user/developer message. Только эти теги исключаем при сверке памяти
+    # с jsonl — иначе попадает в фильтр любая XML-обёртка пользователя
+    # (slon вкладывает `<ide_opened_file>`, `<attached_file>`, voice-теги
+    # и т.п. перед содержимым). Через config мы все эти codex-блоки и так
+    # отключили, но оставляем фильтр на случай если codex вкинет в будущем.
+    _CODEX_INTERNAL_PREFIXES = (
+        "<environment_context>",
+        "<permissions instructions>",
+        "<skills_instructions>",
+        "<apps_instructions>",
+        "<collaboration_mode>",
+    )
+
+    @classmethod
+    def _is_codex_internal(cls, payload: dict) -> bool:
+        """True для service-сообщений codex'а в jsonl. Их исключаем при сверке
+        памяти с тредом — иначе они либо бы давали ложную divergence (codex
+        вкинул, нас нет), либо вообще ломали бы сравнение.
+
+        Раньше эвристика была "любой <...> в user message — codex-internal",
+        но это ловило и slon-обёртки (`<ide_opened_file>` и пр.) → постоянно
+        пересоздавался thread.
         """
         if payload.get("type") != "message":
             return False
@@ -661,10 +678,12 @@ class CodexBackend(BaseBackend):
         if role == "developer":
             return True
         if role == "user":
-            for c in payload.get("content") or ():
-                t = (c.get("text") or "") if isinstance(c, dict) else ""
-                if t.lstrip().startswith("<") and ">" in t:
-                    return True
+            text = "".join(
+                c.get("text") or "" for c in (payload.get("content") or [])
+                if isinstance(c, dict)
+            ).lstrip()
+            if any(text.startswith(p) for p in cls._CODEX_INTERNAL_PREFIXES):
+                return True
         return False
 
     @staticmethod

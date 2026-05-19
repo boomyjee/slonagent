@@ -1120,6 +1120,26 @@ class TestIsCodexInternal:
             "content": [{"type": "input_text", "text": "<environment_context>\n<cwd>X</cwd>\n</environment_context>"}],
         })
 
+    def test_slon_wrapper_not_codex_internal(self):
+        """Регрессия (юзер ловил): slon оборачивает user-input в свои
+        XML-теги (<ide_opened_file>, <attached_file>, voice-теги). Если их
+        считать codex-internal — они выпадают из jsonl_signatures, но
+        остаются в memory_signatures → divergence каждый turn → бесконечный
+        recreate thread'а. Фильтр должен ловить ТОЛЬКО известные codex-теги.
+        """
+        from src.agent.backends.codex import CodexBackend
+        slon_wrappers = [
+            "<ide_opened_file>The user opened the file foo.py</ide_opened_file>а",
+            '<attached_file file_id="x" filename="img.jpg" />',
+            '<attached_file file_id="y">\n<content>\ntext\n</content>\n</attached_file>',
+            "<voice_transcript>hello</voice_transcript>",
+        ]
+        for wrapped in slon_wrappers:
+            assert not CodexBackend._is_codex_internal({
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": wrapped}],
+            }), f"slon-обёртка ошибочно считается codex-internal: {wrapped!r}"
+
     def test_regular_user_message_not_internal(self):
         from src.agent.backends.codex import CodexBackend
         assert not CodexBackend._is_codex_internal({
@@ -2359,23 +2379,22 @@ class TestCodexIntegration:
                 f"baseInstructions не override'ится"
             )
 
-        # 2. Эти блоки гасятся через include_*_instructions=false config
-        # ключи (поддерживаются в codex 0.130.0+):
+        # 2. Эти блоки гасятся через config ключи в _DISABLED_CONFIG_KEYS:
         forbidden_blocks = (
             "<permissions instructions>",
             "<apps_instructions>",
             "<environment_context>",
+            # <skills_instructions> — управляется skills.bundled.enabled=false
+            # (НЕ include_skill_instructions — этот config-key есть только в
+            # 0.131-alpha и там тоже не работает). Codex удаляет
+            # ~/.codex/skills/.system/ → блок не появляется.
+            "<skills_instructions>",
         )
         for marker in forbidden_blocks:
             assert marker not in content, (
-                f"в jsonl остался auto-блок {marker!r} — "
-                f"соответствующий include_*=false не сработал"
+                f"в jsonl остался auto-блок {marker!r} — соответствующий "
+                f"config-флаг в _DISABLED_CONFIG_KEYS не сработал"
             )
-        # <skills_instructions> блок про codex'овские встроенные skills
-        # (imagegen / openai-docs / plugin-creator / skill-creator /
-        # skill-installer) — в 0.130.0 НЕ управляется (флаг появится в
-        # alpha-версии). Текст безобидный — описывает функции, не пугает.
-        # Не блочим тестом; добавим как только flag будет в stable.
 
     @pytest.mark.asyncio
     async def test_real_apply_patch_hard_blocked_by_default(self):
