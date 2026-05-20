@@ -9,7 +9,6 @@
   <img src="docs/mobile-editor.jpg" width="180" alt="Editor">
   <img src="docs/mobile-git.jpg" width="180" alt="Git">
   <img src="docs/mobile-files.jpg" width="180" alt="Files">
-  <img src="docs/mobile-cgi.jpg" width="180" alt="CGI App">
 </p>
 
 **Ключевое отличие от классических агентов** (Claude Code, Codex, OpenCode) — у slonagent нет сессий. Observations автоматически сжимают опыт, контекст освобождается, и агент работает непрерывно — один бесконечный поток разработки без потери контекста.
@@ -231,7 +230,7 @@ Python-скрипты в `/workspace/tools/` автоматически стан
 
 Форк-агент использует облегчённую конфигурацию из секции `fork_agent` в конфиге — по умолчанию более быстрая модель и только провайдеры памяти, которые имеет смысл разделять (personality, tool). Все остальные параметры наследуются от `agent`.
 
-Данные форк-агентов хранятся в `forks/{chat_id}_{thread_id}/`.
+Данные форк-агентов хранятся в `forks/<agent_id>/` — имя задаётся при создании.
 
 ---
 
