@@ -30,7 +30,8 @@ _ALLOWED = {
     BaseTransport: {
         "send_message", "send_thinking", "send_memory_info", "send_processing",
         "send_system_prompt", "on_tool_call", "on_tool_result",
-        "inject_message", "send_app_url", "send_images",
+        "inject_message", "send_app_url", "send_images", "send_voice",
+        "send_files",
     },
     Memory: {"clear", "add_turn"},
 }
