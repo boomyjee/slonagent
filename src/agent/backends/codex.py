@@ -51,7 +51,6 @@ def _next_stream_id() -> int:
 # Список взят из `codex features list` (только stable=true + actually-tool-эмиттящие).
 _DISABLED_NATIVE_FEATURES = (
     "shell_tool",                    # exec на хосте — минуя SandboxSkill
-    "apply_patch_freeform",          # правка файлов (под-флаг apply_patch)
     "apply_patch_streaming_events",  # стрим-правка файлов
     "browser_use",                   # автоматизация браузера
     "browser_use_external",          # внешний браузер
@@ -59,10 +58,9 @@ _DISABLED_NATIVE_FEATURES = (
     "computer_use",                  # управление OS
     "image_generation",              # генерация картинок (у нас NanoBananaSkill)
     "multi_agent",                   # codex'овый внутренний multi-agent
-    "tool_search",                   # автопоиск тулов
     "tool_suggest",                  # автоподсказка тулов
-    "builtin_mcp",                   # codex'овая встроенная MCP
     "enable_mcp_apps",               # MCP apps
+    "goals",                         # get_goal/create_goal/update_goal (codex'овые цели — модель должна юзать наши skills)
 )
 
 # Top-level config keys которые передаём через `-c key=value`.
@@ -106,9 +104,51 @@ _THREAD_APPROVAL_POLICY_DEFAULT = "untrusted"
 # <skills_instructions>, <environment_context>. Минимальный непустой
 # placeholder ниже даёт чистого агента, которым управляет developerInstructions
 # (skill-контексты + system_prompt).
-_BASE_INSTRUCTIONS_DEFAULT = (
-    "You are an AI assistant. Use the provided tools to help the user."
+#
+# Список запретов: codex 0.133.0 регистрирует ряд baked-in тулов, для
+# которых нет feature-flag'а отключения (PlanHandler / ViewImageHandler /
+# RequestUserInputHandler / ListMcpResourcesHandler — добавляются всегда
+# или без проверяемых нами условий). Самый опасный — view_image (читает
+# любой файл с диска вне нашего SandboxSkill). Остальные либо безвредны
+# (turn/plan/updated — внутренний state), либо уже блокируются
+# (apply_patch — через approval-decline), либо отвергаются самим codex'ом
+# (request_user_input — "unavailable in Default mode"). Явный запрет в
+# baseInstructions снижает частоту попыток модели вызвать эти тулы.
+# Запреты в две слоя: (1) промптовая инструкция ниже — снижает частоту
+# попыток вызова, (2) approval-decline для apply_patch + фильтр в
+# _FORBIDDEN_MCP_TOOLS для MCP-resource тулов. Один промпт ненадёжен
+# (модель иногда ослушается), один approval — apply_patch имеет промпт
+# толкающий модель к попытке вообще не пробовать.
+#
+# apply_patch вынесен отдельно: при `enable_features=["apply_patch"]` юзер
+# явно открывает escape hatch — тогда из промпта запрет тоже убираем (см.
+# _build_base_instructions ниже), иначе модель послушно не зовёт даже когда
+# мы хотим разрешить.
+_FORBIDDEN_TOOLS_PROMPT_LINES_DEFAULT = (
+    "- view_image (you cannot read images or files from disk via this tool)",
+    "- update_plan (just write your plan in a normal message)",
+    "- request_user_input (just ask in your reply text)",
+    "- list_mcp_resources, list_mcp_resource_templates, read_mcp_resource "
+    "(no MCP resources available)",
+    "- multi_tool_use.parallel (call tools one at a time)",
 )
+_APPLY_PATCH_FORBIDDEN_PROMPT_LINE = (
+    "- apply_patch (file edits go through provided sandbox functions, not this)"
+)
+
+
+def _build_base_instructions(enable_features: tuple[str, ...]) -> str:
+    lines = list(_FORBIDDEN_TOOLS_PROMPT_LINES_DEFAULT)
+    if "apply_patch" not in enable_features:
+        lines.append(_APPLY_PATCH_FORBIDDEN_PROMPT_LINE)
+    return (
+        "You are an AI assistant. Use the provided tools to help the user.\n\n"
+        "FORBIDDEN TOOLS — never call these, they are disabled here:\n"
+        + "\n".join(lines) + "\n"
+    )
+
+
+_BASE_INSTRUCTIONS_DEFAULT = _build_base_instructions(())
 
 # Reasoning settings — codex эмитит мысли модели через item/reasoning/*
 # нотификации только при заданных effort/summary в turn/start. По probe'у
@@ -824,8 +864,11 @@ class CodexBackend(BaseBackend):
             # вкидывает свою длинную системку про "You are Codex" + блоки
             # <permissions instructions> / <skills_instructions> /
             # <environment_context>. Наши skill-контексты и system_prompt
-            # уходят в developerInstructions отдельно.
-            "baseInstructions": _BASE_INSTRUCTIONS_DEFAULT,
+            # уходят в developerInstructions отдельно. Сюда же зашиваем
+            # promptный запрет на baked-in тулы которые нельзя отрубить
+            # feature-flag'ом — динамически по enable_features (apply_patch
+            # из запрета снимается если юзер явно открыл escape hatch).
+            "baseInstructions": _build_base_instructions(self._enable_features),
             "personality": "none",
             "serviceName": "slon",
             "dynamicTools": self._build_dynamic_tools(),
@@ -969,6 +1012,19 @@ class CodexBackend(BaseBackend):
     # Если юзер кладёт это в enable_features — разрешает apply_patch
     # (psevdo-feature, реального --enable для baked-in apply_patch нет).
     _APPLY_PATCH_ALLOW_KEY = "apply_patch"
+
+    # MCP-resource тулы (list_mcp_resources / list_mcp_resource_templates /
+    # read_mcp_resource) — baked-in в codex 0.133, нет feature-flag для них.
+    # Без настроенных MCP-серверов вернут пустоту, но codex всё равно их
+    # регистрирует в model tool-list и эмитит item/started type=mcpToolCall.
+    # Не показываем пользователю их вызовы и не пишем в memory (зашумляют
+    # history и сбивают модель — она видит, что "вызывала" и переходит к
+    # следующему шагу с мусорным контекстом).
+    _FORBIDDEN_MCP_TOOLS = frozenset({
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "read_mcp_resource",
+    })
 
     async def _handle_server_request(self, msg):
         method = msg["method"]
@@ -1127,8 +1183,12 @@ class CodexBackend(BaseBackend):
                     "web_search", {"query": item.get("query", "")},
                 )
             elif t == "mcpToolCall":
+                tool = item.get("tool", "")
+                if tool in self._FORBIDDEN_MCP_TOOLS:
+                    log.info("[codex] suppressing forbidden mcpToolCall start: %s", tool)
+                    return
                 # Полное имя как codex его регистрирует — server__tool
-                name = f"{item.get('server')}__{item.get('tool')}"
+                name = f"{item.get('server')}__{tool}"
                 await self.agent.transport.on_tool_call(name, item.get("arguments") or {})
             return
 
@@ -1288,6 +1348,9 @@ class CodexBackend(BaseBackend):
                 call_id = item_id
                 server = item.get("server", "")
                 tool = item.get("tool", "")
+                if tool in self._FORBIDDEN_MCP_TOOLS:
+                    log.info("[codex] suppressing forbidden mcpToolCall completion: %s", tool)
+                    return
                 name = f"{server}__{tool}"
                 args = item.get("arguments") or {}
                 result = item.get("result")

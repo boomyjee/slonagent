@@ -1079,6 +1079,94 @@ class TestNotificationHandling:
         })
         agent.transport.send_message.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_forbidden_mcp_tool_start_is_suppressed(self):
+        """Когда codex эмитит item/started для baked-in MCP-resource тула
+        (list_mcp_resources / list_mcp_resource_templates / read_mcp_resource),
+        мы не должны его пропускать в transport — это шум, скрывать."""
+        from src.agent.backends.codex import CodexBackend
+        for tool in CodexBackend._FORBIDDEN_MCP_TOOLS:
+            agent, backend, _ = self._setup_backend()
+            await backend._handle_notification({
+                "method": "item/started",
+                "params": {"item": {
+                    "type": "mcpToolCall", "id": "x1",
+                    "server": "builtin", "tool": tool, "arguments": {},
+                }},
+            })
+            agent.transport.on_tool_call.assert_not_called(), (
+                f"forbidden mcp tool {tool!r} прошёл в transport"
+            )
+
+    @pytest.mark.asyncio
+    async def test_forbidden_mcp_tool_completion_not_written_to_turns(self):
+        """item/completed для forbidden MCP-тула не должен попадать в turns —
+        иначе history засоряется фиктивным tool call'ом и сбивает модель."""
+        from src.agent.backends.codex import CodexBackend
+        for tool in CodexBackend._FORBIDDEN_MCP_TOOLS:
+            agent, backend, _ = self._setup_backend()
+            await backend._handle_notification({
+                "method": "item/completed",
+                "params": {"item": {
+                    "type": "mcpToolCall", "id": "x1",
+                    "server": "builtin", "tool": tool,
+                    "arguments": {}, "result": {"resources": []},
+                }},
+            })
+            assert backend._stream_state["turns"] == [], (
+                f"forbidden mcp tool {tool!r} записан в turns: "
+                f"{backend._stream_state['turns']}"
+            )
+            agent.transport.on_tool_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_forbidden_mcp_tool_still_passes(self):
+        """Sanity: реальный MCP-тул (не в forbidden list) проходит как раньше —
+        фильтр работает по белому списку имён, а не глобально."""
+        agent, backend, _ = self._setup_backend()
+        await backend._handle_notification({
+            "method": "item/started",
+            "params": {"item": {
+                "type": "mcpToolCall", "id": "y1",
+                "server": "myserver", "tool": "some_real_tool", "arguments": {"x": 1},
+            }},
+        })
+        agent.transport.on_tool_call.assert_called_once_with(
+            "myserver__some_real_tool", {"x": 1},
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Unit: _build_base_instructions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBaseInstructions:
+    def test_default_forbids_all_baked_in(self):
+        from src.agent.backends.codex import _build_base_instructions
+        text = _build_base_instructions(())
+        for forbidden in (
+            "view_image", "update_plan", "request_user_input",
+            "list_mcp_resources", "read_mcp_resource", "apply_patch",
+            "multi_tool_use.parallel",
+        ):
+            assert forbidden in text, (
+                f"{forbidden!r} не упомянут в дефолтном baseInstructions — "
+                "модель не будет знать что он запрещён"
+            )
+
+    def test_apply_patch_removed_from_prompt_when_enabled(self):
+        """Escape hatch: при enable_features=['apply_patch'] промпт-запрет
+        снимается, иначе модель послушно не зовёт apply_patch даже когда
+        мы хотим разрешить."""
+        from src.agent.backends.codex import _build_base_instructions
+        text = _build_base_instructions(("apply_patch",))
+        assert "apply_patch" not in text, (
+            "apply_patch остался в FORBIDDEN при enable_features=['apply_patch']"
+        )
+        # Остальные запреты не должны пропасть
+        for still_forbidden in ("view_image", "update_plan", "list_mcp_resources"):
+            assert still_forbidden in text
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Unit: _memory_signatures / _is_codex_internal / _sync_codex_session
@@ -2431,13 +2519,13 @@ class TestCodexIntegration:
             )
 
     @pytest.mark.asyncio
-    async def test_real_apply_patch_hard_blocked_by_default(self):
+    async def test_real_apply_patch_hard_blocked_by_default(self, tmp_path):
         """Регрессия (юзер ловил): codex apply_patch как baked-in тул не
         управляется feature-flag'ом. Защита — `sandbox: "read-only"` на уровне
         thread/start: codex'овский kernel-sandbox отвергает любые write через
         apply_patch / shell_tool. Файл должен остаться нетронутым.
         """
-        test_file = Path("e:/dev/slonagent/tmp_apply_patch_target.txt")
+        test_file = tmp_path / "tmp_apply_patch_target.txt"
         test_file.write_text("ORIGINAL")
 
         agent = make_agent(model_name=CODEX_MODEL)
@@ -2453,25 +2541,28 @@ class TestCodexIntegration:
         finally:
             await agent.close()
 
-        try:
-            actual = test_file.read_text()
-            assert actual == "ORIGINAL", (
-                f"apply_patch не заблокирован sandbox'ом! Файл стал {actual!r}"
-            )
-        finally:
-            test_file.unlink(missing_ok=True)
+        actual = test_file.read_text()
+        assert actual == "ORIGINAL", (
+            f"apply_patch не заблокирован sandbox'ом! Файл стал {actual!r}"
+        )
 
     @pytest.mark.asyncio
-    async def test_real_apply_patch_allowed_with_explicit_override(self):
-        """Если юзер явно поставил sandbox='workspace-write' через backend_params,
-        codex apply_patch начинает работать — это легитимный escape hatch."""
-        test_file = Path("e:/dev/slonagent/tmp_apply_patch_allowed.txt")
+    async def test_real_apply_patch_allowed_with_explicit_override(self, tmp_path):
+        """Если юзер явно открыл escape hatch: sandbox='workspace-write' +
+        enable_features=['apply_patch'] — codex apply_patch работает,
+        approval-hook accept'ит, и промпт-запрет на apply_patch снимается
+        (см. _build_base_instructions). Это легитимный путь когда нужен
+        baked-in writer."""
+        test_file = tmp_path / "tmp_apply_patch_allowed.txt"
         test_file.write_text("ORIGINAL")
 
         from src.agent.agent import Agent
         agent = Agent(
             id="t", model_name=CODEX_MODEL, backend="codex",
-            backend_params={"sandbox": "workspace-write"},
+            backend_params={
+                "sandbox": "workspace-write",
+                "enable_features": ["apply_patch"],
+            },
             agent_dir=tempfile.mkdtemp(),
             memory_compressor=PassthroughCompressor(),
         )
@@ -2496,21 +2587,18 @@ class TestCodexIntegration:
         finally:
             await agent.close()
 
-        try:
-            actual = test_file.read_text()
-            # На workspace-write codex может работать с файлами в cwd
-            # (наш cwd по умолчанию — agent.memory_dir/workspace, но codex
-            # принимает редактирование любых файлов в writable_roots). Тут
-            # критично что фрагмент апдейтился — точное значение зависит
-            # от того, считает ли codex наш cwd writable.
-            assert actual != "ORIGINAL" or "apply_patch" in str(
-                agent.transport.on_tool_call.call_args_list
-            ), (
-                "workspace-write override не работает: apply_patch не сработал "
-                f"и не пытался; файл={actual!r}"
-            )
-        finally:
-            test_file.unlink(missing_ok=True)
+        actual = test_file.read_text()
+        # На workspace-write codex может работать с файлами в cwd
+        # (наш cwd по умолчанию — agent.memory_dir/workspace, но codex
+        # принимает редактирование любых файлов в writable_roots). Тут
+        # критично что фрагмент апдейтился — точное значение зависит
+        # от того, считает ли codex наш cwd writable.
+        assert actual != "ORIGINAL" or "apply_patch" in str(
+            agent.transport.on_tool_call.call_args_list
+        ), (
+            "workspace-write override не работает: apply_patch не сработал "
+            f"и не пытался; файл={actual!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_real_native_shell_tool_disabled(self):
@@ -2670,3 +2758,83 @@ class TestCodexIntegration:
             )
         finally:
             await agent.close()
+
+    @pytest.mark.asyncio
+    async def test_real_baked_in_tool_inventory_canary(self):
+        """Canary: при обновлении codex CLI следим что у нас НЕ появились
+        новые baked-in тулы помимо тех, которые мы знаем и контролируем
+        (через --disable / approval-decline / _FORBIDDEN_MCP_TOOLS /
+        промпт-запрет). Если codex добавил новый встроенный тул — тест
+        падает, и нужно явно решить: запретить промптом, фильтровать,
+        или допустить.
+
+        Метод: просим модель перечислить свои тулы, парсим имена,
+        вычитаем dynamic skill-тулы и known baked-in. Любой остаток
+        — потенциальный новый тул codex'а, который мы не контролируем.
+        """
+        # known = всё что мы УЖЕ контролируем или допустили:
+        KNOWN_BAKED_IN = {
+            # отключены через --disable goals
+            "get_goal", "create_goal", "update_goal",
+            # блокируется approval-decline
+            "apply_patch",
+            # фильтруется _FORBIDDEN_MCP_TOOLS + запрет в промпте
+            "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
+            # запрет в промпте (нельзя отключить флагом, codex выполняет)
+            "view_image", "update_plan",
+            # codex сам отвергает в Default mode (DefaultModeRequestUserInput=false)
+            "request_user_input",
+            # parallel-обёртка, безвредна
+            "multi_tool_use.parallel", "parallel",
+        }
+
+        agent = make_agent(model_name=CODEX_MODEL)
+        agent.memory._turns.append({
+            "role": "user",
+            "content": (
+                "List the EXACT names of every tool/function you currently "
+                "have available in this session. One name per line, lowercase, "
+                "no descriptions, no markdown bullets, no extra text. Include "
+                "every tool — built-in and user-provided."
+            ),
+        })
+        try:
+            turns = await agent.llm()
+        finally:
+            await agent.close()
+
+        text = "\n".join(
+            t.get("content", "") for t in turns
+            if t.get("role") == "assistant" and isinstance(t.get("content"), str)
+        )
+        # Парсим строки: убираем 'functions.' префикс, маркеры списков, мусор
+        names = set()
+        for line in text.splitlines():
+            s = line.strip().lstrip("-•*").strip().strip("`").lower()
+            if s.startswith("functions."):
+                s = s[len("functions."):]
+            # одно слово, состоит из букв/цифр/_./-
+            head = s.split()[0] if s.split() else ""
+            head = head.rstrip(":,;.")
+            if head and all(c.isalnum() or c in "_.-" for c in head):
+                names.add(head)
+
+        # Срезаем известные baked-in
+        unexpected = names - KNOWN_BAKED_IN
+        # Также срезаем технические/ответные слова которые модель может выдать
+        # как "функции" но это не имена тулов: 'functions', 'tools', etc.
+        meta_noise = {"functions", "function", "tools", "tool", "none", ""}
+        unexpected -= meta_noise
+        # Один тест — одна попытка, модель иногда фантазирует имена. Если
+        # тест начнёт падать при обновлении codex — стоит вручную проверить
+        # `codex features list` + источники spec_plan.rs и обновить
+        # KNOWN_BAKED_IN или защиту.
+        assert not unexpected, (
+            f"Модель сообщила НЕИЗВЕСТНЫЕ имена тулов: {sorted(unexpected)}. "
+            f"Это может означать что codex CLI обновился и добавил новые "
+            f"baked-in тулы. Сверь со списком в codex 'features list' и "
+            f"источниками core/src/tools/spec_plan.rs — нужно либо запретить "
+            f"их в _BASE_INSTRUCTIONS_DEFAULT, либо добавить в "
+            f"_FORBIDDEN_MCP_TOOLS, либо в KNOWN_BAKED_IN в этом тесте.\n"
+            f"Полный список названных моделью имён: {sorted(names)}"
+        )
