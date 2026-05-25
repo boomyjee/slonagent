@@ -124,6 +124,7 @@ class WebTransportServer:
         sish_domain = config.get("sish_domain", "")
         sish_port = config.get("sish_port", 2222)
         sish_key = config.get("sish_key", "")
+        sish_subdomain = config.get("sish_subdomain", "")
         loop = asyncio.get_running_loop()
         cls._app = FastAPI()
 
@@ -230,12 +231,14 @@ class WebTransportServer:
         loop.call_soon_threadsafe(lambda: asyncio.create_task(_run()))
 
         if sish_domain:
-            import uuid
-            # Stable per-(machine, entry script) subdomain so bookmarklets
-            # survive restarts, but two checkouts on the same box don't
-            # collide on the same tunnel hostname.
-            key = f"{uuid.getnode()}:{os.path.abspath(sys.argv[0])}"
-            subdomain = "web-" + hashlib.sha1(key.encode()).hexdigest()[:6]
+            if sish_subdomain:
+                subdomain = sish_subdomain
+            else:
+                # platform.node() (hostname), а не uuid.getnode() (MAC) — последний
+                # на машине с кучей виртуальных адаптеров меняется между ребутами.
+                import platform
+                key = f"{platform.node()}:{os.path.abspath(sys.argv[0])}"
+                subdomain = "web-" + hashlib.sha1(key.encode()).hexdigest()[:6]
             cls._tunnel_ready = asyncio.Event()
             async def _tunnel():
                 # Ретраи только на стартовых ошибках. Успешный коннект (даже если
