@@ -206,6 +206,15 @@ class SandboxSkill(Skill):
             raise subprocess.CalledProcessError(proc.returncode, cmd, r.stdout, r.stderr)
         return r
 
+    @staticmethod
+    async def _run_loud(cmd):
+        """Захватывает stderr и кидает RuntimeError с текстом — чтобы причина
+        podman/docker-сбоя не терялась в безликом CalledProcessError(exit=N)."""
+        r = await SandboxSkill._run(cmd, capture_output=True, text=True)
+        if r.returncode:
+            raise RuntimeError(f"{' '.join(cmd[:2])} failed ({r.returncode}): {r.stderr.strip()}")
+        return r
+
     def stop(self):
         # `-t 0` пропускает 10-секундное ожидание SIGTERM. Контейнер крутит
         # `sleep infinity` — терять там нечего, можно сразу SIGKILL.
@@ -235,7 +244,7 @@ class SandboxSkill(Skill):
         )
         if info.returncode != 0 or info.stdout.strip().lower() != "running":
             logging.info("[exec] Starting podman machine...")
-            await self._run([self.runtime, "machine", "start"], check=True)
+            await self._run_loud([self.runtime, "machine", "start"])
 
     async def _ensure_container(self):
         volume_args = self._volume_args()
@@ -263,9 +272,7 @@ class SandboxSkill(Skill):
         if inspect.returncode != 0:
             img = await self._run([self.runtime, "image", "exists", env_image], capture_output=True)
             image = env_image if img.returncode == 0 else self.image
-            run = await self._run([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, image, "sleep", "infinity"], capture_output=True, text=True)
-            if run.returncode != 0:
-                raise RuntimeError(f"podman run failed ({run.returncode}): {run.stderr.strip()}")
+            await self._run_loud([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, image, "sleep", "infinity"])
             logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
         else:
             lines = inspect.stdout.strip().splitlines()
@@ -277,13 +284,13 @@ class SandboxSkill(Skill):
                     actual_mounts.add((self._norm(parts[0]), parts[1]))
 
             if not running:
-                await self._run([self.runtime, "start", self.container_name], check=True)
+                await self._run_loud([self.runtime, "start", self.container_name])
                 logging.info("[exec] Контейнер %s запущен", self.container_name)
             elif actual_mounts != desired_mounts:
                 logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
-                await self._run([self.runtime, "commit", self.container_name, env_image], check=True)
+                await self._run_loud([self.runtime, "commit", self.container_name, env_image])
                 await self._run([self.runtime, "rm", "-f", "-t", "0", self.container_name], capture_output=True)
-                await self._run([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"], check=True)
+                await self._run_loud([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"])
                 logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
         self._mounts_hash = new_hash
         await self._sync_rpc_url()
