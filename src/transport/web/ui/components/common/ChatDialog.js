@@ -778,7 +778,7 @@ cl.msg = css`
   & code { background: rgba(0,0,0,0.25); padding: 1px 4px; border-radius: 3px;
            font-family: monospace; font-size: 12px; }
   & pre { background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 4px;
-          margin: 4px 0; overflow-x: auto; white-space: pre; }
+          margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   & pre code { background: transparent; padding: 0; }
   & table { border-collapse: collapse; margin: 6px 0; font-size: 13px; width: auto; }
   & th, & td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; white-space: normal; }
