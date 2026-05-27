@@ -405,7 +405,10 @@ class Agent:
         if run_loop:
             asyncio.create_task(self.loop())
 
-    async def transcribe_audio(self, data: bytes, mime_type: str) -> str:
+    async def transcribe_audio(self, data: bytes | str, mime_type: str) -> str:
+        if isinstance(data, str):
+            import base64
+            data = base64.b64decode(data)
         fmt = mime_type.split("/")[-1]
         if self.transcription_whisper:
             # Локальный whisper.cpp через subprocess. Модель ищем неявно: предпочитаем
