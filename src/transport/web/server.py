@@ -284,11 +284,12 @@ class WebTransportServer:
                 subdomain = "web-" + hashlib.sha1(key.encode()).hexdigest()[:6]
             cls._tunnel_ready = asyncio.Event()
             async def _tunnel():
-                # Ретраи только на стартовых ошибках. Успешный коннект (даже если
-                # сразу разорвался) сбрасывает счётчик, поэтому сетевые мерцания
-                # не выжирают бюджет, а реальная поломка (sish мёртв, auth не
-                # пускает) останавливается на 5-й подряд неудачной попытке.
-                fails, MAX_FAILS = 0, 5
+                # Бесконечно переподключаемся: sish может уйти на ребут или
+                # сеть моргнуть на минуту-другую, и туннель надо вернуть без
+                # перезапуска процесса. Экспоненциальный бэкофф 2→4→…→60s
+                # на стартовых ошибках, чтобы не молотить sish при долгой
+                # недоступности.
+                delay = 2
                 tunnel_conn = None
                 while True:
                     try:
@@ -296,15 +297,12 @@ class WebTransportServer:
                             cls._port, subdomain, sish_domain, sish_port, sish_key,
                         )
                         cls._tunnel_url = url
-                        fails = 0
+                        delay = 2
                     except Exception as e:
-                        fails += 1
-                        log.warning("Tunnel start failed (%d/%d): %s", fails, MAX_FAILS, e)
+                        log.warning("Tunnel start failed (retry in %ds): %s", delay, e)
                         cls._tunnel_ready.set()
-                        if fails >= MAX_FAILS:
-                            log.warning("Giving up on tunnel after %d consecutive failures", MAX_FAILS)
-                            return
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(delay)
+                        delay = min(60, delay * 2)
                         continue
                     cls._tunnel_ready.set()
                     try:
@@ -313,5 +311,5 @@ class WebTransportServer:
                         log.warning("Tunnel watcher error: %s", e)
                     log.warning("Tunnel closed: was %s", cls._tunnel_url)
                     cls._tunnel_url = None
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(2)
             loop.call_soon_threadsafe(asyncio.create_task, _tunnel())
