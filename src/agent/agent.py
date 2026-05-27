@@ -405,7 +405,7 @@ class Agent:
         if run_loop:
             asyncio.create_task(self.loop())
 
-    async def transcribe_audio(self, data: bytes | str, mime_type: str) -> str:
+    async def transcribe_audio(self, data: bytes | str, mime_type: str, silent: bool = False) -> str:
         if isinstance(data, str):
             import base64
             data = base64.b64decode(data)
@@ -448,7 +448,8 @@ class Agent:
                     raise RuntimeError(f"whisper-cli produced no output: {err.decode(errors='replace')[:500]}")
                 with open(txt_path, encoding="utf-8") as f:
                     text = f.read().strip()
-                await self.transport.send_message(f"🎤 {text}")
+                if not silent:
+                    await self.transport.send_message(f"🎤 {text}")
                 return text
         if fmt not in ("wav", "mp3"):
             audio, sr = sf.read(io.BytesIO(data))
