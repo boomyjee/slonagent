@@ -298,16 +298,15 @@ class SandboxSkill(Skill):
     @classmethod
     async def host_url(cls) -> str:
         """Адрес host'а с точки зрения контейнера. Docker Desktop сам
-        прописывает host.docker.internal. На podman-машине (Win/Mac) она
-        не работает с --no-hosts, slirp-gateway 10.0.2.2 указывает на VM —
-        достаём default gateway VM через asyncssh. Bare Linux подман
-        прописывает alias сам, ловим через fallback."""
+        прописывает host.docker.internal. На podman через --no-hosts
+        /etc/hosts в контейнере нет — подставляем литеральный IP шлюза VM,
+        добытый через SSH в подман-машину."""
         if cls._host_ip is not None:
             return cls._host_ip
         if cls.runtime == "podman":
             if sys.platform == "win32":
                 await cls._ensure_windows_firewall_rule()
-            cls._host_ip = await cls._podman_machine_gateway() or "host.containers.internal"
+            cls._host_ip = await cls._podman_machine_gateway()
         else:
             cls._host_ip = "host.docker.internal"
         logging.info("[sandbox] host ip (%s): %s", cls.runtime, cls._host_ip)
@@ -403,32 +402,46 @@ class SandboxSkill(Skill):
             logging.warning("[sandbox] run in admin PowerShell to fix: %s", inner)
 
     @classmethod
-    async def _podman_machine_gateway(cls) -> str | None:
-        try:
-            import asyncssh, json
-            out = await asyncio.to_thread(
-                subprocess.run, ["podman", "machine", "inspect"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if out.returncode != 0:
-                raise RuntimeError(f"rc={out.returncode}: {out.stderr!r}")
-            machines = json.loads(out.stdout)
-            if not machines:
-                return None
-            ssh = machines[0]["SSHConfig"]
-            key = asyncssh.read_private_key(ssh["IdentityPath"])
-            async with asyncssh.connect(
-                "127.0.0.1", port=ssh["Port"], username=ssh["RemoteUsername"],
-                client_keys=[key], known_hosts=None, connect_timeout=10,
-            ) as conn:
-                result = await conn.run("ip route show default", check=False)
-            parts = (result.stdout or "").split()
-            if "via" in parts:
-                return parts[parts.index("via") + 1]
-            logging.warning("[sandbox] unexpected ip route output: %r", result.stdout)
-        except Exception as e:
-            logging.warning("[sandbox] podman-machine gateway lookup failed: %r", e)
-        return None
+    async def _podman_machine_gateway(cls) -> str:
+        """Default-gateway IP внутри podman machine VM = IP хоста с точки
+        зрения контейнера. Cold-start race: sshd внутри VM поднимается через
+        ~5-15с после `podman machine start` возвращает "running" — TCP
+        connect отлетает с RST (ConnectionRefused, не таймаут), ретраим до
+        60с. Прочие ошибки (нет машины, странный ip route, auth-fail) летят
+        наружу — это не race, а реальная поломка."""
+        import asyncssh
+        out = await asyncio.to_thread(
+            subprocess.run, ["podman", "machine", "inspect"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode != 0:
+            raise RuntimeError(f"podman machine inspect rc={out.returncode}: {out.stderr!r}")
+        machines = json.loads(out.stdout)
+        if not machines:
+            raise RuntimeError("podman machine inspect: no machines configured")
+        ssh = machines[0]["SSHConfig"]
+        key = asyncssh.read_private_key(ssh["IdentityPath"])
+        deadline = asyncio.get_running_loop().time() + 60
+        attempt = 0
+        while True:
+            try:
+                async with asyncssh.connect(
+                    "127.0.0.1", port=ssh["Port"], username=ssh["RemoteUsername"],
+                    client_keys=[key], known_hosts=None, connect_timeout=10,
+                ) as conn:
+                    result = await conn.run("ip route show default", check=False)
+                break
+            except ConnectionRefusedError:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise
+                attempt += 1
+                if attempt == 1:
+                    logging.info("[sandbox] podman machine sshd not ready, polling...")
+                await asyncio.sleep(0.5)
+        parts = (result.stdout or "").split()
+        if "via" not in parts:
+            raise RuntimeError(f"unexpected `ip route show default` output: {result.stdout!r}")
+        return parts[parts.index("via") + 1]
 
     async def _sync_rpc_url(self):
         """Пишет URL host /agent-rpc/<token> в /run/slonagent.env внутри
