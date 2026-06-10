@@ -28,6 +28,16 @@ class Git:
         out, err = await proc.communicate()
         return out.decode(errors="replace"), err.decode(errors="replace"), proc.returncode
 
+    @staticmethod
+    def _rev(ref: str) -> str:
+        """Refs/shas/branches никогда не начинаются с '-'. Реджектим такие, чтобы
+        клиентский ref не подсунулся как опция git (option-injection): аргументы
+        идут через create_subprocess_exec (без шелла), так что '-' — единственный
+        вектор. Пути защищены отдельно через '--'."""
+        if not ref or ref.startswith("-"):
+            raise ValueError(f"unsafe git revision: {ref!r}")
+        return ref
+
     async def current_branch(self) -> str:
         out, _, _ = await self.run("rev-parse", "--abbrev-ref", "HEAD")
         return out.strip()
@@ -37,7 +47,7 @@ class Git:
         return [b.strip() for b in out.splitlines() if b.strip()]
 
     async def switch_branch(self, name: str) -> tuple[str, int]:
-        out, err, code = await self.run("checkout", "--quiet", name)
+        out, err, code = await self.run("checkout", "--quiet", self._rev(name))
         return (out + err), code
 
     async def status(self) -> list[dict]:
@@ -81,7 +91,7 @@ class Git:
         return out
 
     async def diff_between(self, file: str, sha1: str, sha2: str) -> str:
-        out, _, _ = await self.run("diff", "--no-color", sha1, sha2, "--", file)
+        out, _, _ = await self.run("diff", "--no-color", self._rev(sha1), self._rev(sha2), "--", file)
         return out
 
     async def stage(self, file: str) -> tuple[str, int]:
@@ -119,18 +129,18 @@ class Git:
         return (out + err), code
 
     async def show_file(self, file: str, ref: str) -> str:
-        out, _, _ = await self.run("show", f"{ref}:{file}")
+        out, _, _ = await self.run("show", f"{self._rev(ref)}:{file}")
         return out
 
     async def rev_parse(self, ref: str) -> str:
-        out, _, _ = await self.run("rev-parse", "--short", ref)
+        out, _, _ = await self.run("rev-parse", "--short", self._rev(ref))
         return out.strip()
 
     async def last_commits(self, branch: str, count: int, skip: int = 0) -> list[dict]:
         args = ["log", f"--max-count={count}"]
         if skip:
             args.append(f"--skip={skip}")
-        args += ["--pretty=format:%h>%H>%cd>%s", "--date=iso8601", branch]
+        args += ["--pretty=format:%h>%H>%cd>%s", "--date=iso8601", self._rev(branch)]
         out, _, _ = await self.run(*args)
         commits = []
         for line in out.splitlines():
@@ -147,7 +157,7 @@ class Git:
     async def commits_between(self, sha1: str, sha2: str) -> list[dict]:
         out, _, _ = await self.run(
             "log", "--pretty=format:%h>%H>%cd>%s", "--date=iso8601",
-            "--ancestry-path", f"{sha1}^..{sha2}",
+            "--ancestry-path", f"{self._rev(sha1)}^..{self._rev(sha2)}",
         )
         commits = []
         for line in out.splitlines():
@@ -162,9 +172,10 @@ class Git:
         return commits
 
     async def history(self, commit_sha: str, depth: int = 1) -> list[dict]:
+        csha = self._rev(commit_sha)
         out, err, _ = await self.run(
             "diff", "--no-color", "--name-status", "--find-renames",
-            f"{commit_sha}~{depth}", commit_sha,
+            f"{csha}~{depth}", csha,
         )
         if err and not out:
             return []
@@ -188,7 +199,7 @@ class Git:
     async def blame(self, file: str, ref: str | None = None) -> list[dict]:
         args = ["blame", "-l", "-n", "--date=iso8601"]
         if ref:
-            args.append(ref)
+            args.append(self._rev(ref))
         args += ["--", file]
         out, _, _ = await self.run(*args)
         lines = []
