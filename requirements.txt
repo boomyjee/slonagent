@@ -23,4 +23,4 @@ pyarrow
 langchain-text-splitters
 flashrank
 watchfiles
-claude-agent-sdk
+claude-agent-sdk>=0.2.95
