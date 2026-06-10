@@ -57,9 +57,10 @@ class WebFork:
         if self.mount:
             self.register_routes()
 
-    def register_route(self, method, path, handler, auth: bool = True):
+    def register_route(self, method, path, handler, auth: bool = True, asset_route: bool = False):
         url = f"/{self.ref_agent.id}{self.prefix}{path}"
-        self._routes.append(WebTransportServer.register_route(method, url, handler, auth=auth))
+        self._routes.append(WebTransportServer.register_route(
+            method, url, handler, auth=auth, asset_route=asset_route))
 
     def register_json_route(self, method, path, handler):
         """Register a handler with contract (query, body, path_params) -> dict|list."""
@@ -101,8 +102,8 @@ class WebFork:
         self.register_route("get", "/api/commands", self._api_commands)
         self.register_route("get", "/api/history", self._api_history)
         self.register_route("get", "/api/thread_list", self._api_thread_list)
-        self.register_route("get", "/manifest.json", self._manifest)
-        self.register_route("get", "/{filename:path}", self._static)
+        self.register_route("get", "/manifest.json", self._manifest, asset_route=True)
+        self.register_route("get", "/{filename:path}", self._static, asset_route=True)
         self.register_route("websocket", "/ws", self._ws)
 
     async def _manifest(self):

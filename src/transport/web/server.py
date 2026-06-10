@@ -14,6 +14,7 @@ from datetime import date, timedelta
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import PlainTextResponse, RedirectResponse, Response
+from starlette.routing import Match
 
 log = logging.getLogger(__name__)
 
@@ -56,11 +57,14 @@ class WebTransportServer:
         return token
 
     @classmethod
-    def register_route(cls, method: str, url: str, handler, auth: bool = True):
+    def register_route(cls, method: str, url: str, handler, auth: bool = True,
+                       asset_route: bool = False):
         if method == "websocket" and auth:
             handler = cls._with_ws_auth(handler)
         getattr(cls._app, method)(url)(handler)
-        return cls._app.router.routes[-1]
+        route = cls._app.router.routes[-1]
+        route._asset_route = asset_route  # см. _is_asset_request
+        return route
 
     @classmethod
     def remove_route(cls, route):
@@ -68,11 +72,22 @@ class WebTransportServer:
         except ValueError: pass
 
     @classmethod
+    def _is_asset_request(cls, request) -> bool:
+        """Публичный credential-free статик-ассет: путь с asset-расширением И
+        обслуживающий его роут объявил asset_route=True. Так исключение остаётся
+        на статик-роутах WebFork (_static/_manifest) и не распространяется на
+        data-роуты (dashboard /~/*.json, /sandbox/*.js, /uploads/*.png)."""
+        if not request.url.path.endswith((".js", ".json", ".svg", ".png", ".ico")):
+            return False
+        for route in cls._app.router.routes:
+            if route.matches(request.scope)[0] == Match.FULL:
+                return getattr(route, "_asset_route", False)
+        return False
+
+    @classmethod
     def _with_ws_auth(cls, handler):
         async def secured(ws: WebSocket):
             # HTTP-middleware на WS-handshake не запускается — auth дублируется тут.
-            # Пароль нужен всегда, включая локальный доступ: localhost-байпаса нет,
-            # потому что через туннель Host/loopback подделываются.
             pw = cls._password_hash
             if not pw or ws.cookies.get("auth") != pw:
                 await ws.close(code=4401)
@@ -154,12 +169,12 @@ class WebTransportServer:
         async def auth_middleware(request: Request, call_next):
             if not cls._password_hash:
                 return _NO_PASSWORD
-            # Static assets that can't carry credentials are public:
-            # - .js: bookmarklets import scripts cross-origin (no cookie).
-            # - manifest.json / icons: <link rel="manifest"> fetches without
-            #   credentials by default, blocking PWA install behind auth.
-            # The actual gate for sensitive data is the WebSocket.
-            if request.url.path.endswith((".js", ".json", ".svg", ".png", ".ico")):
+            # Credential-free static assets (bundle .js, manifest, icons) are
+            # public — browsers fetch them without a cookie, else PWA install /
+            # bookmarklet break. Scoped to routes that opt in (asset_route=True);
+            # data routes stay gated. The bare entry path has no asset extension,
+            # so it still 401s and triggers the Basic-auth prompt.
+            if cls._is_asset_request(request):
                 return await call_next(request)
             # Cookie from a previous successful auth.
             if request.cookies.get("auth") == cls._password_hash:
