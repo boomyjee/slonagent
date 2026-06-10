@@ -9,7 +9,7 @@ WebTransport-инстансы регистрируют свои URL через `
 по url, чтоб одни и те же fork-уровневые роуты делил несколько инстансов
 одного форка)."""
 
-import asyncio, base64, contextlib, hashlib, hmac, logging, os, re, secrets, sys
+import asyncio, base64, contextlib, hashlib, hmac, inspect, logging, os, re, secrets, sys
 from datetime import date, timedelta
 
 from fastapi import FastAPI, Request, WebSocket
@@ -86,13 +86,17 @@ class WebTransportServer:
 
     @classmethod
     def _with_ws_auth(cls, handler):
-        async def secured(ws: WebSocket):
+        async def secured(*args, **kwargs):
             # HTTP-middleware на WS-handshake не запускается — auth дублируется тут.
+            ws = next(v for v in (*args, *kwargs.values()) if isinstance(v, WebSocket))
             pw = cls._password_hash
             if not pw or ws.cookies.get("auth") != pw:
                 await ws.close(code=4401)
                 return
-            await handler(ws)
+            await handler(*args, **kwargs)
+        # Сохраняем сигнатуру хендлера, чтобы FastAPI прокинул path-параметры
+        # (port/filepath у sandbox-прокси), а не только ws.
+        secured.__signature__ = inspect.signature(handler)
         return secured
 
     @classmethod

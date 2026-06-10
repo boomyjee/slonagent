@@ -11,7 +11,7 @@ The worker is started lazily on the first /sandbox/{port}/... request through
 `SandboxSkill.exec` with nohup+&, so the cold-start latency (pip install +
 websocket handshake) is paid only once.
 """
-import asyncio, base64, itertools, json, logging, shlex, subprocess
+import asyncio, base64, itertools, json, logging, secrets, shlex, subprocess
 
 from fastapi import Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -31,8 +31,14 @@ class SandboxProxy:
         self._pending_http: dict[int, asyncio.Future] = {}
         self._ws_sessions: dict[int, asyncio.Queue] = {}
         self._start_lock = asyncio.Lock()
+        # Секрет control-канала: воркер коннектится из контейнера без cookie,
+        # поэтому /sandbox-tunnel гейтится этим токеном в URL, а не auth.
+        self._token = secrets.token_urlsafe(32)
 
-    async def handle_tunnel(self, ws: WebSocket):
+    async def handle_tunnel(self, ws: WebSocket, token: str):
+        if not secrets.compare_digest(token, self._token):
+            await ws.close(code=4401)
+            return
         await ws.accept()
         if self.tunnel is not None:
             try: await self.tunnel.close()
@@ -240,7 +246,7 @@ class SandboxProxy:
     async def _worker_url(self) -> str:
         from src.skills.sandbox import SandboxSkill
         return await self.fork.get_url(
-            "/sandbox-tunnel",
+            f"/sandbox-tunnel/{self._token}",
             host=await SandboxSkill.host_url(),
             scheme="ws",
         )

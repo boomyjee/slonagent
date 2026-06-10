@@ -157,11 +157,15 @@ class DashboardFork(WebFork):
         # Reverse-tunnel proxy for ports bound inside the sandbox container.
         # Tunnel endpoint must be registered before the generic /sandbox/{port}
         # proxy so its static path wins over path-capture routing.
-        # auth=False: воркер коннектится из контейнера (host=podman-bridge,
-        # не localhost), cookie приложить не может; защищён сетевой
-        # изоляцией — порт хоста для контейнера наружу не пробрасывается.
-        self.register_route("websocket", "/sandbox-tunnel", self._proxy.handle_tunnel, auth=False)
-        self.register_route("websocket", "/sandbox/{port:int}/{filepath:path}", self._proxy.handle_ws, auth=False)
+        # /sandbox-tunnel — control-канал воркера в контейнере. Cookie он
+        # приложить не может, поэтому гейтится секретным токеном в URL (минтится
+        # в SandboxProxy, отдаётся воркеру в _worker_url). auth=False тут значит
+        # «не cookie-auth», а не «без auth»: токен проверяется в handle_tunnel.
+        # Без него любой клиент через туннель стал бы воркером и собирал куки жертвы.
+        self.register_route("websocket", "/sandbox-tunnel/{token}", self._proxy.handle_tunnel, auth=False)
+        # Браузерная сторона — обычный cookie-auth (у браузера cookie есть); иначе
+        # внешний клиент через туннель делал бы SSRF к любому порту контейнера.
+        self.register_route("websocket", "/sandbox/{port:int}/{filepath:path}", self._proxy.handle_ws)
         for m in ("get", "post", "put", "patch", "delete", "options", "head"):
             self.register_route(m, "/sandbox/{port:int}/{filepath:path}", self._proxy.handle_http)
         super().register_routes()

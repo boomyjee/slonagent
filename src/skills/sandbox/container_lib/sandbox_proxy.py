@@ -1,8 +1,9 @@
 """Reverse-tunnel worker: runs inside the sandbox container, proxies HTTP/WS
 traffic from the host's dashboard to ports bound on 127.0.0.1 in the container.
 
-Started lazily by the host via:
-    nohup python3 -u /slonagent/sandbox_proxy.py --url ws://host.containers.internal:PORT/AID/dashboard/sandbox-tunnel &
+Started lazily by the host via (TOKEN — per-proxy secret gating the control
+channel; the host mints it and hands it over in --url, see SandboxProxy):
+    nohup python3 -u /slonagent/sandbox_proxy.py --url ws://host.containers.internal:PORT/AID/dashboard/sandbox-tunnel/TOKEN &
 
 Protocol — JSON text frames over one control WebSocket, multiplexed by `id`.
 host -> worker:
