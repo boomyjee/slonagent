@@ -462,6 +462,14 @@ class ClaudeBackend(BaseBackend):
             }
             options_kwargs.update(self._sdk_options)
 
+            # Гасим non-essential traffic клода (генерация заголовка треда — лишний
+            # haiku-вызов на каждый ход, плюс телеметрия/автоапдейт): headless-агенту
+            # это не нужно. Мёржим после user-overrides, юзер может переопределить.
+            options_kwargs["env"] = {
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                **options_kwargs.get("env", {}),
+            }
+
             # Слон управляет компрессией через LogCompressor — клодовский autocompact
             # писал бы свой dumb-summary поверх нашего OM. Блокируем после user overrides
             # и рядом с возможными user-хуками.
