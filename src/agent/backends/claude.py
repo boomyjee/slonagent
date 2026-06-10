@@ -22,6 +22,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SdkMcpTool,
     StreamEvent,
+    SystemMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -609,11 +610,29 @@ class ClaudeBackend(BaseBackend):
                                     "_uuid": message.uuid,
                                 })
 
+                elif isinstance(message, SystemMessage):
+                    # Fable рефузит кибербез/био-контент, Claude Code молча
+                    # ретраит на fallback-модели (обычно opus). Без уведомления
+                    # юзер не понимает, почему отвечает другая (дорогая) модель.
+                    if message.subtype == "model_refusal_fallback":
+                        orig = message.data.get("originalModel", agent.model_name)
+                        fb = message.data.get("fallbackModel", "?")
+                        log.warning("[claude_agent] %s refused (safety), fell back to %s", orig, fb)
+                        await agent.transport.send_message(
+                            f"⚠️ {orig} отказался отвечать (safety-фильтр) — Claude Code переключился на {fb}"
+                        )
+
                 elif isinstance(message, ResultMessage):
                     cost = f"${message.total_cost_usd:.4f}" if message.total_cost_usd else "n/a"
+                    usage = message.model_usage or {}
+                    # Ответившая модель — с наибольшим output (haiku-side-call мелкий).
+                    # Видно сразу, ушёл ли ход на fable или на opus-fallback.
+                    primary = max(usage, key=lambda m: usage[m].get("outputTokens", 0), default="?")
                     log.info("[claude_agent] done: %d turns, %s", message.num_turns, cost)
                     log.info("[claude_agent] model_usage: %s", message.model_usage)
-                    await agent.transport.send_message(f"✅ Готово ({message.num_turns} turns, {cost})")
+                    await agent.transport.send_message(
+                        f"✅ Готово ({message.num_turns} turns, {primary.removeprefix('claude-')}, {cost})"
+                    )
                     return turns
         except asyncio.CancelledError:
             asyncio.current_task().uncancel()
