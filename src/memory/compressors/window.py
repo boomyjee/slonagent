@@ -31,4 +31,7 @@ class WindowCompressor(BaseProvider):
                 break
             result.append(turn)
         result.reverse()
+        # Окно не должно начинаться с tool-турна без парного assistant(tool_calls):
+        # обрезка по бюджету могла отрезать вызов, а сиротский tool-ответ → API-400.
+        while result and result[0].get("role") == "tool": result.pop(0)
         return result
