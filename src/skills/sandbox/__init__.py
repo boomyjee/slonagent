@@ -119,17 +119,27 @@ class SandboxSkill(Skill):
             result.append((p, f"/mnt/rw/{container_subpath(p)}", False))
         return result
 
+    @staticmethod
+    def _safe_join(base: str, rel: str) -> str | None:
+        """os.path.join(base, rel) с проверкой, что результат остаётся внутри base
+        (защита от `..` и симлинков). Containment-логика как в resolve_host_path."""
+        root = os.path.realpath(base)
+        full = os.path.realpath(os.path.join(root, rel))
+        if full == root or full.startswith(root + os.sep):
+            return full
+        return None
+
     def resolve_path(self, container_path: str, for_write: bool = False) -> str | None:
         if container_path == "/workspace":
             return self.workspace_dir
         if container_path.startswith("/workspace/"):
-            return os.path.join(self.workspace_dir, container_path[len("/workspace/"):])
+            return self._safe_join(self.workspace_dir, container_path[len("/workspace/"):])
         if container_path == "/slonagent" or container_path.startswith("/slonagent/"):
             if for_write:
                 return None
             if container_path == "/slonagent":
                 return self._lib_dir()
-            return os.path.join(self._lib_dir(), container_path[len("/slonagent/"):])
+            return self._safe_join(self._lib_dir(), container_path[len("/slonagent/"):])
         for host, container, ro in self._mounts():
             prefix = container.rstrip("/") + "/"
             if container_path == container or container_path.startswith(prefix):
@@ -137,7 +147,7 @@ class SandboxSkill(Skill):
                     return None
                 if container_path == container:
                     return host
-                return os.path.join(host, container_path[len(prefix):].replace("/", os.sep))
+                return self._safe_join(host, container_path[len(prefix):].replace("/", os.sep))
         return None
 
     def resolve_host_path(self, host_path: str) -> str | None:

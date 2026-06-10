@@ -173,7 +173,10 @@ class MovieFork(WebFork):
         m = re.match(r"^(\d+)x(\d+)/(.+)$", path)
         if m:
             width, height, rel = int(m.group(1)), int(m.group(2)), m.group(3)
-            original = self.assets_dir / rel
+            safe = self.safe_path(self.assets_dir, rel)
+            if safe is None:
+                return JSONResponse({"error": "Not found"}, 404)
+            original = Path(safe)
             if not original.exists():
                 return JSONResponse({"error": "Not found"}, 404)
             if original.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
@@ -182,7 +185,10 @@ class MovieFork(WebFork):
             if not thumb.exists() or thumb.stat().st_mtime < original.stat().st_mtime:
                 self._make_thumbnail(original, thumb, width, height)
             return FileResponse(thumb, headers=img_cache)
-        full = self.assets_dir / path
+        safe = self.safe_path(self.assets_dir, path)
+        if safe is None:
+            return JSONResponse({"error": "Not found"}, 404)
+        full = Path(safe)
         if not full.exists():
             return JSONResponse({"error": "Not found"}, 404)
         return FileResponse(full, headers=img_cache)

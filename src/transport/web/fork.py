@@ -122,12 +122,20 @@ class WebFork:
             ],
         })
 
+    @staticmethod
+    def safe_path(base, *parts) -> str | None:
+        """os.path.join(base, *parts), но возвращает realpath только если он
+        остался внутри base. Защита от `..` и симлинк-эскейпа; None если вышел.
+        Сравниваем с разделителем, иначе /foo/uploads_evil пройдёт за /foo/uploads."""
+        root = os.path.realpath(base)
+        full = os.path.realpath(os.path.join(root, *parts))
+        if full == root or full.startswith(root + os.sep):
+            return full
+        return None
+
     async def _serve_upload(self, filename: str):
-        path = os.path.join(self.uploads_dir, filename)
-        # Path traversal guard
-        if not os.path.realpath(path).startswith(os.path.realpath(self.uploads_dir)):
-            return PlainTextResponse("Not found", status_code=404)
-        if not os.path.isfile(path):
+        path = self.safe_path(self.uploads_dir, filename)
+        if path is None or not os.path.isfile(path):
             return PlainTextResponse("Not found", status_code=404)
         mime, _ = mimetypes.guess_type(path)
         return FileResponse(path, media_type=mime or "application/octet-stream")

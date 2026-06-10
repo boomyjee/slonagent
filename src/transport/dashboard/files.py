@@ -6,8 +6,8 @@ workspace_dir (if a SandboxSkill is mounted) is used as the default.
 The client owns root selection (in localStorage) and sends it on each call.
 
 API paths are root-relative and start with `/`: `/foo` resolves to
-`<root>/foo`. There are no `..` checks — the dashboard is auth-gated
-and meant for the user themselves.
+`<root>/foo`. `..` escaping the declared root is rejected (defense in
+depth); the dashboard is also auth-gated and meant for the user themselves.
 """
 from __future__ import annotations
 import os
@@ -50,7 +50,13 @@ class FilesAPI:
         if actual is None or not path.startswith("/"):
             return None
         rel = path.lstrip("/")
-        return os.path.join(actual, rel) if rel else actual
+        if not rel:
+            return actual
+        base = os.path.realpath(actual)
+        full = os.path.realpath(os.path.join(base, rel))
+        if full == base or full.startswith(base + os.sep):
+            return full
+        return None
 
     # ─── file ops ──────────────────────────────────────────────────
 
