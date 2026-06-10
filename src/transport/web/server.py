@@ -89,8 +89,7 @@ class WebTransportServer:
         async def secured(*args, **kwargs):
             # HTTP-middleware на WS-handshake не запускается — auth дублируется тут.
             ws = next(v for v in (*args, *kwargs.values()) if isinstance(v, WebSocket))
-            pw = cls._password_hash
-            if not pw or ws.cookies.get("auth") != pw:
+            if not cls._ct_eq(ws.cookies.get("auth"), cls._password_hash):
                 await ws.close(code=4401)
                 return
             await handler(*args, **kwargs)
@@ -98,6 +97,11 @@ class WebTransportServer:
         # (port/filepath у sandbox-прокси), а не только ws.
         secured.__signature__ = inspect.signature(handler)
         return secured
+
+    @staticmethod
+    def _ct_eq(a: str | None, b: str | None) -> bool:
+        """Constant-time сравнение секретов (None/empty-safe)."""
+        return bool(a) and bool(b) and secrets.compare_digest(a, b)
 
     @classmethod
     def _make_auth_token(cls, day: date = None) -> str:
@@ -107,7 +111,8 @@ class WebTransportServer:
     @classmethod
     def _check_auth_token(cls, token: str) -> bool:
         today = date.today()
-        return token in (cls._make_auth_token(today), cls._make_auth_token(today - timedelta(days=1)))
+        return cls._ct_eq(token, cls._make_auth_token(today)) or \
+               cls._ct_eq(token, cls._make_auth_token(today - timedelta(days=1)))
 
     @classmethod
     async def get_url(cls, path: str = "", force_localhost: bool = False,
@@ -181,7 +186,7 @@ class WebTransportServer:
             if cls._is_asset_request(request):
                 return await call_next(request)
             # Cookie from a previous successful auth.
-            if request.cookies.get("auth") == cls._password_hash:
+            if cls._ct_eq(request.cookies.get("auth"), cls._password_hash):
                 return await call_next(request)
             # Daily token in query string (for Telegram WebApp etc).
             token = request.query_params.get("token", "")
@@ -198,7 +203,7 @@ class WebTransportServer:
                 try:
                     decoded = base64.b64decode(auth[6:]).decode()
                     password = decoded.split(":", 1)[1]
-                    if hashlib.sha256(password.encode()).hexdigest() == cls._password_hash:
+                    if cls._ct_eq(hashlib.sha256(password.encode()).hexdigest(), cls._password_hash):
                         response = await call_next(request)
                         response.set_cookie(
                             "auth", cls._password_hash,
