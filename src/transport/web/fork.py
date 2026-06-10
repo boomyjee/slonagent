@@ -18,6 +18,9 @@ _TEXT_EXT_RE = re.compile(
     re.I,
 )
 _WEB_FILE_RE = re.compile(r"^WEB(?:_(.+))?\.json$")
+# Валидный thread_id: то что генерит клиент (crypto.randomUUID → hex8, фоллбэк —
+# цифры с точкой). Без '/'/'\\' — защита _history_path от traversal.
+_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{0,64}$")
 _HISTORY_TAIL = 100
 
 class WebFork:
@@ -294,7 +297,14 @@ class WebFork:
 
     # ─── Persisted transport history (WEB_<thread_id>.json) ─────────────────
 
-    def _history_path(self, thread_id: str) -> str:
+    def _history_path(self, thread_id: str) -> str | None:
+        """None если thread_id не проходит валидацию. thread_id приходит из
+        клиентских WS-сообщений и встраивается в имя файла, поэтому реджектим
+        всё кроме безопасного charset (без '/'/'\\' — единственный вектор
+        traversal во flat-имени), иначе `../../x` ушёл бы писать/удалять вне
+        memory_dir."""
+        if not _THREAD_ID_RE.match(thread_id):
+            return None
         fname = f"WEB_{thread_id}.json" if thread_id else "WEB.json"
         return os.path.join(self.ref_agent.memory.memory_dir, fname)
 
@@ -302,10 +312,12 @@ class WebFork:
         self.transports.pop(uuid, None)
         await self.send({"type": "transport", "method": "thread_delete", "uuid": uuid}, replay=True)
         path = self._history_path(uuid)
-        if os.path.exists(path): os.remove(path)
+        if path and os.path.exists(path): os.remove(path)
 
     def _append_history(self, event: dict):
         path = self._history_path(event.get("thread_id", ""))
+        if path is None:
+            return
         try:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -315,7 +327,7 @@ class WebFork:
     def _load_history_tail(self, thread_id: str) -> list[dict]:
         """Последние _HISTORY_TAIL событий из WEB_<thread_id>.json."""
         path = self._history_path(thread_id)
-        if not os.path.exists(path):
+        if path is None or not os.path.exists(path):
             return []
         try:
             with open(path, "rb") as f:

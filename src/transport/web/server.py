@@ -11,6 +11,7 @@ WebTransport-инстансы регистрируют свои URL через `
 
 import asyncio, base64, contextlib, hashlib, hmac, inspect, logging, os, re, secrets, sys
 from datetime import date, timedelta
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import PlainTextResponse, RedirectResponse, Response
@@ -89,6 +90,9 @@ class WebTransportServer:
         async def secured(*args, **kwargs):
             # HTTP-middleware на WS-handshake не запускается — auth дублируется тут.
             ws = next(v for v in (*args, *kwargs.values()) if isinstance(v, WebSocket))
+            if not cls._same_origin(ws.headers):
+                await ws.close(code=4403)
+                return
             if not cls._ct_eq(ws.cookies.get("auth"), cls._password_hash):
                 await ws.close(code=4401)
                 return
@@ -102,6 +106,19 @@ class WebTransportServer:
     def _ct_eq(a: str | None, b: str | None) -> bool:
         """Constant-time сравнение секретов (None/empty-safe)."""
         return bool(a) and bool(b) and secrets.compare_digest(a, b)
+
+    @staticmethod
+    def _same_origin(headers) -> bool:
+        """CSRF/WS-hijack guard. Кука auth — samesite=none, т.е. браузер шлёт её
+        кросс-сайтово; поэтому отдельно сверяем, что Origin совпадает с Host, на
+        котором обслужен запрос (same-origin — работает и за sish-туннелем, и на
+        localhost, без хардкода домена). Origin нет → non-browser клиент, CSRF к
+        нему неприменим (чужой куки у него нет), пропускаем. Браузер всегда шлёт
+        Origin на WS-handshake и на кросс-сайтовый POST, так что атака отсекается."""
+        origin = headers.get("origin")
+        if not origin:
+            return True
+        return urlparse(origin).netloc == headers.get("host")
 
     @classmethod
     def _make_auth_token(cls, day: date = None) -> str:
@@ -178,6 +195,11 @@ class WebTransportServer:
         async def auth_middleware(request: Request, call_next):
             if not cls._password_hash:
                 return _NO_PASSWORD
+            # CSRF: state-changing запрос с чужого Origin отвергаем до auth, чтобы
+            # авто-сабмит формы со стороннего сайта (/web-hook, dashboard POST) не
+            # прошёл на куке. Безопасные методы и same-origin — мимо.
+            if request.method not in ("GET", "HEAD", "OPTIONS") and not cls._same_origin(request.headers):
+                return PlainTextResponse("cross-origin request rejected", status_code=403)
             # Credential-free static assets (bundle .js, manifest, icons) are
             # public — browsers fetch them without a cookie, else PWA install /
             # bookmarklet break. Scoped to routes that opt in (asset_route=True);

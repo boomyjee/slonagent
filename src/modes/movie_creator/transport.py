@@ -205,7 +205,10 @@ class MovieFork(WebFork):
         if owner is None or isinstance(owner, dict) or not hasattr(owner, "generations"):
             return JSONResponse({"error": "invalid path"}, 400)
         data = await file.read()
-        ext = file.filename.rsplit(".", 1)[-1] if "." in (file.filename or "") else "png"
+        # \w (юникодный — кириллица сохранится) и точки: вырезаем '/'/'\\' из
+        # расширения, иначе они увели бы write_bytes за assets_dir.
+        raw_ext = file.filename.rsplit(".", 1)[-1] if "." in (file.filename or "") else ""
+        ext = re.sub(r"[^\w.]", "", raw_ext) or "png"
         gen = Generation(
             id=self.project.allocate_id(),
             kind=kind,
