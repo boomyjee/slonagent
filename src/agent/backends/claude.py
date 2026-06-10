@@ -612,6 +612,7 @@ class ClaudeBackend(BaseBackend):
                 elif isinstance(message, ResultMessage):
                     cost = f"${message.total_cost_usd:.4f}" if message.total_cost_usd else "n/a"
                     log.info("[claude_agent] done: %d turns, %s", message.num_turns, cost)
+                    log.info("[claude_agent] model_usage: %s", message.model_usage)
                     await agent.transport.send_message(f"✅ Готово ({message.num_turns} turns, {cost})")
                     return turns
         except asyncio.CancelledError:
