@@ -71,12 +71,12 @@ class WebTransportServer:
     def _with_ws_auth(cls, handler):
         async def secured(ws: WebSocket):
             # HTTP-middleware на WS-handshake не запускается — auth дублируется тут.
-            host = ws.headers.get("host", "").split(":")[0]
-            if host not in ("localhost", "127.0.0.1"):
-                pw = cls._password_hash
-                if not pw or ws.cookies.get("auth") != pw:
-                    await ws.close(code=4401)
-                    return
+            # Пароль нужен всегда, включая локальный доступ: localhost-байпаса нет,
+            # потому что через туннель Host/loopback подделываются.
+            pw = cls._password_hash
+            if not pw or ws.cookies.get("auth") != pw:
+                await ws.close(code=4401)
+                return
             await handler(ws)
         return secured
 
@@ -152,9 +152,6 @@ class WebTransportServer:
 
         @cls._app.middleware("http")
         async def auth_middleware(request: Request, call_next):
-            # Local access never needs auth (direct browser on the host).
-            if request.url.hostname in ("localhost", "127.0.0.1"):
-                return await call_next(request)
             if not cls._password_hash:
                 return _NO_PASSWORD
             # Static assets that can't carry credentials are public:
