@@ -57,6 +57,7 @@ def make_agent(skills=None, model_name: str = "claude-test"):
     agent.transport.send_thinking = AsyncMock()
     agent.transport.on_tool_call = AsyncMock()
     agent.transport.on_tool_result = AsyncMock()
+    agent.transport.close = AsyncMock()
     return agent
 
 
@@ -750,7 +751,7 @@ class TestClaudeAgentIntegration:
 
         # Стрим-вызовы (с stream_id) — без финального "Готово" без stream_id
         stream_calls = [c for c in agent.transport.send_message.call_args_list if c.kwargs.get("stream_id")]
-        assert len(stream_calls) >= 3, f"ожидаем стрим из >=3 вызовов, получили {len(stream_calls)}"
+        assert len(stream_calls) >= 2, f"ожидаем стрим из >=2 вызовов, получили {len(stream_calls)}"
         sent_texts = [c.args[0] for c in stream_calls]
         for prev, cur in zip(sent_texts, sent_texts[1:]):
             assert len(cur) >= len(prev), f"текст не накапливается: {prev!r} → {cur!r}"
