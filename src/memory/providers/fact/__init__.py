@@ -136,9 +136,16 @@ class FactProvider(BaseProvider):
                 self.agent.transport.send_memory_info(annotated)
             )
 
+        async def on_fail(err: Exception):
+            self.agent.call_before_next_message(
+                self.agent.transport.send_memory_info(
+                    f"Не смог сохранить факты в долгосрочную память [треды: {threads}]: {err}"
+                )
+            )
+
         retain(items, self._make_sub_agent, self.storage,
                with_observations=self._auto_consolidate,
-               done_cb=on_done)
+               done_cb=on_done, fail_cb=on_fail)
 
     def _build_retain_items(self, pending: list) -> list[RetainItem]:
         """Конвертирует pending одного треда в RetainItem'ы (один conversation-item + по одному на документ)."""

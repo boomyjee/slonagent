@@ -1301,11 +1301,13 @@ async def _retain_impl(
 # ── Background scheduling ───────────────────────────────────────────────────────
 _retain_lock = asyncio.Lock()
 def retain(items: list[RetainItem], make_agent: Callable, storage,
-           with_observations: bool = True, done_cb=None) -> None:
+           with_observations: bool = True, done_cb=None, fail_cb=None) -> None:
     async def _run() -> None:
         async with _retain_lock:
             try:
                 await _retain_impl(items, make_agent, storage, with_observations, done_cb)
             except Exception as e:
                 log.warning("[retain] background task failed: %s", e, exc_info=True)
+                if fail_cb:
+                    await fail_cb(e)
     asyncio.get_event_loop().create_task(_run())

@@ -747,6 +747,17 @@ class LogCompressor(BaseProvider):
         return kept
 
     async def _consolidate(self, turns: list, cutoff: str = "") -> None:
+        # Консолидация синхронна (компрессор держит луп); фейл не должен ни ронять
+        # ход, ни молчать — чистим буфер прогресса и честно сообщаем юзеру (иначе
+        # LLM-фейл маскируется под «Observer вернул пусто», а прочий — под тишину).
+        try:
+            await self._observe(turns, cutoff)
+        except Exception as e:
+            log.warning("[LogCompressor] consolidate failed: %s", e, exc_info=True)
+            self._memo_lines = []
+            await self.send_memory_info(f"Не смог обновить память: {e}", final=True)
+
+    async def _observe(self, turns: list, cutoff: str = "") -> None:
         if cutoff:
             for t in self.agent.memory._turns:
                 ts = t.get("_timestamp", "")
