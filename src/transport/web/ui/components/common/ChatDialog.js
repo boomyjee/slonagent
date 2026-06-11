@@ -39,6 +39,10 @@ function mdToHtml(text) {
     text = text.replace(/(?<!href="|">)(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
     // /commands at the start of a message
     text = text.replace(/^(\/\w+)/gm, '<span class="slash-cmd">$1</span>');
+    // \n → <br> (до восстановления code-блоков, чтобы не трогать их содержимое):
+    // text/html флейвор буфера при копировании не несёт наш pre-wrap, и rich-вставка
+    // (Telegram и т.п.) схлопывала переносы в пробелы.
+    text = text.replace(/\n/g, '<br>');
     const esc = c => c.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     inlines.forEach((c, i) => { text = text.replace(`\x00IC${i}\x00`, `<code>${esc(c)}</code>`); });
     blocks.forEach((c, i) => { text = text.replace(`\x00CB${i}\x00`, `<pre><code>${esc(c)}</code></pre>`); });
