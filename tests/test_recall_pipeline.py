@@ -37,12 +37,18 @@ fact_cfg = next(
     p for p in cfg["agent"]["memory_providers"].values()
     if "FactProvider" in p["__class__"]
 )
+def _resolve_ref(v):
+    """$path.in.config → значение из cfg (как Agent._resolve_refs)."""
+    if isinstance(v, str) and v.startswith("$"):
+        o = cfg
+        for part in v[1:].split("."):
+            o = o[part]
+        return o
+    return v
+
 embedding_model_cfg = fact_cfg.get("embedding_model", {})
-if isinstance(embedding_model_cfg, dict) and embedding_model_cfg.get("api_key", "").startswith("$"):
-    embedding_model_cfg = dict(embedding_model_cfg)
-    embedding_model_cfg["api_key"] = os.environ.get(
-        embedding_model_cfg["api_key"][1:], embedding_model_cfg["api_key"]
-    )
+if isinstance(embedding_model_cfg, dict):
+    embedding_model_cfg = {k: _resolve_ref(v) for k, v in embedding_model_cfg.items()}
 
 MEMORY_DIR   = os.path.join(ROOT, "memory")
 SQLITE_PATH  = os.path.join(MEMORY_DIR, "fact", "facts.db")
