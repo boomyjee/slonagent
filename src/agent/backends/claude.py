@@ -210,12 +210,19 @@ class ClaudeBackend(BaseBackend):
         # Все uuid-bearing entries из jsonl, любого type (user/assistant/system/...).
         # /context-команда и подобное приходит как type="system" с uuid — раньше мы
         # их фильтровали и получали false-positive desync.
-        claude_seq: list[tuple[int, str]] = []  # (line_idx, uuid)
+        # Сортируем по timestamp: claude флашит near-simultaneous tool-записи
+        # (параллельные вызовы) в jsonl не в хронологическом порядке, а наша память
+        # — в хронологическом. Без сортировки кластер tool_use/tool_result даёт
+        # ложный desync на переставленных позициях. line_idx — вторичный ключ для
+        # стабильности и сохраняется для line-based pruning ниже.
+        _claude_raw: list[tuple[str, int, str]] = []  # (timestamp, line_idx, uuid)
         for i, line in enumerate(lines):
             try: entry = json.loads(line)
             except json.JSONDecodeError: continue
             uid = entry.get("uuid")
-            if uid: claude_seq.append((i, uid))
+            if uid: _claude_raw.append((entry.get("timestamp", ""), i, uid))
+        _claude_raw.sort(key=lambda x: (x[0], x[1]))
+        claude_seq: list[tuple[int, str]] = [(i, uid) for _, i, uid in _claude_raw]
 
         claude_uuids_set = {u for _, u in claude_seq}
         our_uuids_set = set(our_uuids_all)
@@ -258,7 +265,9 @@ class ClaudeBackend(BaseBackend):
 
         # Норма: our_synced == claude_synced. Режем старые extras Claude-jsonl
         # ПЕРЕД первым общим UUID — это турны, которые мы давно выкинули из памяти.
-        first_match_line = claude_synced_seq[0][0]
+        # min по line_idx, а не [0] — claude_synced_seq теперь в timestamp-порядке,
+        # а pruning режет по позиции строки в файле (нужна самая ранняя строка).
+        first_match_line = min(idx for idx, _ in claude_synced_seq)
         # Считаем uuid-bearing entries до first_match_line, чьи UUID-ы НЕ в нашей
         # памяти (значит реально устаревшие, а не текущие user-сообщения посередине).
         pre_count = sum(
