@@ -771,6 +771,12 @@ class SandboxSkill(Skill):
             return {"error": str(e)}
 
     _VCS_EXCLUDE = {".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
+    # Скан тяжёлых служебных директорий стоит минут блокировки и почти никогда не нужен.
+    # Явный path внутрь такой директории работает — фильтр касается только вложенных уровней.
+    _SCAN_EXCLUDE = _VCS_EXCLUDE | {
+        ".venv", "venv", "node_modules", "__pycache__",
+        ".mypy_cache", ".ruff_cache", ".pytest_cache", ".tox",
+    }
 
     # Минимальный mapping rg --type → glob-патернов. Не полный, но покрывает
     # самые частые языки. Для редких типов лучше явный glob.
@@ -798,8 +804,8 @@ class SandboxSkill(Skill):
           "Дефолтный output_mode='files_with_matches' возвращает только пути (отсортировано по mtime). "
           "'content' возвращает строки с номерами + контекстом (-A/-B/-C или context). "
           "'count' возвращает счётчик матчей по файлам. "
-          "Авто-исключаются VCS-директории (.git, .svn, .hg, .bzr, .jj, .sl).")
-    def grep(
+          "Авто-исключаются VCS и тяжёлые служебные директории (.git, .venv, node_modules и т.п.).")
+    async def grep(
         self,
         pattern: Annotated[str, "Регулярное выражение для поиска."],
         path: Annotated[str, "Путь к файлу или директории."],
@@ -840,118 +846,121 @@ class SandboxSkill(Skill):
                 return False
             return True
 
-        files = []
-        if os.path.isfile(host_path):
-            files = [host_path]
-        else:
-            for root, dirs, fnames in os.walk(host_path):
-                # Исключаем VCS-директории.
-                dirs[:] = [d for d in dirs if d not in self._VCS_EXCLUDE]
-                for fn in fnames:
-                    if not _matches_filter(fn):
-                        continue
-                    files.append(os.path.join(root, fn))
-
-        def rel(fp):
-            r = os.path.relpath(fp, host_path) if os.path.isdir(host_path) else os.path.basename(fp)
-            return r.replace(os.sep, "/")
-
-        def _apply_pagination(items: list) -> tuple[list, int | None]:
-            """[items, applied_limit_if_truncated]. head_limit=0 → без лимита."""
-            sliced = items[offset:]
-            if head_limit == 0:
-                return sliced, None
-            limit = head_limit
-            truncated = len(sliced) > limit
-            return sliced[:limit], (limit if truncated else None)
-
-        if output_mode == "files_with_matches":
-            matched = []
-            for fpath in files:
-                try:
-                    with open(fpath, encoding="utf-8", errors="replace") as f:
-                        if regex.search(f.read()):
-                            matched.append(fpath)
-                except (UnicodeDecodeError, PermissionError):
-                    continue
-            # Сортировка по mtime (oldest first) — как rg --sort=modified.
-            try:
-                matched.sort(key=lambda p: os.path.getmtime(p))
-            except OSError:
-                pass
-            paged, applied = _apply_pagination(matched)
-            result = {"mode": "files_with_matches",
-                      "filenames": [rel(p) for p in paged],
-                      "numFiles": len(paged)}
-            if applied is not None: result["appliedLimit"] = applied
-            if offset: result["appliedOffset"] = offset
-            return result
-
-        if output_mode == "count":
-            entries = []
-            for fpath in files:
-                try:
-                    with open(fpath, encoding="utf-8", errors="replace") as f:
-                        n = len(regex.findall(f.read()))
-                    if n: entries.append((rel(fpath), n))
-                except (UnicodeDecodeError, PermissionError):
-                    continue
-            paged, applied = _apply_pagination(entries)
-            content_lines = [f"{p}:{n}" for p, n in paged]
-            result = {"mode": "count",
-                      "content": "\n".join(content_lines),
-                      "filenames": [],
-                      "numFiles": len(paged),
-                      "numMatches": sum(n for _, n in paged)}
-            if applied is not None: result["appliedLimit"] = applied
-            if offset: result["appliedOffset"] = offset
-            return result
-
-        # output_mode == "content"
-        # Контекст: -C / context имеет приоритет над -B/-A.
-        ctx_before = context if context else before
-        ctx_after = context if context else after
-        all_lines = []
-        for fpath in files:
-            try:
-                with open(fpath, encoding="utf-8", errors="replace") as f:
-                    text = f.read()
-            except (UnicodeDecodeError, PermissionError):
-                continue
-            file_lines = text.splitlines()
-            r = rel(fpath)
-            def _fmt(line_idx: int) -> str:  # 0-based -> с/без номера
-                num = line_idx + 1
-                body = file_lines[line_idx] if line_idx < len(file_lines) else ""
-                return f"{r}:{num}:{body}" if line_numbers else f"{r}:{body}"
-            if multiline:
-                for m in regex.finditer(text):
-                    start_line = text[:m.start()].count("\n")
-                    end_line = start_line + m.group(0).count("\n")
-                    for i in range(start_line, end_line + 1):
-                        if i < len(file_lines):
-                            all_lines.append(_fmt(i))
+        def _scan():
+            files = []
+            if os.path.isfile(host_path):
+                files = [host_path]
             else:
-                for i, line in enumerate(file_lines):
-                    if regex.search(line):
-                        lo = max(0, i - ctx_before)
-                        hi = min(len(file_lines) - 1, i + ctx_after)
-                        for j in range(lo, hi + 1):
-                            all_lines.append(_fmt(j))
-        paged, applied = _apply_pagination(all_lines)
-        result = {"mode": "content",
-                  "content": "\n".join(paged),
-                  "numFiles": 0,
-                  "filenames": [],
-                  "numLines": len(paged)}
-        if applied is not None: result["appliedLimit"] = applied
-        if offset: result["appliedOffset"] = offset
-        return result
+                for root, dirs, fnames in os.walk(host_path):
+                    dirs[:] = [d for d in dirs if d not in self._SCAN_EXCLUDE]
+                    for fn in fnames:
+                        if not _matches_filter(fn):
+                            continue
+                        files.append(os.path.join(root, fn))
+
+            def rel(fp):
+                r = os.path.relpath(fp, host_path) if os.path.isdir(host_path) else os.path.basename(fp)
+                return r.replace(os.sep, "/")
+
+            def _apply_pagination(items: list) -> tuple[list, int | None]:
+                """[items, applied_limit_if_truncated]. head_limit=0 → без лимита."""
+                sliced = items[offset:]
+                if head_limit == 0:
+                    return sliced, None
+                limit = head_limit
+                truncated = len(sliced) > limit
+                return sliced[:limit], (limit if truncated else None)
+
+            if output_mode == "files_with_matches":
+                matched = []
+                for fpath in files:
+                    try:
+                        with open(fpath, encoding="utf-8", errors="replace") as f:
+                            if regex.search(f.read()):
+                                matched.append(fpath)
+                    except (UnicodeDecodeError, PermissionError):
+                        continue
+                # Сортировка по mtime (oldest first) — как rg --sort=modified.
+                try:
+                    matched.sort(key=lambda p: os.path.getmtime(p))
+                except OSError:
+                    pass
+                paged, applied = _apply_pagination(matched)
+                result = {"mode": "files_with_matches",
+                          "filenames": [rel(p) for p in paged],
+                          "numFiles": len(paged)}
+                if applied is not None: result["appliedLimit"] = applied
+                if offset: result["appliedOffset"] = offset
+                return result
+
+            if output_mode == "count":
+                entries = []
+                for fpath in files:
+                    try:
+                        with open(fpath, encoding="utf-8", errors="replace") as f:
+                            n = len(regex.findall(f.read()))
+                        if n: entries.append((rel(fpath), n))
+                    except (UnicodeDecodeError, PermissionError):
+                        continue
+                paged, applied = _apply_pagination(entries)
+                content_lines = [f"{p}:{n}" for p, n in paged]
+                result = {"mode": "count",
+                          "content": "\n".join(content_lines),
+                          "filenames": [],
+                          "numFiles": len(paged),
+                          "numMatches": sum(n for _, n in paged)}
+                if applied is not None: result["appliedLimit"] = applied
+                if offset: result["appliedOffset"] = offset
+                return result
+
+            # output_mode == "content"
+            # Контекст: -C / context имеет приоритет над -B/-A.
+            ctx_before = context if context else before
+            ctx_after = context if context else after
+            all_lines = []
+            for fpath in files:
+                try:
+                    with open(fpath, encoding="utf-8", errors="replace") as f:
+                        text = f.read()
+                except (UnicodeDecodeError, PermissionError):
+                    continue
+                file_lines = text.splitlines()
+                r = rel(fpath)
+                def _fmt(line_idx: int) -> str:  # 0-based -> с/без номера
+                    num = line_idx + 1
+                    body = file_lines[line_idx] if line_idx < len(file_lines) else ""
+                    return f"{r}:{num}:{body}" if line_numbers else f"{r}:{body}"
+                if multiline:
+                    for m in regex.finditer(text):
+                        start_line = text[:m.start()].count("\n")
+                        end_line = start_line + m.group(0).count("\n")
+                        for i in range(start_line, end_line + 1):
+                            if i < len(file_lines):
+                                all_lines.append(_fmt(i))
+                else:
+                    for i, line in enumerate(file_lines):
+                        if regex.search(line):
+                            lo = max(0, i - ctx_before)
+                            hi = min(len(file_lines) - 1, i + ctx_after)
+                            for j in range(lo, hi + 1):
+                                all_lines.append(_fmt(j))
+            paged, applied = _apply_pagination(all_lines)
+            result = {"mode": "content",
+                      "content": "\n".join(paged),
+                      "numFiles": 0,
+                      "filenames": [],
+                      "numLines": len(paged)}
+            if applied is not None: result["appliedLimit"] = applied
+            if offset: result["appliedOffset"] = offset
+            return result
+
+        # Скан больших деревьев занимает минуты — не блокируем event loop.
+        return await asyncio.to_thread(_scan)
 
     @tool("Найти файлы по glob-паттерну. Поддерживает '**' для рекурсии и {a,b} для альтернатив. "
           "Сортирует по mtime (oldest first, как rg --sort=modified). "
-          "Авто-исключаются VCS-директории (.git и т.п.). Лимит 100, флаг truncated если обрезано.")
-    def glob(
+          "Авто-исключаются VCS и тяжёлые служебные директории (.git, .venv и т.п.). Лимит 100, флаг truncated если обрезано.")
+    async def glob(
         self,
         pattern: Annotated[str, "Glob-паттерн, например **/*.py или *.{ts,tsx}."],
         path: Annotated[str, "Директория для поиска."],
@@ -962,34 +971,36 @@ class SandboxSkill(Skill):
             return err
         if not os.path.isdir(host_path):
             return {"error": f"Не директория: {path}"}
-        # Поддержка brace-expansion: *.{ts,tsx} → [*.ts, *.tsx].
-        expanded = []
-        m = re.match(r"^(.*)\{([^}]+)\}(.*)$", pattern)
-        if m:
-            pre, opts, post = m.group(1), m.group(2), m.group(3)
-            for o in opts.split(","):
-                expanded.append(f"{pre}{o.strip()}{post}")
-        else:
-            expanded = [pattern]
-        matches: dict[str, float] = {}
-        for pat in expanded:
-            full_pat = os.path.join(host_path, pat)
-            for fpath in glob_module.iglob(full_pat, recursive=True):
-                if not os.path.isfile(fpath):
-                    continue
-                rel_path = os.path.relpath(fpath, host_path).replace(os.sep, "/")
-                # Исключаем VCS-директории на любом уровне.
-                if any(part in self._VCS_EXCLUDE for part in rel_path.split("/")):
-                    continue
-                try:
-                    mtime = os.path.getmtime(fpath)
-                except OSError:
-                    mtime = 0.0
-                matches[rel_path] = mtime
-        # rg --sort=modified — ascending (oldest first).
-        ordered = sorted(matches.items(), key=lambda x: x[1])
-        LIMIT = 100
-        truncated = len(ordered) > LIMIT
-        return {"filenames": [p for p, _ in ordered[:LIMIT]],
-                "numFiles": min(len(ordered), LIMIT),
-                "truncated": truncated}
+        def _scan():
+            # Поддержка brace-expansion: *.{ts,tsx} → [*.ts, *.tsx].
+            expanded = []
+            m = re.match(r"^(.*)\{([^}]+)\}(.*)$", pattern)
+            if m:
+                pre, opts, post = m.group(1), m.group(2), m.group(3)
+                for o in opts.split(","):
+                    expanded.append(f"{pre}{o.strip()}{post}")
+            else:
+                expanded = [pattern]
+            matches: dict[str, float] = {}
+            for pat in expanded:
+                full_pat = os.path.join(host_path, pat)
+                for fpath in glob_module.iglob(full_pat, recursive=True):
+                    if not os.path.isfile(fpath):
+                        continue
+                    rel_path = os.path.relpath(fpath, host_path).replace(os.sep, "/")
+                    if any(part in self._SCAN_EXCLUDE for part in rel_path.split("/")):
+                        continue
+                    try:
+                        mtime = os.path.getmtime(fpath)
+                    except OSError:
+                        mtime = 0.0
+                    matches[rel_path] = mtime
+            # rg --sort=modified — ascending (oldest first).
+            ordered = sorted(matches.items(), key=lambda x: x[1])
+            LIMIT = 100
+            truncated = len(ordered) > LIMIT
+            return {"filenames": [p for p, _ in ordered[:LIMIT]],
+                    "numFiles": min(len(ordered), LIMIT),
+                    "truncated": truncated}
+
+        return await asyncio.to_thread(_scan)

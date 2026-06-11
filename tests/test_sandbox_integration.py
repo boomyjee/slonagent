@@ -518,7 +518,7 @@ class TestGrep:
     async def test_default_mode_files_with_matches(self, sandbox):
         _, sb, _ = sandbox
         self._setup(sb)
-        r = sb.grep(pattern=r"\bfoo\b", path="/workspace")
+        r = await sb.grep(pattern=r"\bfoo\b", path="/workspace")
         assert r["mode"] == "files_with_matches"
         # default case-sensitive: "FOO" в b.js не матчится \bfoo\b
         assert "a.py" in r["filenames"]
@@ -527,30 +527,30 @@ class TestGrep:
     async def test_vcs_dirs_excluded(self, sandbox):
         _, sb, _ = sandbox
         self._setup(sb)
-        r = sb.grep(pattern="def", path="/workspace")
+        r = await sb.grep(pattern="def", path="/workspace")
         assert all(".git" not in f for f in r["filenames"]), r["filenames"]
 
     async def test_type_filter(self, sandbox):
         _, sb, _ = sandbox
         self._setup(sb)
-        r_py = sb.grep(pattern="return", path="/workspace", type="py")
+        r_py = await sb.grep(pattern="return", path="/workspace", type="py")
         assert "a.py" in r_py["filenames"]
         assert "b.js" not in r_py["filenames"]
-        r_js = sb.grep(pattern="return", path="/workspace", type="js")
+        r_js = await sb.grep(pattern="return", path="/workspace", type="js")
         assert "a.py" not in r_js["filenames"]
         assert "b.js" in r_js["filenames"]
 
     async def test_glob_filter(self, sandbox):
         _, sb, _ = sandbox
         self._setup(sb)
-        r = sb.grep(pattern="return", path="/workspace", glob="*.py")
+        r = await sb.grep(pattern="return", path="/workspace", glob="*.py")
         assert "a.py" in r["filenames"]
         assert "b.js" not in r["filenames"]
 
     async def test_case_insensitive(self, sandbox):
         _, sb, _ = sandbox
         self._setup(sb)
-        r = sb.grep(pattern="foo", path="/workspace", case_insensitive=True)
+        r = await sb.grep(pattern="foo", path="/workspace", case_insensitive=True)
         # b.js имеет FOO uppercase
         assert "b.js" in r["filenames"]
         assert "a.py" in r["filenames"]
@@ -558,7 +558,7 @@ class TestGrep:
     async def test_content_with_context(self, sandbox):
         _, sb, _ = sandbox
         self._setup(sb)
-        r = sb.grep(pattern="return", path="/workspace", output_mode="content", context=1)
+        r = await sb.grep(pattern="return", path="/workspace", output_mode="content", context=1)
         assert r["mode"] == "content"
         # Контекст: для return в a.py должен также вытянуть def foo()
         assert "a.py:1:def foo():" in r["content"]
@@ -567,14 +567,14 @@ class TestGrep:
     async def test_content_no_line_numbers(self, sandbox):
         _, sb, _ = sandbox
         self._setup(sb)
-        r = sb.grep(pattern="return", path="/workspace", output_mode="content", line_numbers=False)
+        r = await sb.grep(pattern="return", path="/workspace", output_mode="content", line_numbers=False)
         # Без номеров: формат a.py:contents
         assert any(line.startswith("a.py:    return") for line in r["content"].split("\n")), r["content"]
 
     async def test_count_mode(self, sandbox):
         _, sb, _ = sandbox
         self._setup(sb)
-        r = sb.grep(pattern="def", path="/workspace", output_mode="count")
+        r = await sb.grep(pattern="def", path="/workspace", output_mode="count")
         assert r["mode"] == "count"
         assert r["numFiles"] >= 1
         assert r["numMatches"] >= 1
@@ -585,10 +585,10 @@ class TestGrep:
         for i in range(5):
             with open(os.path.join(sb.workspace_dir, f"f{i}.py"), "w", encoding="utf-8") as f:
                 f.write("hit\n")
-        r1 = sb.grep(pattern="hit", path="/workspace", head_limit=2, offset=0)
+        r1 = await sb.grep(pattern="hit", path="/workspace", head_limit=2, offset=0)
         assert r1["numFiles"] == 2
         assert r1.get("appliedLimit") == 2
-        r2 = sb.grep(pattern="hit", path="/workspace", head_limit=2, offset=2)
+        r2 = await sb.grep(pattern="hit", path="/workspace", head_limit=2, offset=2)
         assert r2["numFiles"] == 2
         assert r2.get("appliedOffset") == 2
         # Не пересекаются
@@ -599,7 +599,7 @@ class TestGrep:
         with open(os.path.join(sb.workspace_dir, "ml.py"), "w", encoding="utf-8") as f:
             f.write("class Foo:\n    pass\n\nclass Bar:\n    pass\n")
         # Pattern that spans newline: class \w+:\n.*pass
-        r = sb.grep(pattern=r"class \w+:\n\s+pass", path="/workspace", multiline=True, output_mode="content")
+        r = await sb.grep(pattern=r"class \w+:\n\s+pass", path="/workspace", multiline=True, output_mode="content")
         assert r["mode"] == "content"
         assert "ml.py" in r["content"]
 
@@ -613,7 +613,7 @@ class TestGlob:
         os.makedirs(os.path.join(sb.workspace_dir, "deep", "nested"), exist_ok=True)
         for p in ("a.py", "deep/b.py", "deep/nested/c.py"):
             with open(os.path.join(sb.workspace_dir, p), "w") as f: f.write("x")
-        r = sb.glob(pattern="**/*.py", path="/workspace")
+        r = await sb.glob(pattern="**/*.py", path="/workspace")
         names = set(r["filenames"])
         assert "a.py" in names
         assert "deep/b.py" in names
@@ -623,7 +623,7 @@ class TestGlob:
         _, sb, _ = sandbox
         for p in ("x.ts", "y.tsx", "z.js"):
             with open(os.path.join(sb.workspace_dir, p), "w") as f: f.write("x")
-        r = sb.glob(pattern="*.{ts,tsx}", path="/workspace")
+        r = await sb.glob(pattern="*.{ts,tsx}", path="/workspace")
         names = set(r["filenames"])
         assert "x.ts" in names
         assert "y.tsx" in names
@@ -636,7 +636,7 @@ class TestGlob:
         for name in ("c.txt", "b.txt", "a.txt"):
             with open(os.path.join(sb.workspace_dir, name), "w") as f: f.write("x")
             time.sleep(0.05)
-        r = sb.glob(pattern="*.txt", path="/workspace")
+        r = await sb.glob(pattern="*.txt", path="/workspace")
         # oldest first — c.txt создан первым, a.txt последним.
         assert r["filenames"] == ["c.txt", "b.txt", "a.txt"], r["filenames"]
 
@@ -645,7 +645,7 @@ class TestGlob:
         os.makedirs(os.path.join(sb.workspace_dir, ".git"), exist_ok=True)
         with open(os.path.join(sb.workspace_dir, "real.py"), "w") as f: f.write("x")
         with open(os.path.join(sb.workspace_dir, ".git", "noise.py"), "w") as f: f.write("x")
-        r = sb.glob(pattern="**/*.py", path="/workspace")
+        r = await sb.glob(pattern="**/*.py", path="/workspace")
         assert "real.py" in r["filenames"]
         assert all(".git" not in f for f in r["filenames"])
 
