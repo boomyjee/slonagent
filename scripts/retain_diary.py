@@ -1,6 +1,6 @@
 """retain_diary.py — загрузка личного дневника в FactProvider.
 
-Весь файл — один документ. Кастомная chunk_fn режет по дням:
+Весь файл — один документ. Готовые чанки (RetainItem.chunks) нарезаются по дням:
 маленькие соседние дни объединяются, ни один день не разрезается.
 
 Использование:
@@ -226,8 +226,7 @@ async def main():
 
     from src.memory.providers.fact.retain import RetainItem, extract_facts, store_facts
     from src.memory.providers.fact.storage import Storage
-    import httpx
-    from openai import AsyncOpenAI
+    from agent import Agent
 
     lancedb_path = os.path.join(os.path.dirname(args.db), 'lancedb')
     storage = Storage(args.db, lancedb_path, cfg['embedding'])
@@ -241,26 +240,25 @@ async def main():
         print(f"Already processed: {existing} facts for '{document_id}'. Skipping.")
         return
 
-    proxy_url = os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY')
-    http_client = httpx.AsyncClient(proxy=proxy_url, timeout=120.0)
-    client = AsyncOpenAI(api_key=cfg['api_key'], base_url=cfg['base_url'],
-                         http_client=http_client, max_retries=0)
+    # Factory эфемерного Agent'а — extract_facts зовёт make_agent() на каждый
+    # чанк. Прокси Agent.OpenAI берёт из env (cfg['env'] уже в os.environ выше).
+    def make_agent():
+        return Agent(id="", model_name=cfg['model'], api_key=cfg['api_key'],
+                     base_url=cfg['base_url'], backend="openai")
 
     with open(args.file, encoding='utf-8') as f:
         diary_text = f.read()
 
     item = RetainItem(
         content=diary_text,
+        chunks=[c.content for c in chunks],
         context="personal diary",
         document_id=document_id,
         retain_mission=args.retain_mission,
     )
 
-    chunk_texts = [c.content for c in chunks]
-
     print(f"Extracting facts ({len(chunks)} chunks in parallel) ...")
-    facts, chunk_meta = await extract_facts([item], client, cfg['model'],
-                                            chunk_fn=lambda _: chunk_texts)
+    facts, chunk_meta = await extract_facts([item], make_agent)
     if facts:
         store_facts(facts, storage, chunk_meta)
 

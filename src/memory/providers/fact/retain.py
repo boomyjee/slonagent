@@ -235,6 +235,8 @@ class RetainItem:
     custom_instructions: str = ""
     metadata: Optional[dict] = None
     entities: Optional[list[str]] = None
+    # Готовые чанки от вызывающей стороны; если заданы — content не режется.
+    chunks: Optional[list[str]] = None
 
 
 @dataclass
@@ -578,15 +580,14 @@ async def _extract_from_chunk_auto_split(
 async def extract_facts(
     items: list[RetainItem],
     make_agent: Callable,
-    chunk_fn: Callable[[str], list[str]] | None = None,
 ) -> tuple[list[Fact], list[tuple[str, int, str]]]:
     """
     Извлекает факты из списка items, все чанки всех items обрабатываются параллельно.
     Возвращает (facts, chunk_meta) где chunk_meta: [(document_id, chunk_index, chunk_text), ...]
     для всех items — как у Hindsight. Для items без document_id генерируется UUID.
 
-    chunk_fn — кастомная функция нарезки текста; если None, используется chunk_text.
-    Если chunk_fn вернула пустой список — айтем пропускается.
+    Если item.chunks заданы — используются как есть, иначе content режется chunk_text.
+    Если чанков нет — айтем пропускается.
     """
     if not items:
         return [], []
@@ -606,7 +607,7 @@ async def extract_facts(
             return await coro
 
     for item_idx, item in enumerate(items):
-        chunks = chunk_fn(item.content) if chunk_fn else chunk_text(item.content)
+        chunks = item.chunks if item.chunks is not None else chunk_text(item.content)
         if not chunks:
             continue
         for chunk_idx, chunk in enumerate(chunks):

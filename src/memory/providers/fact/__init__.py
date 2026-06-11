@@ -23,9 +23,41 @@ from typing import Annotated
 from agent import tool, bypass, Agent
 from src.memory.memory import Memory
 from src.memory.providers.base import BaseProvider
-from src.memory.providers.fact.retain import RetainItem, retain
+from src.memory.providers.fact.retain import CHUNK_SIZE, RetainItem, chunk_text, retain
 from src.memory.providers.fact.recall import recall_async
 from src.memory.providers.fact.storage import Storage
+
+def _chunk_dialog(turns: list[tuple[str, str]]) -> list[str]:
+    """Нарезка диалога целыми репликами — каждый чанк начинается с метки спикера.
+
+    Реплика длиннее CHUNK_SIZE режется дефолтным chunk_text, и каждый кусок-продолжение
+    получает метку "header (продолжение):" — иначе экстрактор теряет автора текста
+    и записывает риторику ассистента как факты о пользователе.
+    """
+    chunks: list[str] = []
+    cur = ""
+
+    def flush():
+        nonlocal cur
+        if cur:
+            chunks.append(cur)
+            cur = ""
+
+    for header, text in turns:
+        line = f"{header}: {text}"
+        if cur and len(cur) + len(line) + 1 > CHUNK_SIZE:
+            flush()
+        if len(line) > CHUNK_SIZE:
+            flush()
+            pieces = chunk_text(text)
+            chunks.append(f"{header}: {pieces[0]}")
+            chunks.extend(f"{header} (продолжение): {p}" for p in pieces[1:])
+            continue
+        cur = f"{cur}\n{line}" if cur else line
+    flush()
+    return chunks
+
+
 
 log = logging.getLogger(__name__)
 
@@ -149,7 +181,7 @@ class FactProvider(BaseProvider):
 
     def _build_retain_items(self, pending: list) -> list[RetainItem]:
         """Конвертирует pending одного треда в RetainItem'ы (один conversation-item + по одному на документ)."""
-        conv_lines: list[str] = []
+        conv_turns: list[tuple[str, str]] = []
         conv_ts: datetime | None = None
         items: list[RetainItem] = []
 
@@ -194,11 +226,12 @@ class FactProvider(BaseProvider):
                     if conv_ts is None:
                         conv_ts = ts
                     ts_prefix = ts.strftime("%Y-%m-%d %H:%M")
-                    conv_lines.append(f"[{ts_prefix}] {label}: {text}")
+                    conv_turns.append((f"[{ts_prefix}] {label}", text))
 
-        if conv_lines:
+        if conv_turns:
             items.insert(0, RetainItem(
-                content="\n".join(conv_lines),
+                content="",
+                chunks=_chunk_dialog(conv_turns),
                 context="conversation",
                 event_date=conv_ts,
                 retain_mission=self._retain_mission,
