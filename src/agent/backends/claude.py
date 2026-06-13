@@ -36,6 +36,26 @@ from src.agent.backends.base import BaseBackend
 log = logging.getLogger(__name__)
 
 
+async def block_bash_background(input_data, *_):
+    """PreToolUse-хук на Bash: запрещаем run_in_background=true. Завершение фоновой
+    задачи claude.exe не доходит до slonagent-лупа (llm() выходит на ResultMessage и
+    стрим в простое не слушается), плюс процесс гибнет при пересоздании клиента.
+    Долгое — синхронно или через sandbox_exec(background=true) в контейнере.
+    """
+    if ((input_data or {}).get("tool_input") or {}).get("run_in_background"):
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "run_in_background запрещён: завершение фоновой Bash-задачи не "
+                "доходит до агент-лупа, а сам процесс гибнет при пересоздании "
+                "клиента. Запусти команду синхронно; для долгих процессов — "
+                "sandbox_exec(background=true) в контейнере."
+            ),
+        }}
+    return {}
+
+
 class ClaudeAgentSkill(Skill):
     @bypass("context", "Заполнение контекста claude'а", standalone=True)
     async def context_command(self, args: str) -> str:
@@ -483,10 +503,13 @@ class ClaudeBackend(BaseBackend):
             # писал бы свой dumb-summary поверх нашего OM. Блокируем после user overrides
             # и рядом с возможными user-хуками.
             async def block_compact(*_): return {"decision": "block", "systemMessage": "Compaction handled by slon"}
+
             existing_hooks = options_kwargs.get("hooks") or {}
             options_kwargs["hooks"] = {
                 **existing_hooks,
                 "PreCompact": [*(existing_hooks.get("PreCompact") or []), HookMatcher(hooks=[block_compact])],
+                "PreToolUse": [*(existing_hooks.get("PreToolUse") or []),
+                               HookMatcher(matcher="Bash", hooks=[block_bash_background])],
             }
 
             async def _connect(use_resume: bool):
