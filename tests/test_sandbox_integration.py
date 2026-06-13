@@ -408,6 +408,31 @@ class TestConfigChanges:
         ).stdout.strip()
         assert new_id != first_id, "контейнер не был пересоздан"
 
+    async def test_recreate_emits_notice_via_exec_once(self, sandbox, tmp_path):
+        """Пересоздание на смене маунтов доносится агенту через exec — ровно один
+        раз: первый вызов несёт container_recreated, следующий уже нет."""
+        _, sb, cs = sandbox
+        await sb.exec("true")  # поднимаем контейнер (running)
+        src = tmp_path / "np"
+        src.mkdir()
+        cs._save({"sandbox": {"rw": [str(src)]}})
+        r1 = await sb.exec("echo hi")  # ensure пересоздаёт → notice в выводе
+        assert "container_recreated" in r1, r1
+        r2 = await sb.exec("echo hi")  # флаг уже погашен
+        assert "container_recreated" not in r2, r2
+
+    async def test_concurrent_ensure_no_name_clash(self, sandbox):
+        """Параллельные _ensure_container на свежем состоянии не падают на
+        'name already in use' — лок + double-check сериализуют создание."""
+        _, sb, _ = sandbox
+        await asyncio.gather(*[sb._ensure_container() for _ in range(4)])
+        names = subprocess.run(
+            ["podman", "ps", "-a", "--filter", f"name={sb.container_name}",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True,
+        ).stdout.split()
+        assert names == [sb.container_name], names
+
 
 # ─── resolve_path (pure) ─────────────────────────────────────────────────────
 

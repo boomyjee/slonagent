@@ -29,6 +29,13 @@ class SandboxSkill(Skill):
         # Кеш _ensure_container: пропускаем тяжёлые проверки если хеш набора
         # маунтов не менялся. На смене конфига хеш ломается → пересоздаём.
         self._mounts_hash: str | None = None
+        # Уведомление агенту о том, что контейнер пересоздан на смене маунтов
+        # (все процессы в нём убиты). Выставляется в _ensure_container, дописывается
+        # в вывод exec/скилл-скрипта и чистится только после фактической отдачи.
+        self._recreated_notice: str | None = None
+        # Сериализует пересоздание контейнера: параллельные tool-call'ы иначе
+        # делают два `run --name X` подряд → второй падает "name already in use".
+        self._ensure_lock = asyncio.Lock()
 
     async def start(self):
         if self.agent.agent_dir is None:
@@ -90,12 +97,26 @@ class SandboxSkill(Skill):
         proc = await self._run(cmd, capture_output=True, text=True,
                                encoding="utf-8", errors="replace")
         if proc.returncode != 0:
-            return {"error": (proc.stderr or "").strip() or f"runner exit {proc.returncode}"}
+            result = {"error": (proc.stderr or "").strip() or f"runner exit {proc.returncode}"}
+        else:
+            result = {"error": f"runner output без маркера результата:\n{proc.stdout}"}
+            for line in proc.stdout.splitlines():
+                if line.startswith(self._RESULT_MARKER):
+                    result = json.loads(line[len(self._RESULT_MARKER):])
+                    break
+        return self._deliver_recreate_notice(result)
 
-        for line in proc.stdout.splitlines():
-            if line.startswith(self._RESULT_MARKER):
-                return json.loads(line[len(self._RESULT_MARKER):])
-        return {"error": f"runner output без маркера результата:\n{proc.stdout}"}
+    def _deliver_recreate_notice(self, result):
+        """Дописывает уведомление о пересоздании контейнера в результат тула и
+        гасит флаг. Результат скилл-скрипта бывает не-dict (строка/список) —
+        тогда оборачиваем, чтобы сохранить и оригинал, и notice."""
+        notice = self._recreated_notice
+        if not notice:
+            return result
+        self._recreated_notice = None
+        if isinstance(result, dict):
+            return {**result, "container_recreated": notice}
+        return {"result": result, "container_recreated": notice}
 
     def _mounts(self) -> list[tuple[str, str, bool]]:
         """[(host_path, container_path, readonly)] из конфига sandbox.ro / sandbox.rw."""
@@ -270,40 +291,51 @@ class SandboxSkill(Skill):
         new_hash = hashlib.sha1(repr(sorted(desired_mounts)).encode()).hexdigest()
         if self._mounts_hash == new_hash:
             return
-        await self._ensure_machine()
-        env_image = f"{self.container_name}_env"
+        async with self._ensure_lock:
+            # Двойная проверка под локом: пока ждали лок, параллельный вызов мог
+            # уже всё пересоздать и обновить хеш — тогда выходим без работы.
+            if self._mounts_hash == new_hash:
+                return
+            await self._ensure_machine()
+            env_image = f"{self.container_name}_env"
 
-        inspect = await self._run(
-            [self.runtime, "inspect", "--format",
-             '{{.State.Running}}\n{{range .Mounts}}{{.Source}}\t{{.Destination}}\n{{end}}',
-             self.container_name],
-            capture_output=True, text=True, encoding="utf-8",
-        )
-        if inspect.returncode != 0:
-            img = await self._run([self.runtime, "image", "exists", env_image], capture_output=True)
-            image = env_image if img.returncode == 0 else self.image
-            await self._run_loud([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, image, "sleep", "infinity"])
-            logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
-        else:
-            lines = inspect.stdout.strip().splitlines()
-            running = lines[0] == "true"
-            actual_mounts = set()
-            for l in lines[1:]:
-                parts = l.strip().split("\t")
-                if len(parts) == 2:
-                    actual_mounts.add((self._norm(parts[0]), parts[1]))
+            inspect = await self._run(
+                [self.runtime, "inspect", "--format",
+                 '{{.State.Running}}\n{{range .Mounts}}{{.Source}}\t{{.Destination}}\n{{end}}',
+                 self.container_name],
+                capture_output=True, text=True, encoding="utf-8",
+            )
+            if inspect.returncode != 0:
+                img = await self._run([self.runtime, "image", "exists", env_image], capture_output=True)
+                image = env_image if img.returncode == 0 else self.image
+                await self._run_loud([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, image, "sleep", "infinity"])
+                logging.info("[exec] Контейнер %s создан (образ: %s)", self.container_name, image)
+            else:
+                lines = inspect.stdout.strip().splitlines()
+                running = lines[0] == "true"
+                actual_mounts = set()
+                for l in lines[1:]:
+                    parts = l.strip().split("\t")
+                    if len(parts) == 2:
+                        actual_mounts.add((self._norm(parts[0]), parts[1]))
 
-            if not running:
-                await self._run_loud([self.runtime, "start", self.container_name])
-                logging.info("[exec] Контейнер %s запущен", self.container_name)
-            elif actual_mounts != desired_mounts:
-                logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
-                await self._run_loud([self.runtime, "commit", self.container_name, env_image])
-                await self._run([self.runtime, "rm", "-f", "-t", "0", self.container_name], capture_output=True)
-                await self._run_loud([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"])
-                logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
-        self._mounts_hash = new_hash
-        await self._sync_rpc_url()
+                if not running:
+                    await self._run_loud([self.runtime, "start", self.container_name])
+                    logging.info("[exec] Контейнер %s запущен", self.container_name)
+                elif actual_mounts != desired_mounts:
+                    logging.info("[exec] Монтирования изменились, сохраняем образ и пересоздаём")
+                    await self._run_loud([self.runtime, "commit", self.container_name, env_image])
+                    await self._run([self.runtime, "rm", "-f", "-t", "0", self.container_name], capture_output=True)
+                    await self._run_loud([self.runtime, "run", "-d", "--no-hosts", "--http-proxy=false", "--name", self.container_name, *volume_args, env_image, "sleep", "infinity"])
+                    logging.info("[exec] Контейнер %s пересоздан с образом %s", self.container_name, env_image)
+                    self._recreated_notice = (
+                        "⚠️ Монтирования контейнера изменились — контейнер был пересоздан, "
+                        "и все запущенные в нём процессы (серверы, watcher'ы, фоновые задачи) "
+                        "убиты. Файлы в /workspace и установленные пакеты сохранены. "
+                        "Если что-то важное там работало — подними заново."
+                    )
+            self._mounts_hash = new_hash
+            await self._sync_rpc_url()
 
     @classmethod
     async def host_url(cls) -> str:
@@ -515,8 +547,10 @@ class SandboxSkill(Skill):
             pid = proc.stdout.strip()
             if not pid.isdigit():
                 return {"error": f"Не удалось получить pid: {proc.stdout!r} / {proc.stderr!r}"}
-            return {"shell_id": f"sh_{pid}", "pid": int(pid),
-                    "log": f"{_SHELL_LOG_DIR}/{pid}.log"}
+            return self._deliver_recreate_notice({
+                "shell_id": f"sh_{pid}", "pid": int(pid),
+                "log": f"{_SHELL_LOG_DIR}/{pid}.log",
+            })
 
         if timeout is None:
             timeout = self.default_timeout
@@ -580,7 +614,9 @@ class SandboxSkill(Skill):
         if stdout: logging.info("[exec] stdout:\n%s", stdout.rstrip())
         if stderr: logging.warning("[exec] stderr:\n%s", stderr.rstrip())
 
-        return {**res, "stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
+        return self._deliver_recreate_notice(
+            {**res, "stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
+        )
 
     @tool("Прочитать накопленный вывод фонового процесса по shell_id из exec(background=true). "
           "Возвращает {output, alive, lines_total}.")
