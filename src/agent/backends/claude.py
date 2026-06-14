@@ -36,26 +36,6 @@ from src.agent.backends.base import BaseBackend
 log = logging.getLogger(__name__)
 
 
-async def block_bash_background(input_data, *_):
-    """PreToolUse-хук на Bash: запрещаем run_in_background=true. Завершение фоновой
-    задачи claude.exe не доходит до slonagent-лупа (llm() выходит на ResultMessage и
-    стрим в простое не слушается), плюс процесс гибнет при пересоздании клиента.
-    Долгое — синхронно или через sandbox_exec(background=true) в контейнере.
-    """
-    if ((input_data or {}).get("tool_input") or {}).get("run_in_background"):
-        return {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                "run_in_background запрещён: завершение фоновой Bash-задачи не "
-                "доходит до агент-лупа, а сам процесс гибнет при пересоздании "
-                "клиента. Запусти команду синхронно; для долгих процессов — "
-                "sandbox_exec(background=true) в контейнере."
-            ),
-        }}
-    return {}
-
-
 class ClaudeAgentSkill(Skill):
     @bypass("context", "Заполнение контекста claude'а", standalone=True)
     async def context_command(self, args: str) -> str:
@@ -493,9 +473,16 @@ class ClaudeBackend(BaseBackend):
 
             # Гасим non-essential traffic клода (генерация заголовка треда — лишний
             # haiku-вызов на каждый ход, плюс телеметрия/автоапдейт): headless-агенту
-            # это не нужно. Мёржим после user-overrides, юзер может переопределить.
+            # это не нужно.
+            # Отключаем фоновые задачи: CLI сам уводит долгие Bash-команды в фон
+            # (backgroundTaskId), а их завершение не доходит до slonagent-лупа (llm()
+            # выходит на ResultMessage и стрим в простое не слушается), плюс процесс
+            # гибнет при пересоздании клиента. Долгое — синхронно или через
+            # sandbox_exec(background=true) в контейнере.
+            # Мёржим после user-overrides, юзер может переопределить.
             options_kwargs["env"] = {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
                 **options_kwargs.get("env", {}),
             }
 
@@ -508,8 +495,6 @@ class ClaudeBackend(BaseBackend):
             options_kwargs["hooks"] = {
                 **existing_hooks,
                 "PreCompact": [*(existing_hooks.get("PreCompact") or []), HookMatcher(hooks=[block_compact])],
-                "PreToolUse": [*(existing_hooks.get("PreToolUse") or []),
-                               HookMatcher(matcher="Bash", hooks=[block_bash_background])],
             }
 
             async def _connect(use_resume: bool):
