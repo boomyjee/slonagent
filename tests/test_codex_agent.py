@@ -999,6 +999,92 @@ class TestNotificationHandling:
             "будет triggerится на каждом нативном tool-call'е"
         )
 
+    # — нативная генерация картинок (imageGeneration) ————————————————
+
+    @pytest.mark.asyncio
+    async def test_image_generation_writes_flagged_turns(self):
+        """Нативная codex-генерация → в память флагнутый tool_call + результат
+        с revised_prompt и saved_path. Без 2.3MB base64 из item['result']."""
+        agent, backend, _ = self._setup_backend()
+        await backend._handle_notification({
+            "method": "item/completed",
+            "params": {"item": {
+                "type": "imageGeneration", "id": "ig_1", "status": "completed",
+                "revisedPrompt": "a ginger cat in a blue hat",
+                "result": "iVBORw0KGgo" * 1000,
+                "savedPath": "C:\\img\\ig_1.png",
+            }},
+        })
+        turns = backend._stream_state["turns"]
+        assert len(turns) == 2
+        call, result = turns
+        assert call["role"] == "assistant"
+        assert call["tool_calls"][0]["id"] == "ig_1"
+        assert call["tool_calls"][0]["function"]["name"] == "image_generation"
+        assert call["_codex_image_generation"] is True
+        assert result["role"] == "tool" and result["tool_call_id"] == "ig_1"
+        assert result["_codex_image_generation"] is True
+        assert json.loads(result["content"]) == {
+            "revised_prompt": "a ginger cat in a blue hat",
+            "saved_path": "C:\\img\\ig_1.png",
+        }
+        assert "iVBORw0KGgo" not in result["content"]  # base64 в память не течёт
+
+    @pytest.mark.asyncio
+    async def test_image_generation_no_transport_output(self):
+        """Картинку из бэкенда в чат/модель не шлём — показ делает скилл."""
+        agent, backend, _ = self._setup_backend()
+        await backend._handle_notification({
+            "method": "item/completed",
+            "params": {"item": {
+                "type": "imageGeneration", "id": "ig_2", "status": "completed",
+                "revisedPrompt": "x", "result": "AAA", "savedPath": "/tmp/x.png",
+            }},
+        })
+        agent.transport.on_tool_call.assert_not_called()
+        agent.transport.on_tool_result.assert_not_called()
+        assert not agent.transport.send_images.called
+
+    @pytest.mark.asyncio
+    async def test_image_generation_matches_jsonl_signature(self):
+        """Divergence-safety: флагнутый image tool_call в памяти даёт ту же
+        подпись, что image_generation_call в rollout-jsonl. Иначе тред
+        пересоздавался бы после каждой генерации."""
+        from src.agent.backends.codex import CodexBackend
+        agent, backend, _ = self._setup_backend()
+        await backend._handle_notification({
+            "method": "item/completed",
+            "params": {"item": {
+                "type": "imageGeneration", "id": "ig_9", "status": "completed",
+                "revisedPrompt": "a cat", "result": "B64", "savedPath": "/x.png",
+            }},
+        })
+        memory_sigs = CodexBackend._memory_signatures(backend._stream_state["turns"])
+
+        # Настоящий _jsonl_signatures на временном rollout: image_generation_call
+        # (response_item) учитывается, image_generation_end (event_msg) игнорится.
+        roll = tempfile.mktemp(suffix=".jsonl")
+        with open(roll, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "response_item", "payload": {
+                "type": "image_generation_call", "id": "ig_9", "status": "completed",
+                "revised_prompt": "a cat", "result": "B64"}}) + "\n")
+            f.write(json.dumps({"type": "event_msg", "payload": {
+                "type": "image_generation_end", "call_id": "ig_9",
+                "result": "B64", "saved_path": "/x.png"}}) + "\n")
+        backend._thread_path = roll
+        jsonl_sigs = backend._jsonl_signatures()
+        os.remove(roll)
+
+        assert ("image_generation", "ig_9") in memory_sigs
+        assert ("image_generation", "ig_9") in jsonl_sigs
+        # ни function_call, ни output для картинки — иначе расхождение
+        assert ("function_call", "ig_9") not in memory_sigs
+        assert ("function_call_output", "ig_9") not in memory_sigs
+        assert ("function_call", "ig_9") not in jsonl_sigs
+        assert {s for s in memory_sigs if s[0] == "image_generation"} == \
+               {s for s in jsonl_sigs if s[0] == "image_generation"} == \
+               {("image_generation", "ig_9")}
+
     @pytest.mark.asyncio
     async def test_dynamic_tool_call_completed_becomes_two_turns(self):
         agent, backend, _ = self._setup_backend()
@@ -2838,3 +2924,46 @@ class TestCodexIntegration:
             f"_FORBIDDEN_MCP_TOOLS, либо в KNOWN_BAKED_IN в этом тесте.\n"
             f"Полный список названных моделью имён: {sorted(names)}"
         )
+
+
+@pytest.mark.integration
+class TestCodexImageSkill:
+    """Реальная генерация через CodexImageSkill: эфемерный codex-ход генерит
+    картинку, нативный хендлер кладёт saved_path флагнутым tool-турном, скилл
+    забирает путь из памяти → кладёт в workspace + отдаёт _parts + send_images."""
+
+    @pytest.mark.asyncio
+    async def test_real_generate_image(self, tmp_path):
+        from src.skills.codex_image import CodexImageSkill
+        from src.transport.base import BaseTransport
+
+        class _Sandbox:
+            def resolve_path(self, container_path):
+                return str(tmp_path / container_path.split("/")[-1])
+
+        class _Transport(BaseTransport):
+            def __init__(self):
+                super().__init__()
+                self.images = []
+
+            async def send_images(self, paths):
+                self.images.extend(paths)
+
+        class _StubAgent:
+            sandbox = _Sandbox()
+
+            def __init__(self):
+                self.transport = _Transport()
+
+        skill = CodexImageSkill()
+        skill.agent = _StubAgent()
+        res = await skill.generate_image("рыжий кот в синей шляпе на простом фоне",
+                                         filename="cat.png")
+
+        assert res.get("status") == "success", res
+        url = (res.get("_parts") or [{}])[0].get("image_url", {}).get("url", "")
+        assert url.startswith("data:image/png;base64,"), f"нет картинки в _parts: {res}"
+        # доставлено в транспорт, файл в workspace, исходник codex подчищен
+        assert skill.agent.transport.images, "send_images не вызван"
+        delivered = skill.agent.transport.images[0]
+        assert str(tmp_path) in delivered and os.path.exists(delivered)

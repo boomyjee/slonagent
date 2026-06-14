@@ -668,8 +668,12 @@ class CodexBackend(BaseBackend):
                 continue
             role = t.get("role")
             if role == "assistant" and t.get("tool_calls"):
+                # Нативная codex-генерация лежит флагнутым tool_call'ом, но в
+                # rollout это image_generation_call (один item по id), не
+                # function_call — подпись считаем под него, иначе ложный divergence.
+                img = t.get("_codex_image_generation")
                 for tc in t["tool_calls"]:
-                    expected.add(("function_call", tc.get("id")))
+                    expected.add(("image_generation" if img else "function_call", tc.get("id")))
                 continue
             content = t.get("content")
             text = ""
@@ -685,6 +689,10 @@ class CodexBackend(BaseBackend):
             elif role == "assistant" and text:
                 expected.add(("message", "assistant", text))
             elif role == "tool" and t.get("tool_call_id"):
+                # Флагнутый image-результат — пары function_call_output в rollout
+                # нет (там один image_generation_call), подпись не добавляем.
+                if t.get("_codex_image_generation"):
+                    continue
                 expected.add(("function_call_output", t["tool_call_id"]))
         return expected
 
@@ -763,6 +771,11 @@ class CodexBackend(BaseBackend):
                     sigs.add(("function_call", payload.get("call_id")))
                 elif ptype == "function_call_output":
                     sigs.add(("function_call_output", payload.get("call_id")))
+                elif ptype == "image_generation_call":
+                    # Нативная генерация — ОДИН item (id), без отдельного output.
+                    # В памяти ему соответствует флагнутый _codex_image_generation
+                    # tool_call (см. _memory_signatures).
+                    sigs.add(("image_generation", payload.get("id")))
                 elif ptype == "message":
                     text = "".join(
                         c.get("text", "") for c in (payload.get("content") or [])
@@ -1373,6 +1386,42 @@ class CodexBackend(BaseBackend):
                     "content": result, "_codex_item_id": call_id,
                 })
                 await self.agent.transport.on_tool_result(name, result)
+                return
+
+            if t == "imageGeneration":
+                # Нативная генерация картинки codex'а. Пишем в память флагнутым
+                # tool_call'ом: revised_prompt + savedPath (без 2.3MB base64 из
+                # item["result"]). Метка _codex_image_generation учитывается в
+                # divergence-чеке — в rollout это ОДИН item image_generation_call
+                # (по id), а не function_call+output, поэтому подписи считаем по
+                # нему (см. _jsonl_signatures / _memory_signatures). В транспорт
+                # и модель здесь НИЧЕГО не шлём: отображение/показ модели решает
+                # скилл, читая savedPath из tool-результата.
+                call_id = item_id
+                prompt = item.get("revisedPrompt") or ""
+                saved_path = item.get("savedPath") or ""
+                turns = s.setdefault("turns", [])
+                turns.append({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": call_id, "type": "function",
+                        "function": {
+                            "name": "image_generation",
+                            "arguments": json.dumps({"prompt": prompt}, ensure_ascii=False),
+                        },
+                    }],
+                    "_codex_item_id": call_id,
+                    "_codex_image_generation": True,
+                })
+                turns.append({
+                    "role": "tool", "tool_call_id": call_id, "name": "image_generation",
+                    "content": json.dumps(
+                        {"revised_prompt": prompt, "saved_path": saved_path},
+                        ensure_ascii=False,
+                    ),
+                    "_codex_item_id": call_id,
+                    "_codex_image_generation": True,
+                })
                 return
 
     # — user input construction —————————————————————————————————
