@@ -505,7 +505,15 @@ async def _extract_from_chunk(
             log.warning("[retain] chunk %d no JSON in response (attempt %d): %r", chunk_index, attempt + 1, raw[:300])
             continue
 
-        data, _ = json.JSONDecoder().raw_decode(raw, m.start())
+        try:
+            data, _ = json.JSONDecoder().raw_decode(raw, m.start())
+        except json.JSONDecodeError as e:
+            # Логируем сырой ответ ЦЕЛИКОМ — чтобы видеть, что именно выдала
+            # модель (sonnet на некоторых данных отвечает markdown'ом вместо
+            # JSON). Поведение не меняем — пробрасываем дальше как было.
+            log.warning("[retain] chunk %d malformed JSON (%s), raw response:\n%s",
+                        chunk_index, e, raw)
+            raise
         facts, has_malformed = _parse_facts_from_json(data, effective_date, mentioned_at)
         raw_count = len(data.get("facts", []))
         if has_malformed and raw_count > 0 and len(facts) < raw_count * 0.8 and attempt < max_retries - 1:
