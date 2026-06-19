@@ -500,20 +500,25 @@ async def _extract_from_chunk(
             await sub.close()
 
         raw = Agent.turn_text(turn)
-        m = re.search(r"\{", raw)
-        if not m:
-            log.warning("[retain] chunk %d no JSON in response (attempt %d): %r", chunk_index, attempt + 1, raw[:300])
+        # Модель иногда нарушает "JSON only" и пишет прозу/код-блоки ПЕРЕД
+        # объектом — тогда первая '{' оказывается внутри сниппета (напр.
+        # f-string `{text[:50]}`), и raw_decode парсит мусор. Ищем сам объект
+        # {"facts": ...}, причём ПОСЛЕДНИЙ: реальный вывод идёт в конце, а
+        # упоминания формата в прозе (если есть) — раньше.
+        matches = list(re.finditer(r'\{\s*"facts"\s*:', raw))
+        if not matches:
+            log.warning("[retain] chunk %d no facts-JSON in response (attempt %d): %r", chunk_index, attempt + 1, raw[:300])
             continue
 
         try:
-            data, _ = json.JSONDecoder().raw_decode(raw, m.start())
+            data, _ = json.JSONDecoder().raw_decode(raw, matches[-1].start())
         except json.JSONDecodeError as e:
-            # Логируем сырой ответ ЦЕЛИКОМ — чтобы видеть, что именно выдала
-            # модель (sonnet на некоторых данных отвечает markdown'ом вместо
-            # JSON). Поведение не меняем — пробрасываем дальше как было.
-            log.warning("[retain] chunk %d malformed JSON (%s), raw response:\n%s",
-                        chunk_index, e, raw)
-            raise
+            # Объект {"facts":...} нашёлся, но реально битый — ретраим (как и
+            # пустой ответ). Сырой ответ в лог, чтоб видеть дефект. После
+            # max_retries цикл вернёт [] (дроп).
+            log.warning("[retain] chunk %d malformed facts-JSON (%s), retrying (attempt %d). raw:\n%s",
+                        chunk_index, e, attempt + 1, raw)
+            continue
         facts, has_malformed = _parse_facts_from_json(data, effective_date, mentioned_at)
         raw_count = len(data.get("facts", []))
         if has_malformed and raw_count > 0 and len(facts) < raw_count * 0.8 and attempt < max_retries - 1:
