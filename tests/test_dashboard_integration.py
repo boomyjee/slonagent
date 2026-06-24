@@ -75,7 +75,7 @@ async def dash():
     WebTransportServer._tunnel_url = None
     WebTransportServer._tunnel_ready = None
     WebTransport._forks.clear()
-    WebTransport.start({"port": port, "password_hash": ""})
+    WebTransport.start({"port": port, "password_hash": "test"})  # непустой — иначе auth_middleware отдаёт 503
 
     sb = SandboxSkill()
     cs = ConfigSkill()
@@ -94,7 +94,7 @@ async def dash():
 
     base = f"http://127.0.0.1:{port}"
     # Wait for uvicorn to bind.
-    async with httpx.AsyncClient(timeout=5.0) as cl:
+    async with httpx.AsyncClient(timeout=5.0, cookies={"auth": "test"}) as cl:
         for _ in range(60):
             try:
                 r = await cl.get(f"{base}/dashtest/dashboard/web/__probe__")
@@ -125,7 +125,7 @@ async def dash():
 
 @pytest.fixture
 async def http_client(dash):
-    async with httpx.AsyncClient(timeout=30.0) as cl:
+    async with httpx.AsyncClient(timeout=30.0, cookies={"auth": "test"}) as cl:
         yield cl
 
 

@@ -88,7 +88,7 @@ async def dash():
     WebTransportServer._tunnel_url = None
     WebTransportServer._tunnel_ready = None
     WebTransport._forks.clear()
-    WebTransport.start({"port": port, "password_hash": ""})
+    WebTransport.start({"port": port, "password_hash": "test"})
 
     sb = SandboxSkill()
     cs = ConfigSkill()
@@ -111,7 +111,7 @@ async def dash():
     Agent._instances[(agent.id, "")] = agent
 
     base = f"http://127.0.0.1:{port}"
-    async with httpx.AsyncClient(timeout=5.0) as cl:
+    async with httpx.AsyncClient(timeout=5.0, cookies={"auth": "test"}) as cl:
         for _ in range(60):
             try:
                 r = await cl.get(f"{base}/rpctest/dashboard/web/__probe__")
@@ -253,7 +253,7 @@ class TestAgentRpc:
         WebTransportServer._secret_seed = None
         WebTransportServer._server = None
         WebTransport._forks.clear()
-        WebTransport.start({"port": port, "password_hash": ""})
+        WebTransport.start({"port": port, "password_hash": "test"})
 
         # Перерегистрируем агента (Agent._instances пережил рестарт сервера) +
         # синхронизируем RPC URL в контейнере (новый токен → новый URL).
@@ -261,7 +261,7 @@ class TestAgentRpc:
         Agent._instances[(agent.id, "")] = agent
         await sb._sync_rpc_url()
 
-        async with httpx.AsyncClient(timeout=5.0) as cl:
+        async with httpx.AsyncClient(timeout=5.0, cookies={"auth": "test"}) as cl:
             base = f"http://127.0.0.1:{port}"
             for _ in range(60):
                 try:

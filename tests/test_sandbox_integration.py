@@ -5,6 +5,7 @@ ro/rw bind-mounts, config changes, resolve_path.
     .venv\\Scripts\\python -m pytest tests/test_sandbox_integration.py -v -m integration
 """
 import asyncio
+import hashlib
 import os
 import socket
 import subprocess
@@ -69,9 +70,14 @@ def _free_port() -> int:
     return port
 
 
+_TEST_PASSWORD = "testpass"
+_TEST_PASSWORD_HASH = hashlib.sha256(_TEST_PASSWORD.encode()).hexdigest()
+
+
 async def _bring_up_server_for(agent) -> None:
     """Поднимает uvicorn и кладёт agent в Agent._instances — sandbox-скрипт
-    через /agent-rpc → Agent.get берёт его из реестра."""
+    через /agent-rpc → Agent.get берёт его из реестра. Пароль обязателен (даже
+    локально пустой password_hash отдаёт 503), поэтому проба ходит с Basic-auth."""
     port = _free_port()
     WebTransportServer._app = None
     WebTransportServer._tunnel_url = None
@@ -79,12 +85,12 @@ async def _bring_up_server_for(agent) -> None:
     WebTransportServer._token_to_agent = {}
     WebTransportServer._secret_seed = None
     WebTransport._forks.clear()
-    WebTransport.start({"port": port, "password_hash": ""})
+    WebTransport.start({"port": port, "password_hash": _TEST_PASSWORD_HASH})
 
     Agent._instances[(agent.id, "")] = agent
 
     base = f"http://127.0.0.1:{port}"
-    async with httpx.AsyncClient(timeout=5.0) as cl:
+    async with httpx.AsyncClient(timeout=5.0, auth=("test", _TEST_PASSWORD)) as cl:
         for _ in range(60):
             try:
                 r = await cl.get(f"{base}/_probe")
@@ -446,9 +452,11 @@ class TestResolvePath:
 
     async def test_workspace_subpath(self, sandbox):
         _, sb, _ = sandbox
-        # /workspace ветка не нормализует слэши — это историческое поведение,
-        # не баг (Windows API ест прямые слеши тоже).
-        assert sb.resolve_path("/workspace/foo/bar.txt") == os.path.join(sb.workspace_dir, "foo/bar.txt")
+        # /workspace ветка не нормализует слэши (историческое поведение, не баг —
+        # Windows API ест и прямые слеши). Сравниваем как пути, а не как строки:
+        # на Windows os.path.join даёт '\', resolve_path сохраняет '/' из ввода.
+        assert os.path.normpath(sb.resolve_path("/workspace/foo/bar.txt")) == \
+            os.path.normpath(os.path.join(sb.workspace_dir, "foo/bar.txt"))
 
     async def test_ro_path(self, sandbox, tmp_path):
         _, sb, cs = sandbox
