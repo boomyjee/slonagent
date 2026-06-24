@@ -36,8 +36,10 @@ class TestFactProviderThreadGrouping:
         # Один conversation-item на тред
         conv = [i for i in items if i.context == "conversation"]
         assert len(conv) == 1
-        assert "марсиане" in conv[0].content
-        assert "приготовь" in conv[0].content
+        # текст диалога лежит в chunks (content="" после рефактора b2c2a2d)
+        text = "".join(conv[0].chunks or [])
+        assert "марсиане" in text
+        assert "приготовь" in text
 
     def test_consolidate_groups_by_thread(self, tmp_path, monkeypatch):
         """_consolidate с микшированным pending передаёт в retain N conversation-items (по одному на тред)."""
@@ -63,6 +65,6 @@ class TestFactProviderThreadGrouping:
 
         conv_items = [i for i in captured if i.context == "conversation"]
         assert len(conv_items) == 2
-        joined = [i.content for i in conv_items]
+        joined = ["".join(i.chunks or []) for i in conv_items]  # текст в chunks, не content
         assert any("марсиане" in c and "лошадки" not in c for c in joined)
         assert any("лошадки" in c and "марсиане" not in c for c in joined)

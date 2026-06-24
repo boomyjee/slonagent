@@ -10,6 +10,7 @@ WS-канал к хосту глобально кэшируется (один н
 4. writeline при send-ошибке закрывает ws и проbрасывает исключение
 5. Полный цикл: канал умер, .wait() на pending бросает (не висит вечно)
 """
+import importlib.util
 import os
 import queue
 import sys
@@ -19,11 +20,26 @@ import time
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "src", "skills", "sandbox", "container_lib"))
 os.chdir(ROOT)
+_CL = os.path.join(ROOT, "src", "skills", "sandbox", "container_lib")
 
-import agent as agent_mod
+
+def _load_container(modname, fname):
+    """Грузит модуль container_lib по файлу под заданным именем — без правки
+    sys.path. Контейнерный agent кладём под уникальным именем (_container_agent),
+    чтобы не перетереть корневой sys.modules['agent']: иначе при полном прогоне
+    либо соседние тесты видят контейнерный agent, либо этот тест ловит
+    AttributeError на закешированном корневом. rpc — под бара-именем (корневого
+    rpc нет), нужен для ленивого `from rpc import ...` внутри контейнерного agent."""
+    spec = importlib.util.spec_from_file_location(modname, os.path.join(_CL, fname))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[modname] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_load_container("rpc", "rpc.py")
+agent_mod = _load_container("_container_agent", "agent.py")
 from rpc import Proxy
 
 
