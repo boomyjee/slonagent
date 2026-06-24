@@ -131,6 +131,8 @@ _FORBIDDEN_TOOLS_PROMPT_LINES_DEFAULT = (
     "- list_mcp_resources, list_mcp_resource_templates, read_mcp_resource "
     "(no MCP resources available)",
     "- multi_tool_use.parallel (call tools one at a time)",
+    "- any codex_apps tool (e.g. botmail / agent_email) — slonagent provides "
+    "its own skills; never use codex's built-in apps",
 )
 _APPLY_PATCH_FORBIDDEN_PROMPT_LINE = (
     "- apply_patch (file edits go through provided sandbox functions, not this)"
@@ -1039,6 +1041,14 @@ class CodexBackend(BaseBackend):
         "read_mcp_resource",
     })
 
+    def _is_forbidden_mcp(self, server: str, tool: str) -> bool:
+        """Глушим нативные MCP-resource тулы и весь codex_apps-неймспейс
+        (botmail/email и будущие codex-приложения): агент работает через скиллы
+        slonagent, встроенные codex-приложения отключаем по умолчанию."""
+        if tool in self._FORBIDDEN_MCP_TOOLS:
+            return True
+        return "codex_apps" in f"{server}__{tool}".lower()
+
     async def _handle_server_request(self, msg):
         method = msg["method"]
         rid = msg["id"]
@@ -1196,12 +1206,13 @@ class CodexBackend(BaseBackend):
                     "web_search", {"query": item.get("query", "")},
                 )
             elif t == "mcpToolCall":
+                server = item.get("server", "")
                 tool = item.get("tool", "")
-                if tool in self._FORBIDDEN_MCP_TOOLS:
-                    log.info("[codex] suppressing forbidden mcpToolCall start: %s", tool)
+                if self._is_forbidden_mcp(server, tool):
+                    log.info("[codex] suppressing forbidden mcpToolCall start: %s__%s", server, tool)
                     return
                 # Полное имя как codex его регистрирует — server__tool
-                name = f"{item.get('server')}__{tool}"
+                name = f"{server}__{tool}"
                 await self.agent.transport.on_tool_call(name, item.get("arguments") or {})
             return
 
@@ -1361,8 +1372,8 @@ class CodexBackend(BaseBackend):
                 call_id = item_id
                 server = item.get("server", "")
                 tool = item.get("tool", "")
-                if tool in self._FORBIDDEN_MCP_TOOLS:
-                    log.info("[codex] suppressing forbidden mcpToolCall completion: %s", tool)
+                if self._is_forbidden_mcp(server, tool):
+                    log.info("[codex] suppressing forbidden mcpToolCall completion: %s__%s", server, tool)
                     return
                 name = f"{server}__{tool}"
                 args = item.get("arguments") or {}

@@ -2911,6 +2911,9 @@ class TestCodexIntegration:
         # как "функции" но это не имена тулов: 'functions', 'tools', etc.
         meta_noise = {"functions", "function", "tools", "tool", "none", ""}
         unexpected -= meta_noise
+        # codex_apps-неймспейс (botmail/email и будущие codex-приложения) глушится
+        # целиком префиксом в CodexBackend._is_forbidden_mcp — не считаем их новыми.
+        unexpected = {n for n in unexpected if "codex_apps" not in n}
         # Один тест — одна попытка, модель иногда фантазирует имена. Если
         # тест начнёт падать при обновлении codex — стоит вручную проверить
         # `codex features list` + источники spec_plan.rs и обновить
