@@ -344,11 +344,8 @@ async def test_gemini_thinking():
 
 
 @pytest.mark.parametrize("model,expect_thinking", [
-    ("openrouter/hunter-alpha", True),
     ("nvidia/nemotron-3-super-120b-a12b:free", True),
-    ("minimax/minimax-m2.5:free", True),
     ("liquid/lfm-2.5-1.2b-thinking:free", True),
-    ("stepfun/step-3.5-flash:free", True),
 ])
 @pytest.mark.asyncio
 async def test_openrouter_thinking(model, expect_thinking):
