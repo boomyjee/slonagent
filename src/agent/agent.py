@@ -407,7 +407,6 @@ class Agent:
 
     async def transcribe_audio(self, data: bytes | str, mime_type: str, silent: bool = False) -> str:
         if isinstance(data, str):
-            import base64
             data = base64.b64decode(data)
         fmt = mime_type.split("/")[-1]
         if self.transcription_whisper:
