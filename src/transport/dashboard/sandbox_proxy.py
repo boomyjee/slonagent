@@ -14,7 +14,7 @@ websocket handshake) is paid only once.
 import asyncio, base64, itertools, json, logging, secrets, shlex, subprocess
 
 from fastapi import Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +28,8 @@ class SandboxProxy:
         self.tunnel: WebSocket | None = None
         self.tunnel_ready = asyncio.Event()
         self._ids = itertools.count(1)
-        self._pending_http: dict[int, asyncio.Future] = {}
+        self._pending_http: dict[int, asyncio.Future] = {}   # CGI: one-shot future
+        self._http_queues: dict[int, asyncio.Queue] = {}     # HTTP-порт: стрим кадрами
         self._ws_sessions: dict[int, asyncio.Queue] = {}
         self._start_lock = asyncio.Lock()
         # Секрет control-канала: воркер коннектится из контейнера без cookie,
@@ -61,16 +62,23 @@ class SandboxProxy:
                 if not fut.done():
                     fut.set_exception(RuntimeError("tunnel closed"))
             self._pending_http.clear()
+            for q in self._http_queues.values():
+                q.put_nowait(None)
+            self._http_queues.clear()
             for q in self._ws_sessions.values():
                 q.put_nowait(None)
             self._ws_sessions.clear()
 
     def _route_from_worker(self, frame):
         kind, id_ = frame["kind"], frame["id"]
-        if kind in ("resp", "cgi_resp"):
+        if kind == "cgi_resp":
             fut = self._pending_http.pop(id_, None)
             if fut and not fut.done():
                 fut.set_result(frame)
+        elif kind in ("resp_start", "resp_chunk", "resp_end"):
+            q = self._http_queues.get(id_)
+            if q:
+                q.put_nowait(frame)
         elif kind in ("ws_opened", "ws_fail", "ws_s2c", "ws_closed"):
             q = self._ws_sessions.get(id_)
             if q:
@@ -114,8 +122,8 @@ class SandboxProxy:
         if not await self._ensure_tunnel():
             return Response("sandbox proxy unavailable", status_code=502)
         id_ = next(self._ids)
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_http[id_] = fut
+        q: asyncio.Queue = asyncio.Queue()
+        self._http_queues[id_] = q
         body = await request.body()
         path = "/" + filepath + (f"?{request.url.query}" if request.url.query else "")
         headers = {k.decode(): v.decode() for k, v in request.headers.raw if k.lower() != b"host"}
@@ -125,20 +133,31 @@ class SandboxProxy:
             "body_b64": base64.b64encode(body).decode(),
         })
         try:
-            frame = await asyncio.wait_for(fut, timeout=self.HTTP_TIMEOUT)
+            first = await asyncio.wait_for(q.get(), timeout=self.HTTP_TIMEOUT)
         except asyncio.TimeoutError:
-            self._pending_http.pop(id_, None)
+            self._http_queues.pop(id_, None)
             return Response("proxy timeout", status_code=504)
-        except Exception as e:
-            return Response(f"proxy error: {e}", status_code=502)
-        # Drop hop-by-hop headers so FastAPI/uvicorn sets them correctly.
-        skip = {"transfer-encoding", "content-encoding", "content-length", "connection"}
-        resp_headers = {k: v for k, v in (frame.get("headers") or {}).items() if k.lower() not in skip}
-        return Response(
-            content=base64.b64decode(frame.get("body_b64") or ""),
-            status_code=frame.get("status", 502),
-            headers=resp_headers,
-        )
+        if first is None or first.get("kind") != "resp_start":
+            self._http_queues.pop(id_, None)
+            return Response("proxy error", status_code=502)
+        # transfer-encoding/content-encoding/connection — hop-by-hop, выставит uvicorn.
+        # content-length/accept-ranges/content-range пробрасываем (нужны для seek аудио).
+        skip = {"transfer-encoding", "content-encoding", "connection"}
+        resp_headers = {k: v for k, v in (first.get("headers") or {}).items() if k.lower() not in skip}
+        status = first.get("status", 502)
+
+        async def gen():
+            try:
+                while True:
+                    f = await asyncio.wait_for(q.get(), timeout=self.HTTP_TIMEOUT)
+                    if f is None or f.get("kind") == "resp_end":
+                        break
+                    if f.get("kind") == "resp_chunk":
+                        yield base64.b64decode(f.get("body_b64") or "")
+            finally:
+                self._http_queues.pop(id_, None)
+
+        return StreamingResponse(gen(), status_code=status, headers=resp_headers)
 
     async def handle_ws(self, port: int, filepath: str, ws: WebSocket):
         await ws.accept()

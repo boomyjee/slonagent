@@ -13,7 +13,7 @@ host -> worker:
     {id, kind:"ws_close"}
     {id, kind:"cgi",      path, method, query, headers, cookies, body_b64}
 worker -> host:
-    {id, kind:"resp",      status, headers, body_b64}
+    {id, kind:"resp_start", status, headers} -> {id, kind:"resp_chunk", body_b64}* -> {id, kind:"resp_end"}
     {id, kind:"ws_opened"} | {id, kind:"ws_fail", reason}
     {id, kind:"ws_s2c",    data_b64, binary}
     {id, kind:"ws_closed"}
@@ -90,26 +90,42 @@ async def handle_cgi(tunnel, frame):
 
 
 async def handle_http(tunnel, frame):
+    """Стримим ответ кадрами resp_start -> resp_chunk* -> resp_end, не копим тело
+    целиком (иначе большой файл = одна большая задержка). Чтение sync-сокета — в thread."""
     id_, port = frame["id"], frame["port"]
     body = base64.b64decode(frame.get("body_b64") or "")
     headers = {k: v for k, v in (frame.get("headers") or {}).items() if k.lower() != "host"}
 
-    def _do():
+    def _connect():
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
         conn.request(frame["method"], frame["path"], body, headers)
         resp = conn.getresponse()
-        return resp.status, dict(resp.getheaders()), resp.read()
+        return conn, resp
 
     try:
-        status, resp_headers, data = await asyncio.to_thread(_do)
+        conn, resp = await asyncio.to_thread(_connect)
     except Exception as e:
-        status, resp_headers, data = 502, {"content-type": "text/plain; charset=utf-8"}, f"proxy error: {e}".encode()
+        await tunnel.send(json.dumps({"id": id_, "kind": "resp_start", "status": 502,
+                                      "headers": {"content-type": "text/plain; charset=utf-8"}}))
+        await tunnel.send(json.dumps({"id": id_, "kind": "resp_chunk",
+                                      "body_b64": base64.b64encode(f"proxy error: {e}".encode()).decode()}))
+        await tunnel.send(json.dumps({"id": id_, "kind": "resp_end"}))
+        return
 
-    await tunnel.send(json.dumps({
-        "id": id_, "kind": "resp",
-        "status": status, "headers": resp_headers,
-        "body_b64": base64.b64encode(data).decode(),
-    }))
+    await tunnel.send(json.dumps({"id": id_, "kind": "resp_start",
+                                  "status": resp.status, "headers": dict(resp.getheaders())}))
+    try:
+        while True:
+            chunk = await asyncio.to_thread(resp.read, 65536)
+            if not chunk:
+                break
+            await tunnel.send(json.dumps({"id": id_, "kind": "resp_chunk",
+                                          "body_b64": base64.b64encode(chunk).decode()}))
+    except Exception:
+        pass
+    finally:
+        await asyncio.to_thread(conn.close)
+        await tunnel.send(json.dumps({"id": id_, "kind": "resp_end"}))
 
 
 class WSSession:
