@@ -96,6 +96,93 @@ class TestStateFile:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# _sync_claude_session — выравнивание памяти и claude jsonl
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSyncDesync:
+    """_sync_claude_session сравнивает UUID-ы памяти с claude jsonl в ФАЙЛОВОМ
+    порядке (память пишет turn'ы в порядке стрима SDK, claude кладёт их в jsonl
+    тем же порядком). По timestamp сортировать нельзя: у tool_result timestamp —
+    время завершения, и долгий тул рядом с мгновенным фейлом даёт обратный
+    порядок относительно памяти → ложный desync."""
+
+    @staticmethod
+    def _write_jsonl(backend, sid: str, entries: list[dict]) -> str:
+        import re
+        cwd = backend._cwd or os.getcwd()
+        sanitized = re.sub(r'[^a-zA-Z0-9]', '-', cwd)
+        proj_dir = os.path.join(os.path.expanduser("~"), ".claude", "projects", sanitized)
+        os.makedirs(proj_dir, exist_ok=True)
+        path = os.path.join(proj_dir, f"{sid}.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+        return path
+
+    @staticmethod
+    def _result_entry(uuid: str, tool_use_id: str, ts: str) -> dict:
+        return {"type": "user", "uuid": uuid, "timestamp": ts, "message": {
+            "role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id}]}}
+
+    @pytest.mark.asyncio
+    async def test_parallel_result_cluster_reordered_no_desync(self):
+        """Кейс из прода + 03543ee: два параллельных тула. sandbox_exec завис на
+        120с (timestamp позже), WebSearch упал мгновенно. Память: tool_call'ы A,B,
+        потом результаты C (sandbox), D (websearch). А в jsonl claude положил
+        кластер результатов в ОБРАТНОМ порядке (D, потом C) — и по флашу, и по
+        времени. Порядок параллельных результатов не определён → не desync."""
+        agent = make_agent()
+        backend = agent.backend_impl
+        sid = "sess-parallel"
+        agent.memory._turns[:] = [
+            {"role": "assistant", "tool_calls": [{"id": "t_sb"}], "_uuid": "A"},
+            {"role": "assistant", "tool_calls": [{"id": "t_ws"}], "_uuid": "B"},
+            {"role": "tool", "tool_call_id": "t_sb", "_uuid": "C"},  # sandbox result
+            {"role": "tool", "tool_call_id": "t_ws", "_uuid": "D"},  # websearch result
+        ]
+        jsonl = self._write_jsonl(backend, sid, [
+            {"type": "assistant", "uuid": "A", "timestamp": "2026-06-27T09:21:00.000Z"},
+            {"type": "assistant", "uuid": "B", "timestamp": "2026-06-27T09:21:01.000Z"},
+            self._result_entry("D", "t_ws", "2026-06-27T09:21:02.000Z"),  # websearch первым
+            self._result_entry("C", "t_sb", "2026-06-27T09:23:00.000Z"),  # sandbox позже
+        ])
+        agent.transport.send_memory_info = AsyncMock()
+        try:
+            pruned = await backend._sync_claude_session(sid)
+        finally:
+            os.remove(jsonl)
+
+        assert pruned == 0
+        agent.transport.send_memory_info.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_genuine_reorder_triggers_desync(self):
+        """Реальная перестановка: память [A, B], а в jsonl они в обратном
+        файловом порядке [B, A]. Это не объясняется параллельным кластером —
+        строгое сравнение должно поймать desync."""
+        agent = make_agent()
+        backend = agent.backend_impl
+        sid = "sess-reorder"
+        agent.memory._turns[:] = [
+            {"role": "assistant", "content": "x", "_uuid": "A"},
+            {"role": "assistant", "content": "y", "_uuid": "B"},
+        ]
+        jsonl = self._write_jsonl(backend, sid, [
+            {"uuid": "B", "timestamp": "2026-06-27T09:21:00.000Z"},
+            {"uuid": "A", "timestamp": "2026-06-27T09:21:01.000Z"},
+        ])
+        agent.transport.send_memory_info = AsyncMock()
+        try:
+            await backend._sync_claude_session(sid)
+        finally:
+            os.remove(jsonl)
+
+        agent.transport.send_memory_info.assert_called_once()
+        reason = agent.transport.send_memory_info.call_args.args[0]
+        assert "synced-позиции" in reason
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Ephemeral session cleanup
 # ═══════════════════════════════════════════════════════════════════════════════
 

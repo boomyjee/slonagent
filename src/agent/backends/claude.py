@@ -173,14 +173,34 @@ class ClaudeBackend(BaseBackend):
         path = os.path.join(os.path.expanduser("~"), ".claude", "projects", sanitized, f"{session_id}.jsonl")
         return path if os.path.isfile(path) else None
 
+    @staticmethod
+    def _canon_order(uuids: list[str], result_uuids: set[str]) -> list[str]:
+        """Канонизирует порядок: внутри каждого максимального подряд идущего прогона
+        tool_result'ов UUID-ы сортируются. Порядок параллельных tool_result'ов не
+        определён (claude отдаёт и флашит их в файл в произвольном порядке), поэтому
+        обе стороны приводим к одному виду — иначе строгое сравнение даёт ложный
+        desync. Не-результаты (tool_use, текст, user-сообщения) остаются на месте:
+        их перестановка — реальный рассинхрон."""
+        out: list[str] = []
+        run: list[str] = []
+        for u in uuids:
+            if u in result_uuids:
+                run.append(u)
+            else:
+                out.extend(sorted(run)); run.clear()
+                out.append(u)
+        out.extend(sorted(run))
+        return out
+
     async def _sync_claude_session(self, session_id: str) -> int:
         """Синкает Claude jsonl с нашей памятью. Возвращает кол-во удалённых строк.
 
         Легитимных состояний всего два:
           - Наша память пуста (one-shot start) — ничего не делаем.
           - UUID-ы нашей памяти, которые есть в Claude jsonl, идут там тем же порядком
-            подряд до конца jsonl. Перед ними у Claude могут быть старые extras
-            (которые мы уже выкинули) — если их >20, режем.
+            до конца jsonl — с точностью до перестановки внутри кластера параллельных
+            tool_result'ов (их порядок не определён, см. _canon_order). Перед ними у
+            Claude могут быть старые extras (которые мы уже выкинули) — если их >20, режем.
 
         UUID-ы нашей памяти, которых НЕТ в Claude jsonl, считаем nested-sub-agent
         activity (например, Claude Code Agent-tool эмитит вложенные turn'ы — мы их
@@ -207,25 +227,42 @@ class ClaudeBackend(BaseBackend):
         with open(jsonl_path, encoding="utf-8") as f:
             lines = f.readlines()
 
-        # Все uuid-bearing entries из jsonl, любого type (user/assistant/system/...).
-        # /context-команда и подобное приходит как type="system" с uuid — раньше мы
-        # их фильтровали и получали false-positive desync.
-        # Сортируем по timestamp: claude флашит near-simultaneous tool-записи
-        # (параллельные вызовы) в jsonl не в хронологическом порядке, а наша память
-        # — в хронологическом. Без сортировки кластер tool_use/tool_result даёт
-        # ложный desync на переставленных позициях. line_idx — вторичный ключ для
-        # стабильности и сохраняется для line-based pruning ниже.
-        _claude_raw: list[tuple[str, int, str]] = []  # (timestamp, line_idx, uuid)
+        # Все uuid-bearing entries из jsonl в порядке файла, любого type
+        # (user/assistant/system/...). /context-команда и подобное приходит как
+        # type="system" с uuid — раньше мы их фильтровали и получали false-positive.
+        #
+        # Порядок — строго файловый, без сортировки по timestamp. У tool_result
+        # timestamp — это время ЗАВЕРШЕНИЯ: долгий тул (sandbox_exec с таймаутом
+        # 120с) рядом с мгновенным фейлом получает timestamp на минуты позже, хотя
+        # запрошен раньше — сортировка по нему переставила бы пару относительно
+        # памяти и дала ложный desync. Сам порядок параллельных tool_result'ов не
+        # определён: claude и стримит, и флашит их в файл в произвольном порядке.
+        # Поэтому ниже сравниваем кластеры результатов как множество (_canon_order),
+        # а не как последовательность.
+        claude_seq: list[tuple[int, str]] = []  # (line_idx, uuid)
+        claude_result_uuids: set[str] = set()
         for i, line in enumerate(lines):
             try: entry = json.loads(line)
             except json.JSONDecodeError: continue
             uid = entry.get("uuid")
-            if uid: _claude_raw.append((entry.get("timestamp", ""), i, uid))
-        _claude_raw.sort(key=lambda x: (x[0], x[1]))
-        claude_seq: list[tuple[int, str]] = [(i, uid) for _, i, uid in _claude_raw]
+            if not uid: continue
+            claude_seq.append((i, uid))
+            if entry.get("type") == "user":
+                content = (entry.get("message") or {}).get("content")
+                if isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+                ):
+                    claude_result_uuids.add(uid)
 
         claude_uuids_set = {u for _, u in claude_seq}
         our_uuids_set = set(our_uuids_all)
+        # UUID-ы tool_result'ов — порядок внутри их кластера не значим. Берём с обеих
+        # сторон (role=="tool" в памяти, блок tool_result в jsonl); классификации
+        # совпадают, объединение — на случай если одна сторона чего-то не распознала.
+        result_uuids = claude_result_uuids | {
+            t["_uuid"] for t in self.agent.memory._turns
+            if isinstance(t, dict) and t.get("role") == "tool" and t.get("_uuid")
+        }
 
         # Сводим обе стороны к пересечению UUID-ов:
         #   our_synced   — UUID-ы нашей памяти, известные Claude (в нашем порядке).
@@ -246,11 +283,15 @@ class ClaudeBackend(BaseBackend):
             )
             return 0
 
-        for i in range(min(len(our_synced), len(claude_synced))):
-            if our_synced[i] != claude_synced[i]:
+        # Канонизируем порядок внутри кластеров tool_result'ов (см. _canon_order),
+        # чтобы их недетерминированная перестановка не считалась рассинхроном.
+        our_canon = self._canon_order(our_synced, result_uuids)
+        claude_canon = self._canon_order(claude_synced, result_uuids)
+        for i in range(min(len(our_canon), len(claude_canon))):
+            if our_canon[i] != claude_canon[i]:
                 await self._notify_desync(
                     f"расхождение UUID на synced-позиции {i}: "
-                    f"наш={our_synced[i][:8]}, claude={claude_synced[i][:8]}",
+                    f"наш={our_canon[i][:8]}, claude={claude_canon[i][:8]}",
                 )
                 return 0
 
@@ -265,9 +306,8 @@ class ClaudeBackend(BaseBackend):
 
         # Норма: our_synced == claude_synced. Режем старые extras Claude-jsonl
         # ПЕРЕД первым общим UUID — это турны, которые мы давно выкинули из памяти.
-        # min по line_idx, а не [0] — claude_synced_seq теперь в timestamp-порядке,
-        # а pruning режет по позиции строки в файле (нужна самая ранняя строка).
-        first_match_line = min(idx for idx, _ in claude_synced_seq)
+        # claude_synced_seq в файловом порядке, так что первый общий UUID — [0].
+        first_match_line = claude_synced_seq[0][0]
         # Считаем uuid-bearing entries до first_match_line, чьи UUID-ы НЕ в нашей
         # памяти (значит реально устаревшие, а не текущие user-сообщения посередине).
         pre_count = sum(

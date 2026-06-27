@@ -113,6 +113,21 @@ def load_claude_uuids(jsonl_path: str) -> list[tuple[int, str]]:
     return seq
 
 
+def canon_order(uuids: list[str], result_uuids: set[str]) -> list[str]:
+    """Канонизирует порядок: внутри максимального прогона tool_result'ов UUID-ы
+    сортируются (их порядок не определён). Зеркало ClaudeBackend._canon_order."""
+    out: list[str] = []
+    run: list[str] = []
+    for u in uuids:
+        if u in result_uuids:
+            run.append(u)
+        else:
+            out.extend(sorted(run)); run.clear()
+            out.append(u)
+    out.extend(sorted(run))
+    return out
+
+
 def check_session(memory_dir: str, claude_state_path: str) -> dict:
     """Возвращает {status, detail, ...stats} для одной сессии."""
     fname = os.path.basename(claude_state_path)
@@ -148,18 +163,28 @@ def check_session(memory_dir: str, claude_state_path: str) -> dict:
     claude_entries = load_claude_entries(jsonl_path)
     # Все uuid-bearing entries, любого type (user/assistant/system/...)
     claude_seq = []  # (entry_idx, uuid)
+    claude_result_uuids = set()
     for idx, entry in enumerate(claude_entries):
         uid = entry.get("uuid")
-        if uid:
-            claude_seq.append((idx, uid))
+        if not uid:
+            continue
+        claude_seq.append((idx, uid))
+        if entry.get("type") == "user":
+            content = (entry.get("message") or {}).get("content")
+            if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            ):
+                claude_result_uuids.add(uid)
     info["claude_turns"] = len(claude_seq)
 
     claude_uuids_set = {u for _, u in claude_seq}
     our_uuids_set = set(our_uuids)
+    result_uuids = claude_result_uuids | {
+        t["_uuid"] for t in our_turns if t.get("role") == "tool" and t.get("_uuid")
+    }
 
     our_synced = [u for u in our_uuids if u in claude_uuids_set]
-    claude_synced_seq = [(idx, u) for idx, u in claude_seq if u in our_uuids_set]
-    claude_synced = [u for _, u in claude_synced_seq]
+    claude_synced = [u for _, u in claude_seq if u in our_uuids_set]
     info["nested_only"] = len(our_uuids) - len(our_synced)
 
     if not our_synced:
@@ -168,26 +193,31 @@ def check_session(memory_dir: str, claude_state_path: str) -> dict:
         )
         return info
 
+    # Сравниваем с канонизированным порядком кластеров tool_result'ов (их порядок
+    # не определён). Маппинг для summary — по UUID, а не по позиции.
     uuid_to_our_idx = {t["_uuid"]: i for i, t in enumerate(our_turns)}
+    uuid_to_claude_entry = {u: claude_entries[idx] for idx, u in claude_seq}
+    our_canon = canon_order(our_synced, result_uuids)
+    claude_canon = canon_order(claude_synced, result_uuids)
 
-    for i in range(min(len(our_synced), len(claude_synced))):
-        if our_synced[i] != claude_synced[i]:
+    for i in range(min(len(our_canon), len(claude_canon))):
+        if our_canon[i] != claude_canon[i]:
             info["status"] = (
                 f"DESYNC: UUID mismatch at synced position {i} "
-                f"(ours={our_synced[i][:8]}, claude={claude_synced[i][:8]})"
+                f"(ours={our_canon[i][:8]}, claude={claude_canon[i][:8]})"
             )
             ctx_start = max(0, i - 3)
-            ctx_end = min(len(our_synced), len(claude_synced), i + 6)
+            ctx_end = min(len(our_canon), len(claude_canon), i + 6)
             info["mismatch_context"] = []
             for j in range(ctx_start, ctx_end):
                 marker = " <-- mismatch" if j == i else ""
                 info["mismatch_context"].append(
-                    f"    [{j:3}] ours={our_synced[j][:8]} | claude={claude_synced[j][:8]}{marker}"
+                    f"    [{j:3}] ours={our_canon[j][:8]} | claude={claude_canon[j][:8]}{marker}"
                 )
-            info["mismatch_full_ours"] = our_synced[i]
-            info["mismatch_full_claude"] = claude_synced[i]
-            our_turn = our_turns[uuid_to_our_idx[our_synced[i]]]
-            claude_entry = claude_entries[claude_synced_seq[i][0]]
+            info["mismatch_full_ours"] = our_canon[i]
+            info["mismatch_full_claude"] = claude_canon[i]
+            our_turn = our_turns[uuid_to_our_idx[our_canon[i]]]
+            claude_entry = uuid_to_claude_entry[claude_canon[i]]
             info["mismatch_ours_summary"] = turn_summary(our_turn, "ours")
             info["mismatch_claude_summary"] = turn_summary(claude_entry, "claude")
             return info
@@ -198,7 +228,7 @@ def check_session(memory_dir: str, claude_state_path: str) -> dict:
         info["status"] = f"DESYNC: {ahead} ahead by {diff} synced turns"
         return info
 
-    first_match_line = claude_synced_seq[0][0]
+    first_match_line = next(idx for idx, u in claude_seq if u in our_uuids_set)
     pre_count = sum(
         1 for idx, u in claude_seq
         if idx < first_match_line and u not in our_uuids_set
