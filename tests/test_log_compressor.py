@@ -308,18 +308,23 @@ class TestLogCompressorConsolidate:
         c.register(agent)
         return c
 
-    def _mock_llm(self, c, response_text: str):
+    def _mock_llm(self, c, response_text: str, monkeypatch):
+        # _generate создаёт эфемерного Agent на каждый вызов (как FactProvider) —
+        # патчим конструктор в модуле, сохраняя настоящий classmethod turn_text.
+        from src.memory.compressors import log as logmod
         fake = MagicMock()
-        fake.memory.clear = MagicMock()
         fake.memory.add_turn = AsyncMock()
         fake.llm = AsyncMock(return_value={"role": "assistant", "content": response_text})
-        c._llm_agent = fake
+        fake.close = AsyncMock()
+        agent_cls = MagicMock(return_value=fake)
+        agent_cls.turn_text = logmod.Agent.turn_text
+        monkeypatch.setattr(logmod, "Agent", agent_cls)
         return fake
 
     @pytest.mark.asyncio
-    async def test_observer_empty_does_nothing(self, tmp_path):
+    async def test_observer_empty_does_nothing(self, tmp_path, monkeypatch):
         c = self._make_compressor(tmp_path)
-        self._mock_llm(c, "")
+        self._mock_llm(c, "", monkeypatch)
         turns = make_turns(4, chars=200)
         for i, t in enumerate(turns):
             t["_timestamp"] = f"2025-01-01T00:00:0{i}"
@@ -332,9 +337,9 @@ class TestLogCompressorConsolidate:
         assert all(t.get("_observed") for t in c.agent.memory._turns)
 
     @pytest.mark.asyncio
-    async def test_observer_writes_log_and_marks_observed(self, tmp_path):
+    async def test_observer_writes_log_and_marks_observed(self, tmp_path, monkeypatch):
         c = self._make_compressor(tmp_path)
-        self._mock_llm(c, "<observations>\n* 🔴 hello\n</observations>")
+        self._mock_llm(c, "<observations>\n* 🔴 hello\n</observations>", monkeypatch)
         turns = make_turns(4, chars=200)
         for i, t in enumerate(turns):
             t["_timestamp"] = f"2025-01-01T00:00:0{i}"
@@ -346,9 +351,9 @@ class TestLogCompressorConsolidate:
         assert "hello" in log_content
 
     @pytest.mark.asyncio
-    async def test_thread_grouping_wraps_each(self, tmp_path):
+    async def test_thread_grouping_wraps_each(self, tmp_path, monkeypatch):
         c = self._make_compressor(tmp_path)
-        self._mock_llm(c, "<observations>\n* 🔴 obs\n</observations>")
+        self._mock_llm(c, "<observations>\n* 🔴 obs\n</observations>", monkeypatch)
         turns = [
             {"role": "user", "content": "a", "_thread_id": "t1"},
             {"role": "assistant", "content": "b", "_thread_id": "t1"},
@@ -361,7 +366,7 @@ class TestLogCompressorConsolidate:
         assert '<thread id="t2">' in log_content
 
     @pytest.mark.asyncio
-    async def test_reflector_triggered_when_obs_exceed_threshold(self, tmp_path):
+    async def test_reflector_triggered_when_obs_exceed_threshold(self, tmp_path, monkeypatch):
         c = self._make_compressor(tmp_path, reflect_after=50)
         big_obs = "<observations>\n* 🔴 (10:00) " + "x" * 400 + "\n</observations>"
         small_reflected = "<observations>\n* 🔴 (10:00) condensed\n</observations>"
@@ -372,7 +377,7 @@ class TestLogCompressorConsolidate:
             call_count += 1
             return {"role": "assistant", "content": big_obs if call_count == 1 else small_reflected}
 
-        fake = self._mock_llm(c, "")
+        fake = self._mock_llm(c, "", monkeypatch)
         fake.llm = AsyncMock(side_effect=side_effect)
         await c._consolidate(make_turns(4, chars=200))
 
@@ -380,7 +385,7 @@ class TestLogCompressorConsolidate:
         assert "condensed" in c._read_log()
 
     @pytest.mark.asyncio
-    async def test_reflector_escalates_compression_level(self, tmp_path):
+    async def test_reflector_escalates_compression_level(self, tmp_path, monkeypatch):
         c = self._make_compressor(tmp_path, reflect_after=1)
         big_obs = "* 🔴 (10:00) " + "x" * 400
         obs_response = f"<observations>\n{big_obs}\n</observations>"
@@ -391,7 +396,7 @@ class TestLogCompressorConsolidate:
             call_count += 1
             return {"role": "assistant", "content": obs_response}
 
-        fake = self._mock_llm(c, "")
+        fake = self._mock_llm(c, "", monkeypatch)
         fake.llm = AsyncMock(side_effect=side_effect)
         await c._consolidate(make_turns(4, chars=200))
 
@@ -470,11 +475,8 @@ class TestLogCompressorIntegrationClaude:
         )
         c.register(make_agent(tmp_path))
 
-        try:
-            await c._consolidate(list(_REAL_DIALOG))
-        finally:
-            if hasattr(c, "_llm_agent"):
-                await c._llm_agent.close()
+        # _generate сам закрывает свои эфемерные суб-агенты в finally.
+        await c._consolidate(list(_REAL_DIALOG))
 
         log = c._read_log()
         assert log, "LOG.md пустой"

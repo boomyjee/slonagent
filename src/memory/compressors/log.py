@@ -818,21 +818,21 @@ class LogCompressor(BaseProvider):
             log.warning("[LogCompressor] write LOG.md failed: %s", e, exc_info=True)
 
     async def _generate(self, label: str, system: str, user_prompt: str, **kwargs) -> str:
-        if not hasattr(self, "_llm_agent"):
-            self._llm_agent = Agent(
-                id="",
-                model_name=self._model_name,
-                api_key=self._api_key,
-                base_url=self._base_url,
-                backend=self._backend,
-                backend_params=self._backend_params,
-            )
-
-        self._llm_agent.memory.clear()
-        await self._llm_agent.memory.add_turn({"role": "user", "content": user_prompt})
-
+        # Эфемерный агент на каждый вызов (как FactProvider._make_sub_agent): вызовы
+        # stateless, переиспользовать агента нельзя — claude-бэкенд резюмил бы одну
+        # сессию и копил весь прошлый контекст до "Prompt is too long" (memory.clear()
+        # чистит только нашу память, не claude-сессию). Сессию подчищает __del__/GC.
+        sub = Agent(
+            id="",
+            model_name=self._model_name,
+            api_key=self._api_key,
+            base_url=self._base_url,
+            backend=self._backend,
+            backend_params=self._backend_params,
+        )
         try:
-            turn = await self._llm_agent.llm(
+            await sub.memory.add_turn({"role": "user", "content": user_prompt})
+            turn = await sub.llm(
                 temperature=kwargs.get("temperature", 1.0),
                 max_tokens=kwargs.get("max_tokens"),
                 system_prompt=system,
@@ -840,6 +840,8 @@ class LogCompressor(BaseProvider):
         except Exception as e:
             log.error("[LogCompressor] %s LLM failed: %s", label, e, exc_info=True)
             return ""
+        finally:
+            await sub.close()
         return Agent.turn_text(turn)
 
     async def _run_observer(self, turns: list, existing_observations: str) -> str:
@@ -921,7 +923,13 @@ class LogCompressor(BaseProvider):
             "Observer", OBSERVER_SYSTEM_PROMPT, user_prompt,
             temperature=0.3, max_tokens=100_000,
         )
-        return _parse_observations(response)
+        observations = _parse_observations(response)
+        # Ответ есть, но <observations> в нём нет — обычно это маскированная ошибка
+        # модели (напр. синтетический "Prompt is too long" при переполнении сессии),
+        # которая иначе тихо превращается в «Observer вернул пусто». Логируем причину.
+        if response and not observations:
+            log.warning("[LogCompressor] Observer response has no <observations>: %r", response[:500])
+        return observations
 
     async def _run_reflector(self, observations: str, compression_level: int = 0) -> str:
         await self.send_memory_info(f"Сжимаю наблюдения (уровень {compression_level})…")

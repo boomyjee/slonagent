@@ -156,6 +156,23 @@ class TestSyncDesync:
         agent.transport.send_memory_info.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_empty_memory_is_noop(self):
+        """Пустая память — one-shot start: синк ничего не делает (для эфемерных
+        агентов сессию подчищает __del__/GC, а не синк)."""
+        agent = make_agent()
+        backend = agent.backend_impl
+        agent.memory._turns[:] = []
+        sid = "sess-oneshot"
+        jsonl = self._write_jsonl(backend, sid, [
+            {"type": "user", "uuid": "x", "timestamp": "2026-06-27T09:00:00.000Z"},
+        ])
+        try:
+            pruned = await backend._sync_claude_session(sid)
+        finally:
+            os.remove(jsonl)
+        assert pruned == 0
+
+    @pytest.mark.asyncio
     async def test_genuine_reorder_triggers_desync(self):
         """Реальная перестановка: память [A, B], а в jsonl они в обратном
         файловом порядке [B, A]. Это не объясняется параллельным кластером —
