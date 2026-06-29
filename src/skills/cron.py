@@ -71,12 +71,15 @@ class CronSkill(Skill):
                 text = f"⏰ Cron task [{task['id']}]: {task['message']}"
                 try:
                     await agent.transport.inject_message(text)
+                except Exception as e:
+                    log.warning("[cron] inject failed for %s (continuing): %s", task.get("id"), e)
+                try:
                     await agent.transport.process_message(
                         content_parts=[{"type": "text", "text": text}],
                         user_message_id=f"{task['id']}_{int(now.timestamp())}",
                     )
                 except Exception as e:
-                    log.warning("[cron] dispatch failed for %s: %s", task.get("id"), e, exc_info=True)
+                    log.warning("[cron] process failed for %s: %s", task.get("id"), e, exc_info=True)
                 next_run = cls._next_run(task["scheduled_at"], task.get("repeat", "once"))
                 if next_run:
                     task["scheduled_at"] = next_run

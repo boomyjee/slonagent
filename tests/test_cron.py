@@ -180,6 +180,24 @@ class TestCronTick:
         assert "fire me" in injected[0]
 
     @pytest.mark.asyncio
+    async def test_inject_failure_does_not_block_processing(self, tmp_path, monkeypatch):
+        """echo в каналы — best-effort: если inject_message падает (один из каналов
+        лёг), задача всё равно должна уйти на обработку."""
+        cron = make_cron(tmp_path)
+        cron.agent.transport = MagicMock()
+        cron.agent.transport.inject_message = AsyncMock(side_effect=RuntimeError("channel down"))
+        cron.agent.transport.process_message = AsyncMock()
+        _wire_global_loop(monkeypatch, tmp_path, cron.agent)
+
+        past = (datetime.now() - timedelta(minutes=5)).isoformat()
+        await cron.schedule_task("fire anyway", past, "once")
+        await CronSkill._tick()
+
+        cron.agent.transport.process_message.assert_called_once()
+        assert "fire anyway" in cron.agent.transport.process_message.call_args.kwargs[
+            "content_parts"][0]["text"]
+
+    @pytest.mark.asyncio
     async def test_future_task_does_not_fire(self, tmp_path, monkeypatch):
         cron = make_cron(tmp_path)
         cron.agent.transport = MagicMock()
