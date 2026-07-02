@@ -496,7 +496,7 @@ class ClaudeBackend(BaseBackend):
                 "model": agent.model_name,
                 "include_partial_messages": True,
                 "system_prompt": None,
-                "setting_sources": None,
+                "setting_sources": [],
                 "settings": '{"attribution":{"commit":""}}',
                 "tools": [],
                 "max_turns": agent.max_iterations,
@@ -519,10 +519,14 @@ class ClaudeBackend(BaseBackend):
             # выходит на ResultMessage и стрим в простое не слушается), плюс процесс
             # гибнет при пересоздании клиента. Долгое — синхронно или через
             # sandbox_exec(background=true) в контейнере.
+            # AUTO_MEMORY: у слона своя память (LOG.md/facts.db). Клодовская auto-memory
+            # (~/.claude/projects/<cwd>/memory/MEMORY.md) иначе течёт в эфемерных
+            # экстракт-агентов и порождает конфабуляции (несуществующий kling_audio.py).
             # Мёржим после user-overrides, юзер может переопределить.
             options_kwargs["env"] = {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+                "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                 **options_kwargs.get("env", {}),
             }
 
