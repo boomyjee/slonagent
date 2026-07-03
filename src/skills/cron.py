@@ -48,23 +48,20 @@ class CronSkill(Skill):
             return
         now = datetime.now().astimezone()
         for agent_id, thread_id, path in cls._discover_files(cls._root_dir):
-            tasks = cls._load_tasks(path)
-            remaining, changed = [], False
-            for task in tasks:
+            changed: dict[str, str | None] = {}  # id → новый scheduled_at | None (удалить)
+            for task in cls._load_tasks(path):
                 try:
                     due = datetime.fromisoformat(task["scheduled_at"]).astimezone()
                 except ValueError:
                     log.warning("[cron] invalid scheduled_at for task %s: %r", task.get("id"), task.get("scheduled_at"))
-                    changed = True
+                    changed[task["id"]] = None
                     continue
                 if due > now:
-                    remaining.append(task)
                     continue
                 agent = await cls._resolve_agent(agent_id, thread_id)
                 if agent is None:
                     log.warning("[cron] task %s: no agent for %s/%s, retrying next tick",
                                 task.get("id"), agent_id, thread_id)
-                    remaining.append(task)
                     continue
                 log.info("[cron] firing task %s in %s/%s: %r",
                          task["id"], agent_id, thread_id, task["message"])
@@ -80,13 +77,16 @@ class CronSkill(Skill):
                     )
                 except Exception as e:
                     log.warning("[cron] process failed for %s: %s", task.get("id"), e, exc_info=True)
-                next_run = cls._next_run(task["scheduled_at"], task.get("repeat", "once"))
-                if next_run:
-                    task["scheduled_at"] = next_run
-                    remaining.append(task)
-                changed = True
-            if changed:
-                cls._save_tasks(path, remaining)
+                changed[task["id"]] = cls._next_run(task["scheduled_at"], task.get("repeat", "once"))
+            if not changed:
+                continue
+            updated = []
+            for t in cls._load_tasks(path):
+                if t["id"] not in changed:
+                    updated.append(t)
+                elif (next_run := changed[t["id"]]) is not None:
+                    updated.append({**t, "scheduled_at": next_run})
+            cls._save_tasks(path, updated)
 
     @classmethod
     async def _resolve_agent(cls, agent_id: str, thread_id: str):
