@@ -112,7 +112,11 @@ class CronSkill(Skill):
 
     @classmethod
     def _next_run(cls, scheduled_at: str, repeat: str) -> str | None:
-        delta = cls._parse_interval(repeat)
+        try:
+            delta = cls._parse_interval(repeat)
+        except ValueError:
+            log.warning("[cron] invalid repeat %r, treating as once", repeat)
+            delta = None
         if delta is None:
             return None
         next_dt = datetime.fromisoformat(scheduled_at) + delta
