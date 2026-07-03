@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import uuid
 from contextlib import suppress
 
@@ -34,6 +35,21 @@ from src.agent.skill import Skill, bypass
 from src.agent.backends.base import BaseBackend
 
 log = logging.getLogger(__name__)
+
+
+# Базовый stream_id для transport.send_message — миллисекунды от запуска
+# процесса: после рестарта новые id строго больше старых (web-UI хранит
+# сообщения прошлой сессии под их stream_id, старт с 0 редактировал бы их).
+# id(event) не годится: CPython переиспользует адреса освобождённых объектов,
+# два блока одного ответа могут получить одинаковый id и склеиться в UI.
+_STREAM_ID_BASE: int = int(time.time() * 1000)
+_stream_id_counter: int = 0
+
+
+def _next_stream_id() -> int:
+    global _stream_id_counter
+    _stream_id_counter += 1
+    return _STREAM_ID_BASE + _stream_id_counter
 
 
 class ClaudeAgentSkill(Skill):
@@ -549,13 +565,22 @@ class ClaudeBackend(BaseBackend):
                     "resuming" if use_resume else "spawning fresh", session_id,
                 )
                 self._client = ClaudeSDKClient(options=ClaudeAgentOptions(**opts))
-                await self._client.connect()
+                try:
+                    await self._client.connect()
+                except Exception:
+                    # Неудачный connect не должен оставлять полуживой клиент.
+                    self._client = None
+                    raise
 
             try:
-                await _connect(use_resume=bool(state.get("created")))
-            except Exception:
-                self._client = None
-                await _connect(use_resume=not state.get("created"))
+                try:
+                    await _connect(use_resume=bool(state.get("created")))
+                except Exception:
+                    await _connect(use_resume=not state.get("created"))
+            finally:
+                if append_text:
+                    with suppress(OSError):
+                        os.remove(append_path)
 
             self._client_append = append_text
             self._client_skills_fp = skills_fp
@@ -597,10 +622,10 @@ class ClaudeBackend(BaseBackend):
                         block_type = event.get("content_block", {}).get("type")
                         if block_type == "text":
                             text_buf = ""
-                            text_stream_id = id(event)
+                            text_stream_id = _next_stream_id()
                         elif block_type == "thinking":
                             thinking_buf = ""
-                            thinking_stream_id = id(event)
+                            thinking_stream_id = _next_stream_id()
                     elif etype == "content_block_delta":
                         delta = event.get("delta", {})
                         dtype = delta.get("type")

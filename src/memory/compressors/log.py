@@ -719,7 +719,7 @@ class LogCompressor(BaseProvider):
 
     async def get_context_prompt(self, user_text = ""):
         updated = self._read_log()
-        if not updated: return "";
+        if not updated: return ""
         return (
             "The following observations block contains your memory of past conversations with this user.\n\n"
             f"<observations>\n{_optimize_for_context(_add_relative_time(updated, datetime.now()))}\n</observations>\n\n"
