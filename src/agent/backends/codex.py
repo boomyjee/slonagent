@@ -1540,6 +1540,17 @@ class CodexBackend(BaseBackend):
 
         try:
             await asyncio.wait_for(wakeup.wait(), timeout=600)
+        except asyncio.TimeoutError:
+            # Ход завис (обычно — застрявший тул). Чистим stream-state (иначе
+            # нотификации недобитого хода пишутся в осиротевший стейт) и глушим
+            # ход на сервере, чтобы следующий turn/start не лёг на живой старый.
+            self._stream_state = {}
+            for t in list(self._active_tool_tasks):
+                t.cancel()
+            with suppress(Exception):
+                await self._request("turn/interrupt", {"threadId": self._thread_id}, timeout=5)
+            # asyncio.TimeoutError даёт пустой str() — наверх идёт внятная ошибка.
+            raise RuntimeError("codex turn timeout (600s), turn interrupted") from None
         except asyncio.CancelledError:
             asyncio.current_task().uncancel()
             log.warning("[codex] llm() cancelled — sending turn/interrupt")

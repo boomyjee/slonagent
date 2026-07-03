@@ -30,11 +30,15 @@ class NanoBananaSkill(Skill):
         }
         model_id = model_map[model]
 
-        container_path = filename if filename.startswith('/') else f"/workspace/{filename}"
         sandbox = self.agent.sandbox
-        host_path = sandbox.resolve_path(container_path) if sandbox else None
-        if host_path is None:
-            return {"error": f"Доступ запрещён: {container_path}"}
+        if sandbox:
+            container_path = filename if filename.startswith('/') else f"/workspace/{filename}"
+            host_path = sandbox.resolve_path(container_path)
+            if host_path is None:
+                return {"error": f"Доступ запрещён: {container_path}"}
+        else:
+            # Без песочницы путь трактуем как хостовый — как download_file/send_files.
+            container_path = host_path = os.path.abspath(filename)
 
         dir_path = os.path.dirname(host_path)
         if dir_path:
@@ -42,13 +46,16 @@ class NanoBananaSkill(Skill):
 
         parts: list[dict] = []
         if images:
-            for img_container_path in images:
-                img_container_path = img_container_path if img_container_path.startswith('/') else f"/workspace/{img_container_path}"
-                img_host_path = sandbox.resolve_path(img_container_path) if sandbox else None
-                if img_host_path is None:
-                    return {"error": f"Доступ запрещён к входному изображению: {img_container_path}"}
+            for img_path in images:
+                if sandbox:
+                    img_path = img_path if img_path.startswith('/') else f"/workspace/{img_path}"
+                    img_host_path = sandbox.resolve_path(img_path)
+                    if img_host_path is None:
+                        return {"error": f"Доступ запрещён к входному изображению: {img_path}"}
+                else:
+                    img_host_path = os.path.abspath(img_path)
                 if not os.path.exists(img_host_path):
-                    return {"error": f"Входное изображение не найдено: {img_container_path}"}
+                    return {"error": f"Входное изображение не найдено: {img_path}"}
                 ext = os.path.splitext(img_host_path)[1].lower()
                 mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
                 mime_type = mime_map.get(ext, "image/png")

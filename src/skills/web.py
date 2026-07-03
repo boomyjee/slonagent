@@ -96,7 +96,7 @@ class WebSkill(Skill):
                 "Accept-Language": "en-US,en;q=0.9",
             })
             # Retry with honest UA if Cloudflare blocks
-            if response.status_code == 403 and "cf-mitigated" in response.headers.get("cf-mitigated", ""):
+            if response.status_code == 403 and response.headers.get("cf-mitigated"):
                 response = _safe_get(url, {
                     "User-Agent": "slonagent",
                     "Accept-Language": "en-US,en;q=0.9",

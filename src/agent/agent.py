@@ -224,7 +224,10 @@ class Agent:
         else:
             raise ValueError(f"Unknown backend: {backend!r}")
 
-        self.transcription_client = Agent.OpenAI(transcription_api_key or api_key, transcription_base_url or base_url)
+        # Лениво: эфемерные агенты (компрессия памяти, fact-extraction) никогда не
+        # транскрибируют — не создаём им httpx-клиент, который close() не закрывает.
+        self._transcription_client = None
+        self._transcription_auth = (transcription_api_key or api_key, transcription_base_url or base_url)
         self.transcription_whisper = transcription_whisper
         self.transcription_whisper_language = transcription_whisper_language
         self._message_queue: asyncio.Queue = asyncio.Queue()
@@ -404,6 +407,12 @@ class Agent:
             await skill.start()
         if run_loop:
             asyncio.create_task(self.loop())
+
+    @property
+    def transcription_client(self):
+        if self._transcription_client is None:
+            self._transcription_client = Agent.OpenAI(*self._transcription_auth)
+        return self._transcription_client
 
     async def transcribe_audio(self, data: bytes | str, mime_type: str, silent: bool = False) -> str:
         if isinstance(data, str):

@@ -382,22 +382,22 @@ class FactProvider(BaseProvider):
         limit: Annotated[int, "Сколько чанков вернуть. По умолчанию 5. Передай -1 чтобы получить документ целиком — только если уверен что он нужен полностью."] = 5,
     ) -> dict:
         try:
-            total_row = await asyncio.to_thread(
-                self.storage.conn.execute,
-                "SELECT COUNT(*) AS cnt FROM chunks WHERE document_id = ?",
-                (document_id,),
+            total = await asyncio.to_thread(
+                lambda: self.storage.conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM chunks WHERE document_id = ?",
+                    (document_id,),
+                ).fetchone()
             )
-            total = total_row.fetchone()
             if not total or total["cnt"] == 0:
                 return {"error": f"Документ {document_id!r} не найден в памяти."}
             total_chunks = total["cnt"]
 
-            rows = await asyncio.to_thread(
-                self.storage.conn.execute,
-                "SELECT chunk_index, chunk_text FROM chunks WHERE document_id = ? ORDER BY chunk_index LIMIT ? OFFSET ?",
-                (document_id, limit, offset),
+            chunks = await asyncio.to_thread(
+                lambda: self.storage.conn.execute(
+                    "SELECT chunk_index, chunk_text FROM chunks WHERE document_id = ? ORDER BY chunk_index LIMIT ? OFFSET ?",
+                    (document_id, limit, offset),
+                ).fetchall()
             )
-            chunks = rows.fetchall()
 
             has_more = (offset + len(chunks)) < total_chunks
             return {

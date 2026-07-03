@@ -405,6 +405,9 @@ class TelegramTransport(BaseTransport):
         if self._update_commands_task is not None: return
 
         async def update_commands():
+            # Шаг 1с намеренный: транспорт может быть передан субагенту с другим
+            # набором скиллов, и команды в клиенте должны пересобраться быстро.
+            # Итерация — дешёвый hash по строкам, API дёргается только на смене.
             last_hash = None
             while True:
                 if not await self._ensure_chat_and_topic():
@@ -456,7 +459,9 @@ class TelegramTransport(BaseTransport):
         last_action = 0.0
         while True:
             item = await self._queue.get()
-            # Skip stale edits — if queue has a newer edit for same message, skip this one
+            # Skip stale edits — if queue has a newer edit for same message, skip this one.
+            # ._queue — приватный deque asyncio.Queue; заглядываем осознанно ради
+            # коалесинга, интерфейс стабилен во всех версиях CPython.
             if item["kind"] == "edit" and any(
                 q["kind"] == "edit" and q["msg"].message_id == item["msg"].message_id
                 for q in self._queue._queue
@@ -625,6 +630,8 @@ class TelegramTransport(BaseTransport):
 
         user_id = first.from_user.id if first.from_user else None
         if self.chat_id < 0 and first.from_user:
+            # member_count не кэшируем: надёжного сигнала инвалидации нет (кик,
+            # миграция группы), а устаревшее значение меняет поведение бота.
             count = await self.bot.get_chat_member_count(self.chat_id)
             if count > 2:  # more than just one user + bot
                 u = first.from_user
