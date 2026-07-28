@@ -538,11 +538,16 @@ class ClaudeBackend(BaseBackend):
             # AUTO_MEMORY: у слона своя память (LOG.md/facts.db). Клодовская auto-memory
             # (~/.claude/projects/<cwd>/memory/MEMORY.md) иначе течёт в эфемерных
             # экстракт-агентов и порождает конфабуляции (несуществующий kling_audio.py).
+            # TOOL_SEARCH: по умолчанию CLI прячет схемы встроенных тулов и заставляет
+            # модель сначала звать ToolSearch — лишний ход на каждый первый вызов.
+            # Отдаём набор целиком. На MCP-тулы (наши скиллы) отложенность не
+            # распространяется, так что голому режиму это ни жарко ни холодно.
             # Мёржим после user-overrides, юзер может переопределить.
             options_kwargs["env"] = {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
                 "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                "ENABLE_TOOL_SEARCH": "false",
                 **options_kwargs.get("env", {}),
             }
 

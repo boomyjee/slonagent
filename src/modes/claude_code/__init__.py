@@ -32,28 +32,27 @@ class ClaudeCodeSkill(Skill):
         if not sandbox:
             return {"error": "Требуется SandboxSkill с Docker-контейнером"}
 
-        # Отбираем у клода ТОЛЬКО доступ к хост-ФС/шеллу — но оставляем Task
-        # (субагенты), TodoWrite, WebFetch, WebSearch, ExitPlanMode. Хост-тулы
-        # подменяются нашими MCP-обёртками над SandboxSkill: клод видит их
-        # как mcp__slon__exec / read / write / replace / grep / glob.
-        # Свой инстанс SandboxSkill для subagent'а (skill хранит ссылку на agent),
-        # своя песочница — паттерн как в coding mode.
+        # Хост-ФС/шелл клоду не даём — их подменяют наши MCP-обёртки над
+        # SandboxSkill: клод видит их как mcp__slon__exec / read / write /
+        # replace / grep / glob. Свой инстанс SandboxSkill для subagent'а
+        # (skill хранит ссылку на agent), своя песочница — паттерн как в
+        # coding mode.
         sub = await self.agent.spawn_subagent(
             "claude_code",
             skills=[SandboxSkill(workspace_dir=sandbox.workspace_dir), ConfigSkill()],
             model_name=self._model,
             backend="claude",
             backend_params={"sdk_options": {
-                # Включаем claude_code preset — нужен встроенный набор тулов клода
-                # (Task/TodoWrite/WebFetch/...). Хост-ФС/шелл отбираем — у нас свои
-                # MCP-обёртки над SandboxSkill (mcp__slon__exec/read/write/...).
+                # claude_code preset — системный промпт клода. Встроенные тулы —
+                # явным вайтлистом, а не disallowed_tools: blacklist пропускает
+                # тулы, добавленные новыми версиями CLI (Workflow, Cron*,
+                # EnterWorktree...), и с выключенным tool-search'ем (см.
+                # ClaudeBackend) их схемы грузились бы в контекст целиком.
+                # Субагенты Task наследуют этот же набор.
                 "system_prompt": {"type": "preset", "preset": "claude_code"},
                 "setting_sources": ["user"],
-                "tools": None,  # SDK default — полный набор claude_code тулов
-                "disallowed_tools": [
-                    "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit",
-                    "Read", "Grep", "Glob", "KillShell",
-                ],
+                "tools": ["Task", "TodoWrite", "WebFetch", "WebSearch",
+                          "Skill", "TaskOutput"],
             }},
             memory_compressor={
                 "__class__": "src.memory.compressors.log.LogCompressor",
