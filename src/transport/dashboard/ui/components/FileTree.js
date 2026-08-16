@@ -182,7 +182,7 @@ export class FileTree extends Component {
         }
         if (entry.url) {
             items.push({ label: 'Open location', action: () => {
-                this.props.onOpenUrl?.(entry.url);
+                this.props.onOpenUrl?.(entry.url, true);
             }});
         }
         if (!entry.is_dir) {

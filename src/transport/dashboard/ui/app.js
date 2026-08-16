@@ -107,7 +107,7 @@ class App extends Component {
     componentDidUpdate(_, prev) {
         if (prev.tabs !== this.state.tabs || prev.activeTab !== this.state.activeTab) {
             const key = this.state.rootKey;  // '' is fine — saves under "tabs:" / "activeTab:"
-            const tabs = this.state.tabs.filter(t => t.id !== 'logs').map(t => ({ id: t.id, label: t.label }));
+            const tabs = this.state.tabs.filter(t => t.id !== 'logs').map(t => ({ id: t.id, label: t.label, is_local: t.is_local }));
             persist.set(`tabs:${key}`, tabs);
             persist.set(`activeTab:${key}`, this.state.activeTab);
         }
@@ -228,14 +228,14 @@ class App extends Component {
         this._setMobileView('editor');
     };
 
-    _openUrl = (url) => {
+    _openUrl = (url, is_local) => {
         const id = `url:${url}`;
         let host;
         try { host = new URL(url).host; } catch { host = url; }
         this.setState(({ tabs }) => {
             const next = tabs.some(t => t.id === id)
                 ? tabs
-                : [...tabs, { id, label: host, tooltip: url, closable: true }];
+                : [...tabs, { id, is_local: is_local, label: host, tooltip: url, closable: true }];
             return { tabs: next, activeTab: id };
         });
         this._setMobileView('editor');
@@ -394,6 +394,7 @@ class App extends Component {
                             <div key=${t.id} class=${cl.pane}
                                  style=${{display: activeTab === t.id ? 'flex' : 'none'}}>
                                 <${WebView} url=${t.id.slice(4)}
+                                            is_local=${t.is_local}
                                             ref=${c => { this._webViews[t.id] = c; }}
                                             onTitle=${title => this._onWebViewTitle(t.id, title)} />
                             </div>`)}

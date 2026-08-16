@@ -23,7 +23,8 @@ export class WebView extends Component {
         } catch (_) {}
     };
 
-    render({ url }) {
+    render({ url, is_local }) {
+        if (is_local) url = location.origin + new URL(url).pathname;
         // Same-origin URLs (workspace files, /~/...) — наши, sandbox мешает:
         // ломает <a target="..."> между вложенными фреймами (frameset-сайты
         // открывают ссылки в новом окне вместо смены фрейма). Внешние URL
