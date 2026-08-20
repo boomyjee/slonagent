@@ -786,6 +786,7 @@ def deduplicate(
 
     new_facts = []
     new_vectors = []
+    id_remap = {}  # fact_id невставленного дубля → fact_id его двойника в базе
     for fact, vec in zip(facts, vectors):
         try:
             results = storage.table.search(vec).limit(1).to_list()
@@ -802,10 +803,20 @@ def deduplicate(
         top = results[0]
         similarity = 1.0 - top.get("_distance", 1.0)
         if similarity >= DEDUP_SIMILARITY_THRESHOLD and _is_dedup(fact, top, storage):
+            id_remap[fact.fact_id] = top["fact_id"]
             log.debug("[retain] dedup skip: similarity=%.3f fact=%s", similarity, fact.fact[:60])
         else:
             new_facts.append(fact)
             new_vectors.append(vec)
+
+    # Соседи по чанку уже ссылаются на fact_id выброшенного дубля, которого
+    # в базе не будет — переводим ссылки на его двойника, иначе FK при insert_links.
+    if id_remap:
+        for fact in new_facts:
+            fact.causal_relations = [
+                (id_remap.get(target_id, target_id), strength)
+                for target_id, strength in fact.causal_relations
+            ]
 
     skipped = len(facts) - len(new_facts)
     if skipped:
