@@ -1286,14 +1286,17 @@ async def _retain_impl(
         if done_cb: await done_cb("Фактов не извлечено")
         return []
 
-    new_facts, vectors = store_facts(facts, storage, chunk_meta)
+    # В поток целиком: embeddings (sync HTTP) + LanceDB-поиски (~115мс каждый,
+    # без await-точек) иначе держат event loop на секунды — sish рвёт тоннель
+    # по ping-timeout. Storage к этому готов (thread-local sqlite-соединения).
+    new_facts, vectors = await asyncio.to_thread(store_facts, facts, storage, chunk_meta)
     if not new_facts:
         if done_cb: await done_cb("Новых фактов нет (все дубликаты)")
         return []
 
-    n_causal   = build_causal_links(new_facts, storage)
-    n_temporal = build_temporal_links(new_facts, storage)
-    n_semantic = build_semantic_links(new_facts, vectors, storage)
+    n_causal   = await asyncio.to_thread(build_causal_links, new_facts, storage)
+    n_temporal = await asyncio.to_thread(build_temporal_links, new_facts, storage)
+    n_semantic = await asyncio.to_thread(build_semantic_links, new_facts, vectors, storage)
 
     log.info(
         "[retain] done: %d facts, %d causal / %d temporal / %d semantic links",
