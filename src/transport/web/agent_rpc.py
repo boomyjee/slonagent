@@ -26,7 +26,7 @@ _ALLOWED = {
     _Host: {"get_agent"},
     Agent: {"transport", "memory", "spawn_subagent", "next_message",
             "loop", "get_agent_dir", "process_message", "llm", "close",
-            "id", "thread_id", "transcribe_audio"},
+            "id", "thread_id", "transcribe_audio", "dispatch_tool_calls"},
     BaseTransport: {
         "send_message", "send_thinking", "send_memory_info", "send_processing",
         "send_system_prompt", "on_tool_call", "on_tool_result",
