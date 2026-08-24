@@ -41,4 +41,4 @@ export class WebView extends Component {
     }
 }
 
-cl.frame = css`flex: 1; border: 0; background: white;`;
+cl.frame = css`flex: 1; border: 0;`;
