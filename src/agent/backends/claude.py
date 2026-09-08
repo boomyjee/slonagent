@@ -93,7 +93,6 @@ class ClaudeBackend(BaseBackend):
         self._client_append: str | None = None  # текст системки в живом клиенте
         self._client_skills_fp: str | None = None  # fingerprint скилов в живом клиенте
         self._mcp_server = None  # построится лениво из agent.skills
-        self._active_tool_tasks: set[asyncio.Task] = set()  # in-flight MCP handlers
         # Эфемерный агент: session_id живёт в памяти инстанса, на диск ничего не пишем.
         self._memory_state: dict = {}
 
@@ -137,23 +136,29 @@ class ClaudeBackend(BaseBackend):
                 schema = fn.get("parameters") or {"type": "object", "properties": {}}
 
                 async def handler(args, _name=name):
-                    # Регистрируемся в backend'е чтоб llm() мог отменить нас на
-                    # CancelledError — SDK сам активные MCP-таски на interrupt()
-                    # не отменяет, только на disconnect.
-                    self._active_tool_tasks.add(asyncio.current_task())
+                    fake_turn = {
+                        "tool_calls": [{
+                            "id": f"mcp_{_name}",
+                            "function": {
+                                "name": _name,
+                                "arguments": json.dumps(args, ensure_ascii=False),
+                            },
+                        }],
+                    }
+                    # Тул живёт в своей таске под shield. На interrupt() SDK глушит
+                    # хендлер anyio cancel scope'ом: отменяет его повторно, пока тот
+                    # не выйдет из скоупа, а asyncio каждый такой cancel пробрасывает
+                    # в await'нутую таску. Без shield cleanup скилла в `except
+                    # CancelledError` (добить процесс в контейнере и т.п.) режется на
+                    # первом же await. Контракт скиллов — один нативный cancel.
+                    task = asyncio.create_task(
+                        self.agent.dispatch_tool_calls(fake_turn, emit_transport_events=False)
+                    )
                     try:
-                        fake_turn = {
-                            "tool_calls": [{
-                                "id": f"mcp_{_name}",
-                                "function": {
-                                    "name": _name,
-                                    "arguments": json.dumps(args, ensure_ascii=False),
-                                },
-                            }],
-                        }
-                        tool_turns = await self.agent.dispatch_tool_calls(fake_turn, emit_transport_events=False)
-                    finally:
-                        self._active_tool_tasks.discard(asyncio.current_task())
+                        tool_turns = await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        task.cancel()
+                        raise
                     blocks = []
                     for t in tool_turns:
                         c = t.get("content")
@@ -735,11 +740,11 @@ class ClaudeBackend(BaseBackend):
                     return turns
         except asyncio.CancelledError:
             asyncio.current_task().uncancel()
-            # SDK сам не отменяет активные MCP handler tasks на interrupt()
-            # (только на disconnect) — отменяем сами, иначе sandbox_exec и
-            # прочие тулы крутятся в фоне после stop'а.
-            for t in list(self._active_tool_tasks):
-                t.cancel()
+            # Активные MCP-хендлеры глушит сам SDK: на interrupt() CLI шлёт
+            # notifications/cancelled, mcp отменяет их через cancel scope.
+            # Нативный task.cancel() тут запрещён: anyio на CancelledError из
+            # дочерней таски гасит всю task group MCP-сервера, и до конца сессии
+            # все тулы отвечают "SDK MCP server 'slon' stopped".
             with suppress(Exception, asyncio.CancelledError):
                 await self._client.interrupt()
             # SDK после interrupt оставляет финальный ResultMessage в своей очереди.

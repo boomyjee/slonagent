@@ -948,18 +948,24 @@ class _PassthroughCompressor(MemBaseProvider):
 
 class _SlowSkill(Skill):
     """Тулза которая надолго засыпает — чтоб успеть прервать пока она работает.
-    Сигналит entered когда вошла в тело и completed если успела закончиться (в
-    норме теста не должна — её прерывает stop())."""
+    Сигналит entered когда вошла в тело, cancelled когда её реально прервали
+    (CancelledError в теле) и completed если успела закончиться (в норме теста
+    не должна — её прерывает stop())."""
 
     def __init__(self):
         super().__init__()
         self.entered = asyncio.Event()
+        self.cancelled = asyncio.Event()
         self.completed = False
 
     @tool("Долгая операция. Используй когда тебя просят 'медленную тулзу'.")
     async def slow_thing(self, marker: str = "x") -> dict:
         self.entered.set()
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
         self.completed = True
         return {"marker": marker, "done": True}
 
@@ -1040,10 +1046,18 @@ class TestClaudeStop:
             await asyncio.sleep(0.5)
             agent.stop()
             await asyncio.wait_for(transport.processing_done.wait(), timeout=30.0)
+            # `not completed` само по себе пусто — 60-секундный сон и так не успел
+            # бы. Значимая проверка: тул РЕАЛЬНО получил CancelledError от stop().
+            # Строго ДО close(): на close() мост закрывает mcp-сессию и mcp сам
+            # отменяет висящий хендлер — тогда флаг встал бы и без interrupt'а.
+            # Цепочка длинная: interrupt() → CLI шлёт notifications/cancelled →
+            # SDK-мост (только для серверов из create_sdk_mcp_server на mcp 1.x)
+            # → cancel scope хендлера → бекенд отменяет таску тула. Порвётся любое
+            # звено — тул крутится в фоне.
+            await asyncio.wait_for(slow.cancelled.wait(), timeout=5.0)
         finally:
             await agent.close()
 
-        # Тул не должен был успеть завершиться (60-секундный сон)
         assert not slow.completed, "slow_thing завершилась до того как stop её прервал"
 
         turns = list(agent.memory._turns)
@@ -1119,6 +1133,38 @@ class TestClaudeStop:
             )
         finally:
             await agent.close()
+
+    @pytest.mark.asyncio
+    async def test_mcp_tools_alive_after_interrupt(self):
+        """Регресс с claude-agent-sdk 0.2.152: SDK гоняет наш MCP-сервер через
+        mcp Server.run в anyio task group. Нативный task.cancel() хендлера на
+        stop() ронял всю группу — и до конца сессии каждый skill-тул отвечал
+        "SDK MCP server 'slon' stopped: its run() returned". Прерываем тул,
+        потом зовём другой тул того же сервера — он должен реально выполниться."""
+        slow, calc = _SlowSkill(), _CalcSkill()
+        agent, transport = _make_stop_test_agent(skills=[slow, calc])
+        try:
+            await agent.start(run_loop=True)
+            await agent.process_message([{"type": "text", "text":
+                "Используй тулзу slow_thing с marker='hi' и дождись результата."
+            }])
+            await asyncio.wait_for(slow.entered.wait(), timeout=30.0)
+            await asyncio.sleep(0.5)
+            agent.stop()
+            await asyncio.wait_for(transport.processing_done.wait(), timeout=30.0)
+
+            transport.processing_done.clear()
+            await agent.process_message([{"type": "text", "text":
+                "Используй тулзу add чтобы сложить 17 и 25. Верни только результат."
+            }])
+            await asyncio.wait_for(transport.processing_done.wait(), timeout=60.0)
+        finally:
+            await agent.close()
+
+        assert calc.calls == [{"a": 17, "b": 25}], (
+            f"add не выполнился после interrupt: calls={calc.calls}, "
+            f"tool_results={transport.tool_results}"
+        )
 
     @pytest.mark.asyncio
     async def test_stop_during_real_builtin_bash(self):
