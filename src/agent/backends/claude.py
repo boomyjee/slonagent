@@ -5,6 +5,7 @@
 turn'ом (как клод хранит в своей сессионной jsonl).
 """
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -93,6 +94,7 @@ class ClaudeBackend(BaseBackend):
         self._client_append: str | None = None  # текст системки в живом клиенте
         self._client_skills_fp: str | None = None  # fingerprint скилов в живом клиенте
         self._mcp_server = None  # построится лениво из agent.skills
+        self._client_cost_usd = 0.0  # total_cost_usd последнего ResultMessage живого клиента
         # Эфемерный агент: session_id живёт в памяти инстанса, на диск ничего не пишем.
         self._memory_state: dict = {}
 
@@ -186,6 +188,16 @@ class ClaudeBackend(BaseBackend):
         if not sdk_tools:
             return None
         return create_sdk_mcp_server("slon", "1.0.0", sdk_tools)
+
+    def _turn_cost(self, message: ResultMessage) -> str:
+        """Стоимость этого хода. total_cost_usd (и model_usage) в ResultMessage —
+        нарастающий итог за процесс CLI, не за ход: берём разницу с прошлым итогом
+        живого клиента. Счётчик обнуляется вместе с клиентом."""
+        if message.total_cost_usd is None:
+            return "n/a"
+        turn = message.total_cost_usd - self._client_cost_usd
+        self._client_cost_usd = message.total_cost_usd
+        return f"${turn:.4f}"
 
     def _claude_session_jsonl(self, session_id: str) -> str | None:
         # claude CLI sanitizes cwd by replacing non-alphanumerics with dashes,
@@ -481,6 +493,15 @@ class ClaudeBackend(BaseBackend):
         if prompt_changed or skills_changed:
             reason = "system prompt" if prompt_changed else "skills set"
             log.info("[claude_agent] %s changed, recreating client", reason)
+            if prompt_changed:
+                # Новый процесс = новая системка = кэш промпта сгорает сразу после
+                # схем тулов, вся история переписывается (~$20/M). Diff показывает,
+                # чей get_context_prompt поменял текст между ходами.
+                diff = difflib.unified_diff(
+                    (self._client_append or "").splitlines(), append_text.splitlines(),
+                    "old", "new", lineterm="", n=1,
+                )
+                log.info("[claude_agent] append diff:\n%s", "\n".join(list(diff)[:60]))
             with suppress(Exception, asyncio.CancelledError):
                 await self._client.disconnect()
             self._client = None
@@ -547,11 +568,17 @@ class ClaudeBackend(BaseBackend):
             # модель сначала звать ToolSearch — лишний ход на каждый первый вызов.
             # Отдаём набор целиком. На MCP-тулы (наши скиллы) отложенность не
             # распространяется, так что голому режиму это ни жарко ни холодно.
+            # DISABLE_ATTACHMENTS: CLI подмешивает в user-сообщения свои
+            # <system-reminder> — счётчик <total_tokens>, «First privately list what
+            # you need next…» и т.п. Это подсказки для Claude Code, не для слона.
+            # Блок с userEmail/currentDate этим не гасится (в CLI он безусловный);
+            # дату слон и так штампует в каждое сообщение сам.
             # Мёржим после user-overrides, юзер может переопределить.
             options_kwargs["env"] = {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
                 "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                "CLAUDE_CODE_DISABLE_ATTACHMENTS": "1",
                 "ENABLE_TOOL_SEARCH": "false",
                 **options_kwargs.get("env", {}),
             }
@@ -594,6 +621,7 @@ class ClaudeBackend(BaseBackend):
 
             self._client_append = append_text
             self._client_skills_fp = skills_fp
+            self._client_cost_usd = 0.0
             self._save_state({"session_id": session_id, "created": True})
         else:
             log.info("[claude_agent] reusing live claude")
@@ -664,6 +692,15 @@ class ClaudeBackend(BaseBackend):
                     # — для UI. У субагента StreamEvent'ов нет, текст приходит цельным
                     # TextBlock'ом, так что send_message делаем здесь.
                     is_sub = message.parent_tool_use_id is not None
+                    # Один AssistantMessage = один API-вызов. ResultMessage даёт только
+                    # сумму за ход; по вызовам видно, где префикс переписался заново
+                    # (cache_creation сопоставим с cache_read) вместо роста хвоста.
+                    if message.usage:
+                        u = message.usage
+                        log.info("[claude_agent] api call%s: cache_read=%s cache_create=%s in=%s out=%s",
+                                 " (sub)" if is_sub else "",
+                                 u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens"),
+                                 u.get("input_tokens"), u.get("output_tokens"))
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             if is_sub:
@@ -727,13 +764,14 @@ class ClaudeBackend(BaseBackend):
                         )
 
                 elif isinstance(message, ResultMessage):
-                    cost = f"${message.total_cost_usd:.4f}" if message.total_cost_usd else "n/a"
+                    cost = self._turn_cost(message)
                     usage = message.model_usage or {}
                     # Ответившая модель — с наибольшим output (haiku-side-call мелкий).
                     # Видно сразу, ушёл ли ход на fable или на opus-fallback.
                     primary = max(usage, key=lambda m: usage[m].get("outputTokens", 0), default="?")
-                    log.info("[claude_agent] done: %d turns, %s", message.num_turns, cost)
-                    log.info("[claude_agent] model_usage: %s", message.model_usage)
+                    log.info("[claude_agent] done: %d turns, %s (session total $%.4f)",
+                             message.num_turns, cost, self._client_cost_usd)
+                    log.info("[claude_agent] model_usage (session total): %s", message.model_usage)
                     await agent.transport.send_message(
                         f"✅ Готово ({message.num_turns} turns, {primary.removeprefix('claude-')}, {cost})"
                     )
@@ -759,8 +797,7 @@ class ClaudeBackend(BaseBackend):
             with suppress(Exception, asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(_drain(), timeout=10.0)
             if cancelled_result is not None:
-                cost = (f"${cancelled_result.total_cost_usd:.4f}"
-                        if cancelled_result.total_cost_usd else "n/a")
+                cost = self._turn_cost(cancelled_result)
                 await agent.transport.send_message(
                     f"⚠️ Прервано ({cancelled_result.num_turns} turns, {cost})",
                 )
