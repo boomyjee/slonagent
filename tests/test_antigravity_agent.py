@@ -861,3 +861,58 @@ class TestIntegrationAntigravity:
                 assert "создана новая сессия" not in call[0][0]
         finally:
             await agent.backend_impl.close()
+
+    @pytest.mark.asyncio
+    async def test_real_forbidden_native_tool_is_suppressed_and_session_preserved(self):
+        """Интеграционный тест: просим реальную модель вызвать нативный list_dir.
+        - Вызов нативного тула подавляется (не летит в transport и не попадает в turns);
+        - На следующем ходе память Слона и транскрипт agy остаются синхронизированы;
+        - conversation_id не меняется (сессия НЕ пересоздаётся).
+        """
+        from src.agent.backends.antigravity import _find_antigravity
+        try:
+            agy_bin = _find_antigravity()
+            if agy_bin == "agy" and not shutil.which("agy"):
+                pytest.skip("agy CLI не найден в системе")
+        except Exception:
+            pytest.skip("agy CLI не найден в системе")
+
+        agent = make_agent(model_name=os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high"))
+        try:
+            # Ход 1: просим вызвать запрещённый нативный тул list_dir
+            agent.memory._turns.append({
+                "role": "user",
+                "content": "Вызови встроенный тул list_dir(DirectoryPath='.').",
+            })
+            turns1 = await agent.llm()
+            assert len(turns1) >= 1
+
+            # Подавленный тул НЕ попал в транспорт
+            agent.transport.on_tool_call.assert_not_called()
+            agent.transport.on_tool_result.assert_not_called()
+
+            # И НЕ попал в turns памяти как tool call
+            assert all(t.get("role") != "tool" for t in turns1)
+            assert all(not t.get("tool_calls") for t in turns1)
+
+            cid1 = agent.backend_impl._load_state().get("conversation_id")
+            assert cid1, "conversation_id не сохранён в стейте"
+            agent.memory._turns.append(turns1[-1])
+
+            # Ход 2: обычный следующий вопрос в диалоге
+            agent.memory._turns.append({
+                "role": "user",
+                "content": "Ответь одним словом: работает.",
+            })
+            turns2 = await agent.llm()
+            assert len(turns2) >= 1
+            cid2 = agent.backend_impl._load_state().get("conversation_id")
+
+            # Сессия та же самая — память НЕ разошлась из-за подавленного тула!
+            assert cid2 == cid1, f"Сессия пересоздалась из-за подавленного тула: {cid1} -> {cid2}"
+
+            # В транспорт не слались ложные уведомления о пересоздании
+            for call in agent.transport.send_memory_info.call_args_list:
+                assert "создана новая сессия" not in call[0][0]
+        finally:
+            await agent.backend_impl.close()
