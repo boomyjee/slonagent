@@ -794,9 +794,12 @@ class AntigravityBackend(BaseBackend):
         return None
 
     @classmethod
-    def _transcript_signatures(cls, path: str) -> set[tuple]:
-        """Извлекает сигнатуры ходов из transcript.jsonl."""
+    def _transcript_signatures(cls, path: str, ignored_tools: tuple[str, ...] | set[str] | None = None) -> set[tuple]:
+        """Извлекает сигнатуры ходов из transcript.jsonl.
+        ignored_tools — тулы, намеренно подавленные бэкендом (не вызывают расхождение памяти).
+        """
         sigs = set()
+        ignored = set(ignored_tools or ())
         try:
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -828,6 +831,15 @@ class AntigravityBackend(BaseBackend):
                                 if tool_name:
                                     sigs.add(("tool_call", tool_name))
                             elif name:
+                                # Игнорируем внутренний просмотр MCP схем
+                                if name == "view_file":
+                                    args = tc.get("args") or {}
+                                    fpath = str(args.get("AbsolutePath", "")).lower()
+                                    if "mcp" in fpath:
+                                        continue
+                                # Игнорируем намеренно подавленные бэкендом инструменты
+                                if name in ignored:
+                                    continue
                                 sigs.add(("tool_call", name))
                         content = entry.get("content") or ""
                         text = content[:150].strip()
@@ -851,7 +863,7 @@ class AntigravityBackend(BaseBackend):
         if cid:
             transcript_path = self._transcript_path(cid)
             if transcript_path and os.path.isfile(transcript_path):
-                return self._transcript_signatures(transcript_path)
+                return self._transcript_signatures(transcript_path, ignored_tools=self._forbidden_tools)
         return sigs
 
     async def _conversation_has_diverged(self, conversation_id: str | None = None) -> bool:
@@ -1223,6 +1235,11 @@ class AntigravityBackend(BaseBackend):
                             if "mcp" in fpath.lower():
                                 log.debug("[antigravity] пропущен внутренний просмотр MCP схемы: %s", fpath)
                                 continue
+
+                        # Подавляем нативные тулы, которые запрещены политикой (не входят в allowed_tools)
+                        if tool_name in self._forbidden_tools:
+                            log.debug("[antigravity] подавлен запрещённый нативный тул: %s", tool_name)
+                            continue
 
                         if state == "ACTIVE":
                             params = tool_info.get("parameters") or {}
