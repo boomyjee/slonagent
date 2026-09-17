@@ -80,12 +80,22 @@ def _get_llm_config(provider: str) -> dict:
             "base_url": "",
             "backend_params": None,  # голый дефолт
         }
+    if provider == "antigravity":
+        if not os.environ.get("ANTIGRAVITY_AVAILABLE"):
+            pytest.skip("ANTIGRAVITY_AVAILABLE не задан (нужен antigravity-sdk + auth подписка)")
+        return {
+            "backend": "antigravity",
+            "model_name": os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash"),
+            "api_key": "",
+            "base_url": "",
+            "backend_params": None,
+        }
     raise ValueError(f"Unknown provider: {provider}")
 
 
-@pytest.fixture(params=["gemini", "kimi", "claude"])
+@pytest.fixture(params=["gemini", "kimi", "claude", "antigravity"])
 def llm(request) -> dict:
-    """Параметризованная LLM-конфигурация. Каждый тест прогоняется на 3 провайдерах."""
+    """Параметризованная LLM-конфигурация. Каждый тест прогоняется на провайдерах."""
     return _get_llm_config(request.param)
 
 
@@ -104,7 +114,7 @@ def get_embedding_config() -> dict:
 
 def get_default_llm_config() -> dict:
     """Любой настроенный провайдер — для тестов которым нужен Agent но не LLM."""
-    for p in ("gemini", "kimi", "claude"):
+    for p in ("gemini", "kimi", "claude", "antigravity"):
         try:
             return _get_llm_config(p)
         except pytest.skip.Exception:

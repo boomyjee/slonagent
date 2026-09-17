@@ -221,6 +221,9 @@ class Agent:
         elif backend == "echo":
             from src.agent.backends.echo import EchoBackend
             self.backend_impl = EchoBackend(self, **self.backend_params)
+        elif backend == "antigravity":
+            from src.agent.backends.antigravity import AntigravityBackend
+            self.backend_impl = AntigravityBackend(self, **self.backend_params)
         else:
             raise ValueError(f"Unknown backend: {backend!r}")
 
