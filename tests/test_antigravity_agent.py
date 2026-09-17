@@ -15,8 +15,11 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import uuid
+from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -63,6 +66,19 @@ def make_agent(skills=None, model_name: str = "gemini-3.8-flash-high", sdk_optio
     agent.transport.send_system_prompt = AsyncMock()
     agent.transport.close = AsyncMock()
     return agent
+
+
+@pytest.fixture(autouse=True)
+def isolated_gemini_config(request, tmp_path, monkeypatch):
+    """Юнит-тесты не должны править реальный ~/.gemini/config.
+    Интеграционным тестам нужен настоящий конфиг — agy.exe читает его сам.
+    """
+    cls = request.cls
+    if cls is not None and cls.__name__.startswith("TestIntegration"):
+        yield
+        return
+    monkeypatch.setenv("ANTIGRAVITY_CONFIG_DIR", str(tmp_path / "gemini_config"))
+    yield
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -160,7 +176,7 @@ class TestStrippingConfiguration:
 
     def test_base_instructions_contain_override_and_forbidden_list(self):
         instr = _build_base_instructions()
-        assert "CRITICAL SYSTEM OVERRIDE" in instr
+        assert "SlonAgent" in instr
         assert "FORBIDDEN NATIVE TOOLS" in instr
         assert "- run_command" in instr
         assert "- replace_file_content" in instr
@@ -172,7 +188,7 @@ class TestStrippingConfiguration:
             append_text="System instructions text",
             user_text="User request text",
         )
-        assert "CRITICAL SYSTEM OVERRIDE" in payload
+        assert "SlonAgent" in payload
         assert "FORBIDDEN NATIVE TOOLS" in payload
         assert "[System Instructions]\nSystem instructions text" in payload
         assert "Available SlonAgent Tools:" in payload
@@ -309,22 +325,22 @@ class TestStreaming:
         assert agent.backend_impl._load_state().get("conversation_id") == "test_conv_abc"
 
     @pytest.mark.asyncio
-    async def test_forbidden_native_tool_is_suppressed_and_does_not_cause_divergence(self):
+    async def test_forbidden_native_tool_is_denied_and_dispatched_to_transport_and_memory(self):
         """Запрещённый нативный тул:
-        1) подавляется из transport (не шлётся в чат);
-        2) не попадает в turns;
-        3) на следующем сообщении НЕ вызывает расхождение памяти, даже если agy записал его в transcript.jsonl.
+        1) попытка вызова шлётся в transport (on_tool_call) и попадает в turns;
+        2) отказ хука шлётся в transport (on_tool_result) и попадает в turns;
+        3) на следующем сообщении память и transcript синхронизированы.
         """
         agent = make_agent()
         agent.memory._turns.append({"role": "user", "content": "Попробуй вызвать нативный тул"})
 
         class MockAntigravityClient:
             def __init__(self, **kwargs):
-                self.conversation_id = "test_suppress"
+                self.conversation_id = "test_deny"
                 self.is_alive = True
 
             async def chat(self, prompt):
-                # Нативный тул agy, запрещённый политикой
+                # Нативный тул agy, заблокированный хуком
                 yield {
                     "event": "step_update",
                     "step_update": {
@@ -339,10 +355,17 @@ class TestStreaming:
                     "event": "step_update",
                     "step_update": {
                         "step_index": 1,
-                        "state": "DONE",
+                        "state": "ERROR",
                         "step_type": "tool",
                         "tool_name": "list_dir",
-                        "tool_info": {"output": "secret_file.txt"},
+                        "tool_info": {
+                            "name": "list_dir",
+                            "parameters": {"DirectoryPath": "."},
+                            "error": {
+                                "type": "TOOL_ERROR",
+                                "message": "tool call denied by pre-tool hook: Tool 'list_dir' is forbidden",
+                            },
+                        },
                     },
                 }
                 yield {
@@ -350,15 +373,15 @@ class TestStreaming:
                     "step_update": {
                         "state": "ACTIVE",
                         "step_type": "agent_response",
-                        "text_delta": "Ответ без тула",
+                        "text_delta": "Тул был заблокирован политикой.",
                     },
                 }
                 yield {
                     "event": "result",
                     "result": {
-                        "conversation_id": "test_suppress",
+                        "conversation_id": "test_deny",
                         "status": "SUCCESS",
-                        "response": "Ответ без тула",
+                        "response": "Тул был заблокирован политикой.",
                     },
                 }
 
@@ -368,27 +391,34 @@ class TestStreaming:
         with patch("src.agent.backends.antigravity.AntigravityClient", MockAntigravityClient):
             turns = await agent.llm()
 
-        # Подавленный тул НЕ должен попасть в transport
-        agent.transport.on_tool_call.assert_not_called()
-        agent.transport.on_tool_result.assert_not_called()
+        # Попытка вызова и отказ ДОЛЖНЫ попасть в transport
+        agent.transport.on_tool_call.assert_called_once_with("list_dir", {"DirectoryPath": "."})
+        assert agent.transport.on_tool_result.called
+        res_text = agent.transport.on_tool_result.call_args[0][1]
+        assert "denied by pre-tool hook" in res_text
 
-        # И НЕ должен попасть в turns памяти
-        assert len(turns) == 1
+        # И ДОЛЖНЫ попасть в turns памяти: assistant call, tool result, assistant response
+        assert len(turns) == 3
         assert turns[0]["role"] == "assistant"
-        assert turns[0]["content"] == "Ответ без тула"
+        assert turns[0]["tool_calls"][0]["function"]["name"] == "list_dir"
+        assert turns[1]["role"] == "tool"
+        assert "denied by pre-tool hook" in turns[1]["content"]
+        assert turns[2]["role"] == "assistant"
+        assert turns[2]["content"] == "Тул был заблокирован политикой."
 
-        # Добавляем ответ в память
+        # Добавляем turns в память Слона
         agent.memory._turns.extend(turns)
 
         # agy записал вызов list_dir в свой transcript.jsonl
-        transcript_path = os.path.join(agent.memory.memory_dir or ".", "transcript_suppress.jsonl")
+        transcript_path = os.path.join(agent.memory.memory_dir or ".", "transcript_deny.jsonl")
         lines = [
             json.dumps({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
                         "content": "<USER_REQUEST>\n[2026-09-17T16:00:00]\nПопробуй вызвать нативный тул\n</USER_REQUEST>"}),
             json.dumps({"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
                         "tool_calls": [{"name": "list_dir", "args": {"DirectoryPath": "."}}]}),
-            json.dumps({"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE",
-                        "content": "Ответ без тула"}),
+            json.dumps({"step_index": 2, "source": "TOOL_CALL", "type": "TOOL_CALL", "id": 1}),
+            json.dumps({"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                        "content": "Тул был заблокирован политикой."}),
         ]
         with open(transcript_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -397,8 +427,8 @@ class TestStreaming:
             backend = agent.backend_impl
             backend._transcript_path = MagicMock(return_value=transcript_path)
 
-            # Проверяем, что подавленный тул НЕ вызывает diverged=True на следующем сообщении!
-            assert await backend._conversation_has_diverged("test_suppress") is False
+            # Проверяем, что заблокированный тул НЕ вызывает diverged=True на следующем сообщении!
+            assert await backend._conversation_has_diverged("test_deny") is False
         finally:
             if os.path.exists(transcript_path):
                 os.remove(transcript_path)
@@ -524,6 +554,86 @@ class TestCancellation:
         agent.transport.send_message.assert_any_call("⚠️ Ответ прерван пользователем.")
         agent.transport.send_processing.assert_any_call(False)
 
+    @pytest.mark.asyncio
+    async def test_cancelled_turn_keeps_streamed_text_in_memory(self):
+        """Текст, уже показанный пользователю, должен сохраниться в память."""
+        agent = make_agent()
+        agent.memory._turns.append({"role": "user", "content": "Расскажи длинно"})
+
+        class HangingClient:
+            def __init__(self, **kwargs):
+                self.conversation_id = "test_cancel_text"
+                self.is_alive = True
+
+            async def chat(self, prompt):
+                yield {
+                    "event": "step_update",
+                    "step_update": {
+                        "state": "ACTIVE",
+                        "step_type": "agent_response",
+                        "text_delta": "Начало ответа",
+                    },
+                }
+                raise asyncio.CancelledError()
+
+            async def close(self):
+                self.is_alive = False
+
+        with patch("src.agent.backends.antigravity.AntigravityClient", HangingClient):
+            turns = await agent.llm()
+
+        assert [t["content"] for t in turns] == ["Начало ответа", "[ответ прерван пользователем]"]
+
+    @pytest.mark.asyncio
+    async def test_hook_is_reregistered_after_cancellation(self):
+        """close() снимает хук запрещённых тулов — следующий ход обязан вернуть его,
+        иначе agy работает с --dangerously-skip-permissions без защиты.
+        """
+        agent = make_agent()
+        backend = agent.backend_impl
+        hooks_path = backend._hooks_config_path()
+        hook_name = f"slon_{agent.id}"
+
+        class HangingClient:
+            def __init__(self, **kwargs):
+                self.conversation_id = "test_hook_reg"
+                self.is_alive = True
+
+            async def chat(self, prompt):
+                yield {"event": "step_update", "step_update": {"state": "ACTIVE", "step_type": "agent_response"}}
+                raise asyncio.CancelledError()
+
+            async def close(self):
+                self.is_alive = False
+
+        class OkClient(HangingClient):
+            async def chat(self, prompt):
+                yield {
+                    "event": "result",
+                    "result": {"conversation_id": self.conversation_id, "status": "SUCCESS", "response": "ок"},
+                }
+
+        def registered_hook():
+            if not os.path.isfile(hooks_path):
+                return None
+            with open(hooks_path, encoding="utf-8") as f:
+                return json.load(f).get(hook_name)
+
+        with patch("src.agent.backends.antigravity.AntigravityClient", HangingClient):
+            agent.memory._turns.append({"role": "user", "content": "первый"})
+            await agent.llm()
+
+        # Прерывание закрыло клиента и сняло регистрацию хука
+        assert registered_hook() is None
+
+        with patch("src.agent.backends.antigravity.AntigravityClient", OkClient):
+            agent.memory._turns.append({"role": "user", "content": "второй"})
+            await agent.llm()
+
+        hook = registered_hook()
+        assert hook and hook["enabled"] is True
+        assert "run_command" in hook["PreToolUse"][0]["matcher"]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Unit: Context Synchronization & Divergence Detection
@@ -575,6 +685,94 @@ class TestContextSynchronization:
         assert ("message", "user", "Привет из transcript") in sigs
         assert ("tool_call", "my_skill_tool") in sigs
         assert ("message", "assistant", "Ответ модели из transcript") in sigs
+
+    def test_multistep_text_is_joined_like_memory_turn(self, tmp_path):
+        """Текст из нескольких PLANNER_RESPONSE склеивается в одну сигнатуру,
+        как text_buf в llm() — иначе многошаговый ход даёт ложное расхождение.
+        """
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("\n".join([
+            json.dumps({"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT",
+                        "content": "<USER_REQUEST>\nСчитай\n</USER_REQUEST>"}),
+            json.dumps({"step_index": 1, "type": "PLANNER_RESPONSE", "content": "Сейчас посчитаю. "}),
+            json.dumps({"step_index": 2, "type": "PLANNER_RESPONSE", "content": "Готово: 42."}),
+        ]), encoding="utf-8")
+
+        sigs = AntigravityBackend._transcript_signatures(str(transcript))
+        memory_sigs = AntigravityBackend._memory_signatures([
+            {"role": "user", "content": "Считай"},
+            {"role": "assistant", "content": "Сейчас посчитаю. Готово: 42."},
+        ])
+        assert sigs == memory_sigs
+
+    @pytest.mark.asyncio
+    async def test_internal_mcp_schema_view_does_not_diverge(self):
+        """Внутренний view_file по схемам MCP бэкенд не пишет в память —
+        его TOOL_CALL в транскрипте тоже не должен считаться расхождением.
+        """
+        agent = make_agent()
+        backend = agent.backend_impl
+        agent.memory._turns = [
+            {"role": "user", "content": "Сложи 2 и 2"},
+            {"role": "assistant", "content": "4"},
+        ]
+
+        transcript = os.path.join(agent.memory.memory_dir, "transcript_mcp_view.jsonl")
+        with open(transcript, "w", encoding="utf-8") as f:
+            f.write("\n".join([
+                json.dumps({"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT",
+                            "content": "<USER_REQUEST>\nСложи 2 и 2\n</USER_REQUEST>"}),
+                json.dumps({"step_index": 1, "type": "PLANNER_RESPONSE", "tool_calls": [
+                    {"name": "view_file", "args": {"AbsolutePath": "C:/Users/x/.gemini/antigravity-cli/mcp/slon_test/schema.json"}},
+                ]}),
+                json.dumps({"step_index": 2, "type": "TOOL_CALL", "id": 1}),
+                json.dumps({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "4"}),
+            ]))
+
+        try:
+            backend._transcript_path = MagicMock(return_value=transcript)
+            assert await backend._conversation_has_diverged("cid_mcp_view") is False
+        finally:
+            if os.path.exists(transcript):
+                os.remove(transcript)
+
+    @pytest.mark.asyncio
+    async def test_fresh_session_prompt_carries_recent_conversation(self):
+        """Свежая сессия после расхождения обязана получить недавнюю историю в промпте."""
+        agent = make_agent()
+        backend = agent.backend_impl
+        backend._save_state({"conversation_id": "old_session"})
+        agent.memory._turns = [
+            {"role": "user", "content": "Меня зовут Ким"},
+            {"role": "assistant", "content": "Приятно познакомиться"},
+            {"role": "user", "content": "Как меня зовут?"},
+        ]
+        backend._agy_signatures = MagicMock(return_value={("message", "user", "Забытый компрессией вопрос")})
+
+        prompts = []
+
+        class MockAntigravityClient:
+            def __init__(self, conversation_id=None, **kwargs):
+                self.conversation_id = conversation_id or "new_session"
+                self.is_alive = True
+
+            async def chat(self, prompt):
+                prompts.append(prompt)
+                yield {
+                    "event": "result",
+                    "result": {"conversation_id": self.conversation_id, "status": "SUCCESS", "response": "Ким"},
+                }
+
+            async def close(self):
+                self.is_alive = False
+
+        with patch("src.agent.backends.antigravity.AntigravityClient", MockAntigravityClient):
+            await agent.llm()
+
+        assert len(prompts) == 1
+        assert "<recent_conversation>" in prompts[0]
+        assert "User: Меня зовут Ким" in prompts[0]
+        assert "Assistant: Приятно познакомиться" in prompts[0]
 
     @pytest.mark.asyncio
     async def test_divergence_detected_when_memory_is_pruned(self):
@@ -732,6 +930,79 @@ class TestContextSynchronization:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Unit: PreToolUse хук и авторизация MCP bridge
+# ═══════════════════════════════════════════════════════════════════════════════
+
+HOOK_SCRIPT = os.path.join(ROOT, "src", "agent", "backends", "antigravity_hook.py")
+
+
+def run_hook(stdin_text: str, *args) -> dict:
+    proc = subprocess.run(
+        [sys.executable, HOOK_SCRIPT, *args],
+        input=stdin_text, capture_output=True, text=True, encoding="utf-8",
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+class TestHookPolicy:
+
+    def test_forbidden_tool_is_denied(self):
+        resp = run_hook(json.dumps({"toolCall": {"name": "run_command"}}), "--forbidden", "run_command,list_dir")
+        assert resp["decision"] == "deny"
+
+    def test_permitted_tool_is_allowed(self):
+        resp = run_hook(json.dumps({"toolCall": {"name": "list_dir"}}), "--allowed", "list_dir")
+        assert resp["decision"] == "allow"
+
+    def test_unparseable_stdin_is_denied(self):
+        """Хук вызывается только по matcher'у запрещённых тулов: не разобрали вход — отказ."""
+        resp = run_hook("not a json at all", "--forbidden", "run_command,list_dir")
+        assert resp["decision"] == "deny"
+
+    def test_missing_tool_name_is_denied(self):
+        resp = run_hook(json.dumps({"something": "else"}), "--forbidden", "run_command")
+        assert resp["decision"] == "deny"
+
+
+class TestMcpBridgeAuth:
+
+    @pytest.mark.asyncio
+    async def test_bridge_requires_token(self):
+        import aiohttp
+
+        agent = make_agent(skills=[_SkillA()])
+        backend = agent.backend_impl
+        await backend._ensure_mcp_bridge()
+        try:
+            url = f"http://127.0.0.1:{backend._mcp_port}/tools"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    assert resp.status == 403
+                async with session.get(url, headers={"X-Slon-Token": "wrong"}) as resp:
+                    assert resp.status == 403
+                async with session.get(url, headers={"X-Slon-Token": backend._mcp_token}) as resp:
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["tools"][0]["name"] == "_skilla_hello"
+        finally:
+            await backend.close()
+
+    @pytest.mark.asyncio
+    async def test_token_is_passed_to_bridge_config(self):
+        agent = make_agent(skills=[_SkillA()])
+        backend = agent.backend_impl
+        await backend._ensure_mcp_bridge()
+        try:
+            with open(backend._mcp_config_path(), encoding="utf-8") as f:
+                cfg = json.load(f)
+            args = cfg["mcpServers"][backend._mcp_server_name]["args"]
+            assert args[args.index("--token") + 1] == backend._mcp_token
+        finally:
+            await backend.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Integration: Реальная сессия Antigravity по подписке (без ключей)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -863,11 +1134,13 @@ class TestIntegrationAntigravity:
             await agent.backend_impl.close()
 
     @pytest.mark.asyncio
-    async def test_real_forbidden_native_tool_is_suppressed_and_session_preserved(self):
-        """Интеграционный тест: просим реальную модель вызвать нативный list_dir.
-        - Вызов нативного тула подавляется (не летит в transport и не попадает в turns);
-        - На следующем ходе память Слона и транскрипт agy остаются синхронизированы;
-        - conversation_id не меняется (сессия НЕ пересоздаётся).
+    async def test_real_forbidden_native_tool_is_denied_by_hook_and_disk_unmodified(self):
+        """Интеграционный тест: реальная модель пытается выполнить запрещённый run_command.
+        1) Модель реально эмитит попытку вызова run_command (проверяем agent.transport.on_tool_call);
+        2) PreToolUse хук перехватывает вызов и возвращает deny;
+        3) agy.exe блокирует исполнение (команда НЕ выполняется, файла на диске НЕТ);
+        4) Отказ транслируется в agent.transport.on_tool_result и записывается в turns;
+        5) На следующем ходе память синхронизирована, session ID сохранён.
         """
         from src.agent.backends.antigravity import _find_antigravity
         try:
@@ -877,29 +1150,59 @@ class TestIntegrationAntigravity:
         except Exception:
             pytest.skip("agy CLI не найден в системе")
 
-        agent = make_agent(model_name=os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high"))
+        hook_log = os.path.join(tempfile.gettempdir(), f"slon_hook_test_{uuid.uuid4().hex[:8]}.log")
+        target_file = os.path.join(tempfile.gettempdir(), f"should_not_exist_{uuid.uuid4().hex[:8]}.txt")
+        if os.path.exists(target_file):
+            os.remove(target_file)
+
+        os.environ["SLON_ANTIGRAVITY_HOOK_LOG"] = hook_log
+
+        agent = make_agent(
+            model_name=os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high"),
+            sdk_options={"strip_native_instructions": False},
+        )
         try:
-            # Ход 1: просим вызвать запрещённый нативный тул list_dir
+            # Ход 1: просим создать файл
             agent.memory._turns.append({
                 "role": "user",
-                "content": "Вызови встроенный тул list_dir(DirectoryPath='.').",
+                "content": f'Создай файл по пути "{target_file}" с текстом "test content". Вызови инструмент write_to_file или run_command.',
             })
             turns1 = await agent.llm()
+            print("TURNS1_DEBUG:", turns1)
             assert len(turns1) >= 1
 
-            # Подавленный тул НЕ попал в транспорт
-            agent.transport.on_tool_call.assert_not_called()
-            agent.transport.on_tool_result.assert_not_called()
+            # 1. Проверяем, что попытка вызова РЕАЛЬНО была зафиксирована в чате
+            assert agent.transport.on_tool_call.called, "Модель не сделала попытку вызова тула"
+            called_tools = [c[0][0] for c in agent.transport.on_tool_call.call_args_list]
+            assert any(t in called_tools for t in ("run_command", "write_to_file")), f"Инструмент не найден среди вызовов: {called_tools}"
 
-            # И НЕ попал в turns памяти как tool call
-            assert all(t.get("role") != "tool" for t in turns1)
-            assert all(not t.get("tool_calls") for t in turns1)
+            # 2. Проверяем, что хук сработал и залогировал перехват
+            assert os.path.exists(hook_log), "Хук-перехватчик не был вызван"
+            with open(hook_log, "r", encoding="utf-8") as f:
+                hook_data = f.read()
+            assert any(t in hook_data for t in ("run_command", "write_to_file")), "В логе хука нет записи о перехвате"
+
+            # 3. Проверяем физическое состояние: ФАЙЛА НА ДИСКЕ НЕТ! Команда не выполнилась!
+            assert not os.path.exists(target_file), "КРИТИЧЕСКИЙ СБОЙ: файл был создан на диске! Команда не заблокирована!"
+
+            # 4. Проверяем, что результат с ошибкой/отказом ушёл в транспорт
+            assert agent.transport.on_tool_result.called, "Отказ тула не был передан в transport.on_tool_result"
+            results = [str(c[0][1]) for c in agent.transport.on_tool_result.call_args_list]
+            assert any("denied" in r.lower() or "forbidden" in r.lower() for r in results), (
+                f"В результатах тула нет сообщения о блокировке: {results}"
+            )
+
+            # 5. Проверяем, что в turns памяти есть и попытка вызова, и отказ
+            has_tool_call = any(t.get("role") == "assistant" and t.get("tool_calls") for t in turns1)
+            has_tool_result = any(t.get("role") == "tool" for t in turns1)
+            assert has_tool_call, "Попытка вызова не сохранена в turns"
+            assert has_tool_result, "Результат отказа не сохранён в turns"
 
             cid1 = agent.backend_impl._load_state().get("conversation_id")
             assert cid1, "conversation_id не сохранён в стейте"
-            agent.memory._turns.append(turns1[-1])
+            agent.memory._turns.extend(turns1)
 
-            # Ход 2: обычный следующий вопрос в диалоге
+            # Ход 2: обычный следующий вопрос в диалоге — сессия та же
             agent.memory._turns.append({
                 "role": "user",
                 "content": "Ответь одним словом: работает.",
@@ -908,11 +1211,14 @@ class TestIntegrationAntigravity:
             assert len(turns2) >= 1
             cid2 = agent.backend_impl._load_state().get("conversation_id")
 
-            # Сессия та же самая — память НЕ разошлась из-за подавленного тула!
-            assert cid2 == cid1, f"Сессия пересоздалась из-за подавленного тула: {cid1} -> {cid2}"
-
-            # В транспорт не слались ложные уведомления о пересоздании
-            for call in agent.transport.send_memory_info.call_args_list:
-                assert "создана новая сессия" not in call[0][0]
+            # Сессия та же самая — память НЕ разошлась!
+            assert cid2 == cid1, f"Сессия пересоздалась: {cid1} -> {cid2}"
         finally:
+            os.environ.pop("SLON_ANTIGRAVITY_HOOK_LOG", None)
+            if os.path.exists(target_file):
+                with suppress(OSError):
+                    os.remove(target_file)
+            if os.path.exists(hook_log):
+                with suppress(OSError):
+                    os.remove(hook_log)
             await agent.backend_impl.close()

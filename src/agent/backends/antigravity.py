@@ -12,23 +12,22 @@
   - CLI флаги: --disable-slash-commands (отключает нативные слэш-команды и раскрытие скиллов),
     --dangerously-skip-permissions (автоподтверждение тулов).
   - Нативные тулы Antigravity (ask_question, define_subagent, find_by_name, run_command,
-    replace_file_content, list_dir, grep_search и др.) вырезаются:
+    replace_file_content, list_dir, grep_search и др.) блокируются:
     (1) В системных инструкциях прописывается жесткий запрет (FORBIDDEN NATIVE TOOLS)
-    (2) В потоке событий бэкенд перехватывает и подавляет запрещённые нативные тулы
+    (2) PreToolUse-хук (antigravity_hook.py) отказывает в вызове на стороне agy;
+        попытка и отказ попадают в транспорт и в память, чтобы история не расходилась
   - Чистый системный контекст Слона (скиллы + системный промпт) передаётся в структурированном конверте.
 
 Синхронизация контекста (Context Synchronization):
   - Отслеживает расхождение (divergence) между стабильной памятью Слона и историей
     диалога Antigravity (в transcript.jsonl сессии).
   - Если LogCompressor сжал старые ходы или память была модифицирована, старая сессия
-    Antigravity закрывается и создаётся свежая с актуальными наблюдениями (<observations>)
-    и оставшимися недавними ходами (<recent_conversation>).
+    Antigravity закрывается и создаётся свежая с оставшимися недавними ходами
+    (<recent_conversation> в системном промпте первого запроса новой сессии).
   - Чистит временные файлы сессий на диске для эфемерных агентов в __del__.
 """
 import asyncio
 import atexit
-import base64
-import difflib
 import hashlib
 import json
 import logging
@@ -36,25 +35,98 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 import uuid
-from contextlib import suppress
+import weakref
+from contextlib import contextmanager, suppress
 
 from src.agent.backends.base import BaseBackend
 from src.agent.skill import Skill, bypass
 
 log = logging.getLogger(__name__)
-_builtin_open = open
 
 # Базовый stream_id для transport.send_message — миллисекунды от запуска процесса
 _STREAM_ID_BASE: int = int(time.time() * 1000)
 _stream_id_counter: int = 0
+
+# Живые бэкенды для финальной чистки конфигов. WeakSet, чтобы atexit не держал
+# бэкенды до конца процесса и __del__ успевал почистить файлы эфемерных сессий.
+_LIVE_BACKENDS: "weakref.WeakSet" = weakref.WeakSet()
 
 
 def _next_stream_id() -> int:
     global _stream_id_counter
     _stream_id_counter += 1
     return _STREAM_ID_BASE + _stream_id_counter
+
+
+def _cleanup_live_backends():
+    for backend in list(_LIVE_BACKENDS):
+        with suppress(BaseException):
+            backend._unregister_mcp_config()
+            backend._unregister_hooks_config()
+            backend._cleanup_project_config()
+
+
+atexit.register(_cleanup_live_backends)
+
+
+@contextmanager
+def _config_file_lock(path: str, timeout: float = 2.0):
+    """Межпроцессная блокировка на время read-modify-write общего конфига agy."""
+    lock_path = f"{path}.lock"
+    fd = None
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            # Блокировка старше таймаута осталась от упавшего процесса — снимаем её
+            with suppress(OSError):
+                if time.time() - os.path.getmtime(lock_path) > timeout:
+                    os.remove(lock_path)
+                    continue
+            if time.monotonic() >= deadline:
+                log.warning("[antigravity] блокировка %s занята, пишем конфиг без неё", lock_path)
+                break
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            with suppress(OSError):
+                os.close(fd)
+            with suppress(OSError):
+                os.remove(lock_path)
+
+
+def _update_json_config(path: str, mutate) -> None:
+    """Применяет mutate(data) к JSON-конфигу и атомарно пишет результат под блокировкой.
+    mutate возвращает False, если менять нечего.
+    """
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with _config_file_lock(path):
+            data = {}
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            if mutate(data) is False:
+                return
+            tmp = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            shutil.move(tmp, path)
+    except (NameError, TypeError, AttributeError):
+        # Интерпретатор выгружает модули (atexit / __del__) — тихо выходим
+        pass
+    except Exception as e:
+        log.warning("[antigravity] не удалось обновить конфигурацию %s: %s", path, e)
 
 
 def _clean_mcp_param(val) -> str:
@@ -78,16 +150,12 @@ def _parse_mcp_args(args_val) -> dict:
     if isinstance(args_val, dict):
         return args_val
     if isinstance(args_val, str):
-        s = _clean_mcp_param(args_val)
-        if isinstance(s, dict):
-            return s
-        if isinstance(s, str):
-            try:
-                parsed = json.loads(s)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
+        try:
+            parsed = json.loads(_clean_mcp_param(args_val))
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
     return {}
 
 
@@ -119,17 +187,14 @@ def _build_base_instructions(
 ) -> str:
     """Формирует базовые инструкции со строгим приоритетом инструментов SlonAgent."""
     parts = [
-        "You are SlonAgent, an AI assistant.\n\nCRITICAL SYSTEM OVERRIDE:\nIgnore default Antigravity persona guidelines and default workflows.",
+        "You are SlonAgent, an AI programming assistant.",
     ]
     if allowed_tools:
-        parts.append(f"PERMITTED NATIVE TOOLS:\n" + "\n".join(f"- {t}" for t in allowed_tools))
+        parts.append("PERMITTED NATIVE TOOLS:\n" + "\n".join(f"- {t}" for t in allowed_tools))
     if forbidden_tools:
         lines = [f"- {t}" for t in forbidden_tools if t not in ("call_mcp_tool",)]
         parts.append("FORBIDDEN NATIVE TOOLS — prefer SlonAgent MCP tools instead:\n" + "\n".join(lines))
-    parts.append(
-        "To invoke SlonAgent tools, you MUST use `call_mcp_tool(ServerName='slon_agy', ToolName=..., Arguments=...)`.\n"
-        "Follow only the instructions and tool specifications explicitly provided below.\n"
-    )
+    parts.append("Follow only the instructions and tool specifications explicitly provided below.\n")
     return "\n\n".join(parts)
 
 
@@ -234,7 +299,7 @@ class AntigravityClient:
                     break
                 s = line.decode("utf-8", errors="replace").strip()
                 if s:
-                    log.debug("[antigravity:stderr] %s", s)
+                    log.info("[antigravity:stderr] %s", s)
             except (asyncio.CancelledError, Exception):
                 break
 
@@ -366,16 +431,18 @@ class AntigravityBackend(BaseBackend):
         self._mcp_runner = None
         self._mcp_port: int | None = None
         self._mcp_server_name: str | None = None
+        self._mcp_token: str | None = None
         self._project_id: str = f"slonagent_{self.agent.id}"
         self._mcp_tools: list[dict] = []
+        self._hook_wrapper_path: str | None = None
 
-        atexit.register(self._unregister_mcp_config)
-        atexit.register(self._cleanup_project_config)
+        _LIVE_BACKENDS.add(self)
 
     def __del__(self):
-        # Очищаем MCP и проект
+        # Очищаем MCP, хуки и проект
         with suppress(BaseException):
             self._unregister_mcp_config()
+            self._unregister_hooks_config()
             self._cleanup_project_config()
 
         # Эфемерный агент (без memory_dir) — чистим созданные файлы сессии в
@@ -385,13 +452,23 @@ class AntigravityBackend(BaseBackend):
                 cid = self._memory_state["conversation_id"]
                 self._cleanup_session_files(cid)
 
-    def _cleanup_session_files(self, cid: str):
-        """Удаляет sqlite db и brain logs для сессии cid."""
-        app_data_dir = (
+    def _app_data_dir(self) -> str:
+        return (
             self._sdk_options.get("app_data_dir")
             or os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
             or os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli")
         )
+
+    def _gemini_config_dir(self) -> str:
+        return (
+            self._sdk_options.get("config_dir")
+            or os.environ.get("ANTIGRAVITY_CONFIG_DIR")
+            or os.path.join(os.path.expanduser("~"), ".gemini", "config")
+        )
+
+    def _cleanup_session_files(self, cid: str):
+        """Удаляет sqlite db и brain logs для сессии cid."""
+        app_data_dir = self._app_data_dir()
         if not app_data_dir or not os.path.isdir(app_data_dir):
             return
 
@@ -409,60 +486,44 @@ class AntigravityBackend(BaseBackend):
         log.info("[antigravity] очищены файлы сессии %s", cid)
 
     def _mcp_config_path(self) -> str:
-        return os.path.join(os.path.expanduser("~"), ".gemini", "config", "mcp_config.json")
+        return os.path.join(self._gemini_config_dir(), "mcp_config.json")
 
     def _register_mcp_config(self):
         if not self._mcp_server_name or not self._mcp_port:
             return
-        p = self._mcp_config_path()
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        data = {}
-        if os.path.isfile(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                data = {}
-        servers = data.setdefault("mcpServers", {})
         bridge_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "antigravity_mcp.py")
-        servers[self._mcp_server_name] = {
-            "command": sys.executable,
-            "args": [bridge_script, "--port", str(self._mcp_port)],
-        }
-        tmp = f"{p}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        shutil.move(tmp, p)
+        args = [bridge_script, "--port", str(self._mcp_port)]
+        if self._mcp_token:
+            args.extend(["--token", self._mcp_token])
+        server_name = self._mcp_server_name
+
+        def mutate(data):
+            data.setdefault("mcpServers", {})[server_name] = {
+                "command": sys.executable,
+                "args": args,
+            }
+
+        _update_json_config(self._mcp_config_path(), mutate)
 
     def _unregister_mcp_config(self):
         if not self._mcp_server_name:
             return
-        p = self._mcp_config_path()
-        if os.path.isfile(p):
-            try:
-                open_func = _builtin_open if "_builtin_open" in globals() and _builtin_open is not None else open
-                with open_func(p, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                servers = data.get("mcpServers", {})
-                if self._mcp_server_name in servers:
-                    del servers[self._mcp_server_name]
-                    tmp = f"{p}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}"
-                    with open_func(tmp, "w", encoding="utf-8") as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                    shutil.move(tmp, p)
-            except (NameError, TypeError):
-                pass
-            except Exception as e:
-                log.warning("[antigravity] не удалось удалить MCP конфигурацию: %s", e)
+        server_name = self._mcp_server_name
 
-        schema_dir = os.path.join(
-            os.path.expanduser("~"), ".gemini", "antigravity-cli", "mcp", self._mcp_server_name
-        )
+        def mutate(data):
+            servers = data.get("mcpServers") or {}
+            if server_name not in servers:
+                return False
+            del servers[server_name]
+
+        _update_json_config(self._mcp_config_path(), mutate)
+
+        schema_dir = os.path.join(self._app_data_dir(), "mcp", server_name)
         shutil.rmtree(schema_dir, ignore_errors=True)
 
     def _project_config_path(self) -> str:
         proj_id = self._project_id or f"slonagent_{self.agent.id}"
-        return os.path.join(os.path.expanduser("~"), ".gemini", "config", "projects", f"{proj_id}.json")
+        return os.path.join(self._gemini_config_dir(), "projects", f"{proj_id}.json")
 
     def _ensure_project_config(self):
         self._project_id = self._project_id or f"slonagent_{self.agent.id}"
@@ -485,6 +546,79 @@ class AntigravityBackend(BaseBackend):
                 if os.path.isfile(p):
                     os.remove(p)
 
+    def _hooks_config_path(self) -> str:
+        return os.path.join(self._gemini_config_dir(), "hooks.json")
+
+    def _hook_policy_args(self) -> str:
+        """Аргументы политики тулов для командной строки хука."""
+        if self._allowed_tools:
+            return f'--allowed "{",".join(self._allowed_tools)}"'
+        if self._forbidden_tools:
+            return f'--forbidden "{",".join(self._forbidden_tools)}"'
+        return ""
+
+    def _get_hook_command(self) -> str:
+        """Возвращает команду запуска хука для hooks.json."""
+        hook_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "antigravity_hook.py")
+        args_str = self._hook_policy_args()
+
+        # На Windows создаём .cmd скрипт в memory_dir или tempfile, чтобы избежать
+        # проблем с разбором вложенных кавычек в cmd.exe /c "python.exe script.py"
+        if sys.platform == "win32":
+            target_dir = self.agent.memory.memory_dir or tempfile.gettempdir()
+            cmd_path = os.path.join(target_dir, f"slon_hook_{self.agent.id}.cmd")
+            content = f'@echo off\r\n"{sys.executable}" "{hook_py}" {args_str} %*\r\n'
+            with open(cmd_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            self._hook_wrapper_path = cmd_path
+            return cmd_path
+
+        return f'"{sys.executable}" "{hook_py}" {args_str}'
+
+    def _register_hooks_config(self):
+        """Регистрирует PreToolUse hook в hooks.json для блокировки запрещённых инструментов.
+        Вызывается на каждом ходу: close() и прерывание пользователем снимают регистрацию.
+        """
+        if not self._forbidden_tools:
+            return
+        hook_cmd = self._get_hook_command()
+        matcher = "|".join(re.escape(t) for t in self._forbidden_tools)
+        hook_name = f"slon_{self.agent.id}"
+
+        def mutate(data):
+            data[hook_name] = {
+                "enabled": True,
+                "PreToolUse": [
+                    {
+                        "matcher": matcher,
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": hook_cmd,
+                                "timeout": 15,
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        _update_json_config(self._hooks_config_path(), mutate)
+
+    def _unregister_hooks_config(self):
+        """Удаляет зарегистрированный хук из hooks.json."""
+        hook_name = f"slon_{self.agent.id}"
+
+        def mutate(data):
+            if hook_name not in data:
+                return False
+            del data[hook_name]
+
+        _update_json_config(self._hooks_config_path(), mutate)
+
+        if getattr(self, "_hook_wrapper_path", None) and os.path.isfile(self._hook_wrapper_path):
+            with suppress(OSError):
+                os.remove(self._hook_wrapper_path)
+
     async def _ensure_mcp_bridge(self):
         """Поднимает локальный HTTP loopback сервер для скиллов Слона и регистрирует MCP сервер."""
         tools_decl = []
@@ -506,6 +640,7 @@ class AntigravityBackend(BaseBackend):
                     await self._mcp_runner.cleanup()
                 self._mcp_runner = None
                 self._mcp_port = None
+                self._mcp_token = None
                 self._unregister_mcp_config()
             self._ensure_project_config()
             return
@@ -518,6 +653,16 @@ class AntigravityBackend(BaseBackend):
         from aiohttp import web
 
         app = web.Application()
+        self._mcp_token = uuid.uuid4().hex
+
+        @web.middleware
+        async def require_token(request, handler):
+            if request.headers.get("X-Slon-Token") != self._mcp_token:
+                log.warning("[antigravity] запрос к MCP bridge без валидного токена: %s", request.path)
+                return web.json_response({"error": "forbidden"}, status=403)
+            return await handler(request)
+
+        app.middlewares.append(require_token)
 
         async def get_tools(request):
             return web.json_response({"tools": self._mcp_tools})
@@ -746,7 +891,6 @@ class AntigravityBackend(BaseBackend):
                     name = fn.get("name") or tc.get("name")
                     if name:
                         sigs.add(("tool_call", name))
-                continue
             content = t.get("content")
             text = ""
             if isinstance(content, str):
@@ -769,17 +913,13 @@ class AntigravityBackend(BaseBackend):
             elif role == "tool":
                 if t.get("content") == "[прервано пользователем]":
                     continue
-                cid = t.get("tool_call_id") or t.get("name") or "tool"
+                cid = str(t.get("tool_call_id") or t.get("name") or "tool")
                 sigs.add(("tool_output", cid))
         return sigs
 
     def _transcript_path(self, conversation_id: str) -> str | None:
         """Находит путь к transcript.jsonl сессии."""
-        app_data_dir = (
-            self._sdk_options.get("app_data_dir")
-            or os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
-            or os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli")
-        )
+        app_data_dir = self._app_data_dir()
         p1 = os.path.join(app_data_dir, "brain", conversation_id, ".system_generated", "logs", "transcript.jsonl")
         if os.path.isfile(p1):
             return p1
@@ -794,12 +934,22 @@ class AntigravityBackend(BaseBackend):
         return None
 
     @classmethod
-    def _transcript_signatures(cls, path: str, ignored_tools: tuple[str, ...] | set[str] | None = None) -> set[tuple]:
-        """Извлекает сигнатуры ходов из transcript.jsonl.
-        ignored_tools — тулы, намеренно подавленные бэкендом (не вызывают расхождение памяти).
-        """
+    def _transcript_signatures(cls, path: str) -> set[tuple]:
+        """Извлекает сигнатуры ходов из transcript.jsonl."""
         sigs = set()
-        ignored = set(ignored_tools or ())
+        # Текст ассистента за один ход склеивается так же, как text_buf в llm(),
+        # иначе многошаговый ответ даёт разные сигнатуры в памяти и в транскрипте.
+        assistant_buf = ""
+        # Шаги, чей tool_call бэкенд намеренно не пишет в память: их TOOL_CALL тоже пропускаем
+        skipped_steps = set()
+
+        def flush_assistant():
+            nonlocal assistant_buf
+            text = assistant_buf.strip()[:150].strip()
+            if text:
+                sigs.add(("message", "assistant", text))
+            assistant_buf = ""
+
         try:
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -810,6 +960,7 @@ class AntigravityBackend(BaseBackend):
                     stype = entry.get("type")
                     source = entry.get("source")
                     if stype == "USER_INPUT" or source in ("USER_EXPLICIT", "USER"):
+                        flush_assistant()
                         content = entry.get("content") or ""
                         m = re.search(r"\[User Request\]\s*(.*?)(?:</USER_REQUEST>|\Z)", content, re.DOTALL)
                         if m:
@@ -823,13 +974,16 @@ class AntigravityBackend(BaseBackend):
                         if cleaned:
                             sigs.add(("message", "user", cleaned))
                     elif stype == "PLANNER_RESPONSE":
-                        for tc in entry.get("tool_calls") or ():
+                        tool_calls = entry.get("tool_calls") or ()
+                        emitted = 0
+                        for tc in tool_calls:
                             name = tc.get("name")
                             if name == "call_mcp_tool":
                                 args = _parse_mcp_args(tc.get("args") or {})
                                 tool_name = _clean_mcp_param(args.get("ToolName") or "")
                                 if tool_name:
                                     sigs.add(("tool_call", tool_name))
+                                    emitted += 1
                             elif name:
                                 # Игнорируем внутренний просмотр MCP схем
                                 if name == "view_file":
@@ -837,17 +991,17 @@ class AntigravityBackend(BaseBackend):
                                     fpath = str(args.get("AbsolutePath", "")).lower()
                                     if "mcp" in fpath:
                                         continue
-                                # Игнорируем намеренно подавленные бэкендом инструменты
-                                if name in ignored:
-                                    continue
                                 sigs.add(("tool_call", name))
-                        content = entry.get("content") or ""
-                        text = content[:150].strip()
-                        if text:
-                            sigs.add(("message", "assistant", text))
+                                emitted += 1
+                        if tool_calls and not emitted:
+                            skipped_steps.add(str(entry.get("step_index")))
+                        assistant_buf += entry.get("content") or ""
                     elif stype == "TOOL_CALL":
-                        step_id = entry.get("id") or "tool"
+                        step_id = str(entry.get("id") or entry.get("step_index") or "tool")
+                        if step_id in skipped_steps:
+                            continue
                         sigs.add(("tool_output", step_id))
+            flush_assistant()
         except Exception as e:
             log.warning("[antigravity] ошибка чтения transcript %s: %s", path, e)
         return sigs
@@ -863,7 +1017,7 @@ class AntigravityBackend(BaseBackend):
         if cid:
             transcript_path = self._transcript_path(cid)
             if transcript_path and os.path.isfile(transcript_path):
-                return self._transcript_signatures(transcript_path, ignored_tools=self._forbidden_tools)
+                return self._transcript_signatures(transcript_path)
         return sigs
 
     async def _conversation_has_diverged(self, conversation_id: str | None = None) -> bool:
@@ -943,7 +1097,6 @@ class AntigravityBackend(BaseBackend):
         conversation_id: str | None,
         append_text: str,
         skills_fp: str,
-        prompt_fp: str,
         resume: bool = False,
     ):
         """Создаёт инстанс AntigravityClient."""
@@ -975,19 +1128,17 @@ class AntigravityBackend(BaseBackend):
         self._client_skills_fp = skills_fp
 
         actual_cid = getattr(self._client, "conversation_id", None) or conversation_id or str(uuid.uuid4())
-        self._save_state({
-            "conversation_id": actual_cid,
-            "skills_fp": skills_fp,
-            "prompt_fp": prompt_fp,
-            "created": True,
-        })
+        state = self._load_state()
+        state["conversation_id"] = actual_cid
+        self._save_state(state)
 
     async def _ensure_session(self, append_text: str, skills_fp: str, stable_turns: list) -> str:
-        """Гарантирует валидную сессию Antigravity, синхронизированную с памятью Слона."""
-        prompt_fp = hashlib.sha256(append_text.encode("utf-8")).hexdigest()
+        """Гарантирует валидную сессию Antigravity, синхронизированную с памятью Слона.
+        Системный промпт для текущего хода остаётся в self._client_append: для свежей
+        сессии он дополняется недавней историей диалога.
+        """
         state = self._load_state()
         saved_cid = state.get("conversation_id")
-        saved_skills_fp = state.get("skills_fp")
 
         # 1. Если клиент активен и жив:
         if self._client is not None and self._client.is_alive:
@@ -1003,7 +1154,6 @@ class AntigravityBackend(BaseBackend):
                     conversation_id=saved_cid,
                     append_text=append_text,
                     skills_fp=skills_fp,
-                    prompt_fp=prompt_fp,
                     resume=True,
                 )
                 return saved_cid or ""
@@ -1035,7 +1185,6 @@ class AntigravityBackend(BaseBackend):
                         conversation_id=saved_cid,
                         append_text=append_text,
                         skills_fp=skills_fp,
-                        prompt_fp=prompt_fp,
                         resume=True,
                     )
                     log.info("[antigravity] успешно возобновлена сессия %s", saved_cid)
@@ -1078,7 +1227,6 @@ class AntigravityBackend(BaseBackend):
             conversation_id=new_cid,
             append_text=effective_append,
             skills_fp=skills_fp,
-            prompt_fp=prompt_fp,
             resume=False,
         )
 
@@ -1105,8 +1253,10 @@ class AntigravityBackend(BaseBackend):
                 await self._mcp_runner.cleanup()
             self._mcp_runner = None
             self._mcp_port = None
+            self._mcp_token = None
 
         self._unregister_mcp_config()
+        self._unregister_hooks_config()
         self._cleanup_project_config()
 
     async def llm(self, tool_choice: str = None, parallel_tool_calls: bool = None,
@@ -1148,12 +1298,15 @@ class AntigravityBackend(BaseBackend):
         # Обеспечиваем MCP bridge для скиллов с тулами
         await self._ensure_mcp_bridge()
 
+        # Хук запрещённых тулов: close() и прерывание снимают регистрацию, возвращаем её
+        self._register_hooks_config()
+
         # 4. Проверка и синхронизация сессии Antigravity
         await self._ensure_session(append_text, skills_fp, stable_turns)
 
         # 5. Формирование пользовательского запроса и промпта
         query_text = self._extract_user_text(pending)
-        prompt_payload = self._build_prompt_payload(append_text, query_text)
+        prompt_payload = self._build_prompt_payload(self._client_append or append_text, query_text)
         log.info("[antigravity] запрос: %r (%d pending turns)", query_text[:80], len(pending))
 
         text_buf = ""
@@ -1193,8 +1346,11 @@ class AntigravityBackend(BaseBackend):
                     if stype == "tool":
                         tool_name = su.get("tool_name", "")
                         tool_info = su.get("tool_info", {})
-                        state = su.get("state")
-                        call_id = str(su.get("step_index") or f"call_{tool_name}_{uuid.uuid4().hex[:8]}")
+                        tool_state = su.get("state")
+                        step_index = su.get("step_index")
+                        # ACTIVE и DONE одного вызова должны получить один и тот же id,
+                        # поэтому фолбэк без step_index тоже детерминированный
+                        call_id = str(step_index) if step_index is not None else f"call_{tool_name}"
 
                         # Обработка вызова инструмента через MCP
                         if tool_name == "call_mcp_tool":
@@ -1202,7 +1358,7 @@ class AntigravityBackend(BaseBackend):
                             actual_tool = _clean_mcp_param(params.get("ToolName") or "tool")
                             actual_args = _parse_mcp_args(params.get("Arguments"))
 
-                            if state == "ACTIVE":
+                            if tool_state == "ACTIVE":
                                 tool_use_names[call_id] = actual_tool
                                 await agent.transport.on_tool_call(actual_tool, actual_args)
                                 turns.append({
@@ -1216,9 +1372,12 @@ class AntigravityBackend(BaseBackend):
                                         },
                                     }],
                                 })
-                            elif state == "DONE":
+                            elif tool_state in ("DONE", "ERROR"):
                                 resolved_name = tool_use_names.get(call_id, actual_tool)
                                 out = tool_info.get("output", "")
+                                if not out and tool_info.get("error"):
+                                    err = tool_info["error"]
+                                    out = err.get("message") if isinstance(err, dict) else str(err)
                                 content_str = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
                                 await agent.transport.on_tool_result(resolved_name, out)
                                 turns.append({
@@ -1233,15 +1392,10 @@ class AntigravityBackend(BaseBackend):
                         if tool_name == "view_file":
                             fpath = str((tool_info.get("parameters") or {}).get("AbsolutePath", ""))
                             if "mcp" in fpath.lower():
-                                log.debug("[antigravity] пропущен внутренний просмотр MCP схемы: %s", fpath)
+                                log.info("[antigravity] пропущен внутренний просмотр MCP схемы: %s", fpath)
                                 continue
 
-                        # Подавляем нативные тулы, которые запрещены политикой (не входят в allowed_tools)
-                        if tool_name in self._forbidden_tools:
-                            log.debug("[antigravity] подавлен запрещённый нативный тул: %s", tool_name)
-                            continue
-
-                        if state == "ACTIVE":
+                        if tool_state == "ACTIVE":
                             params = tool_info.get("parameters") or {}
                             tool_use_names[call_id] = tool_name
                             await agent.transport.on_tool_call(tool_name, params)
@@ -1256,9 +1410,12 @@ class AntigravityBackend(BaseBackend):
                                     },
                                 }],
                             })
-                        elif state == "DONE":
+                        elif tool_state in ("DONE", "ERROR"):
                             resolved_name = tool_use_names.get(call_id, tool_name)
                             out = tool_info.get("output", "")
+                            if not out and tool_info.get("error"):
+                                err = tool_info["error"]
+                                out = err.get("message") if isinstance(err, dict) else str(err)
                             content_str = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
                             await agent.transport.on_tool_result(resolved_name, out)
                             turns.append({
@@ -1332,5 +1489,10 @@ class AntigravityBackend(BaseBackend):
                             "content": "[прервано пользователем]",
                         })
                         seen.add(tc["id"])
+
+            # 4. Уже отстримленный в транспорт текст сохраняем в память — иначе он
+            # виден пользователю, но отсутствует в истории и создаёт расхождение
+            if text_buf:
+                turns.append({"role": "assistant", "content": text_buf})
             turns.append({"role": "assistant", "content": "[ответ прерван пользователем]"})
             return turns
