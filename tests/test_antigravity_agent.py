@@ -189,6 +189,18 @@ class TestStrippingConfiguration:
         assert client._disable_slash_commands is True
         assert client._dangerously_skip_permissions is True
 
+    def test_allowed_tools_configuration(self):
+        backend = AntigravityBackend(make_agent(), sdk_options={"tools": ["run_command", "view_file"]})
+        assert "run_command" in backend._allowed_tools
+        assert "view_file" in backend._allowed_tools
+        assert "run_command" not in backend._forbidden_tools
+        assert "view_file" not in backend._forbidden_tools
+        assert "list_dir" in backend._forbidden_tools
+
+        payload = backend._build_prompt_payload(append_text="", user_text="Hello")
+        assert "PERMITTED NATIVE TOOLS:\n- run_command\n- view_file" in payload
+        assert "- list_dir" in payload
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Unit: Streaming Events & Multi-Turn Conversion
@@ -297,17 +309,17 @@ class TestStreaming:
         assert agent.backend_impl._load_state().get("conversation_id") == "test_conv_abc"
 
     @pytest.mark.asyncio
-    async def test_forbidden_native_tool_is_suppressed(self):
+    async def test_native_tool_is_dispatched_to_transport_and_turns(self):
         agent = make_agent()
         agent.memory._turns.append({"role": "user", "content": "Попробуй вызвать нативный тул"})
 
         class MockAntigravityClient:
             def __init__(self, **kwargs):
-                self.conversation_id = "test_suppress"
+                self.conversation_id = "test_native_tool"
                 self.is_alive = True
 
             async def chat(self, prompt):
-                # Нативный тул, запрещённый политикой
+                # Нативный тул agy (например list_dir)
                 yield {
                     "event": "step_update",
                     "step_update": {
@@ -333,15 +345,15 @@ class TestStreaming:
                     "step_update": {
                         "state": "ACTIVE",
                         "step_type": "agent_response",
-                        "text_delta": "Ответ без тула",
+                        "text_delta": "Нашёл secret_file.txt",
                     },
                 }
                 yield {
                     "event": "result",
                     "result": {
-                        "conversation_id": "test_suppress",
+                        "conversation_id": "test_native_tool",
                         "status": "SUCCESS",
-                        "response": "Ответ без тула",
+                        "response": "Нашёл secret_file.txt",
                     },
                 }
 
@@ -351,14 +363,45 @@ class TestStreaming:
         with patch("src.agent.backends.antigravity.AntigravityClient", MockAntigravityClient):
             turns = await agent.llm()
 
-        # list_dir не должен попасть в transport
-        agent.transport.on_tool_call.assert_not_called()
-        agent.transport.on_tool_result.assert_not_called()
+        # list_dir попадает в transport
+        agent.transport.on_tool_call.assert_called_once_with("list_dir", {"DirectoryPath": "."})
+        agent.transport.on_tool_result.assert_called_once_with("list_dir", "secret_file.txt")
 
-        # И не должен попасть в turns
-        assert len(turns) == 1
+        # И сохраняется в turns для синхронизации памяти
+        assert len(turns) == 3
         assert turns[0]["role"] == "assistant"
-        assert turns[0]["content"] == "Ответ без тула"
+        assert turns[0]["tool_calls"][0]["function"]["name"] == "list_dir"
+        assert turns[1]["role"] == "tool"
+        assert turns[1]["name"] == "list_dir"
+        assert turns[1]["content"] == "secret_file.txt"
+        assert turns[2]["role"] == "assistant"
+        assert turns[2]["content"] == "Нашёл secret_file.txt"
+
+        # Добавляем полученные ходы в память Слона
+        agent.memory._turns.extend(turns)
+
+        # Имитируем transcript.jsonl от agy с вызовом нативного тула
+        transcript_path = os.path.join(agent.memory.memory_dir or ".", "transcript_test.jsonl")
+        lines = [
+            json.dumps({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+                        "content": "<USER_REQUEST>\n[2026-09-17T16:00:00]\nПопробуй вызвать нативный тул\n</USER_REQUEST>"}),
+            json.dumps({"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                        "tool_calls": [{"name": "list_dir", "args": {"DirectoryPath": "."}}]}),
+            json.dumps({"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                        "content": "Нашёл secret_file.txt"}),
+        ]
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        try:
+            backend = agent.backend_impl
+            backend._transcript_path = MagicMock(return_value=transcript_path)
+
+            # На следующем ходе память НЕ расходится из-за нативного тула!
+            assert await backend._conversation_has_diverged("test_native_tool") is False
+        finally:
+            if os.path.exists(transcript_path):
+                os.remove(transcript_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -403,6 +446,10 @@ class TestCancellation:
 
         assert turns[-1]["role"] == "assistant"
         assert turns[-1]["content"] == "[ответ прерван пользователем]"
+
+        # Проверяем отправку уведомления и сброс processing в транспорт
+        agent.transport.send_message.assert_any_call("⚠️ Ответ прерван пользователем.")
+        agent.transport.send_processing.assert_any_call(False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
