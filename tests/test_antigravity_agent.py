@@ -549,6 +549,67 @@ class TestContextSynchronization:
 
         assert backend._load_state().get("conversation_id") == new_cid
 
+    @pytest.mark.asyncio
+    async def test_multi_turn_preserves_session_id_and_reuses_client(self):
+        agent = make_agent()
+        backend = agent.backend_impl
+
+        created_cids = []
+
+        class MockAntigravityClient:
+            def __init__(self, conversation_id=None, **kwargs):
+                self.conversation_id = conversation_id or "session_stable_111"
+                self.is_alive = True
+                created_cids.append(self.conversation_id)
+
+            async def chat(self, prompt):
+                yield {
+                    "event": "step_update",
+                    "step_update": {
+                        "state": "ACTIVE",
+                        "step_type": "agent_response",
+                        "text_delta": f"Ответ",
+                    },
+                }
+                yield {
+                    "event": "result",
+                    "result": {
+                        "conversation_id": self.conversation_id,
+                        "status": "SUCCESS",
+                        "response": f"Ответ",
+                    },
+                }
+
+            async def close(self):
+                self.is_alive = False
+
+        with patch("src.agent.backends.antigravity.AntigravityClient", MockAntigravityClient):
+            # Ход 1
+            agent.memory._turns.append({"role": "user", "content": "ку"})
+            turns1 = await agent.llm(system_prompt="System context 1")
+            assert len(turns1) == 1
+            assert len(created_cids) == 1
+            cid1 = created_cids[0]
+            agent.memory._turns.append(turns1[0])
+
+            # Ход 2 (динамический контекст промпта изменился)
+            agent.memory._turns.append({"role": "user", "content": "какая ты модель?"})
+            turns2 = await agent.llm(system_prompt="System context 2 (updated)")
+            assert len(turns2) == 1
+            agent.memory._turns.append(turns2[0])
+
+            # Ход 3 (ещё раз другой запрос и контекст)
+            agent.memory._turns.append({"role": "user", "content": "а песочница жива?"})
+            turns3 = await agent.llm(system_prompt="System context 3 (dynamic)")
+            assert len(turns3) == 1
+
+        # Клиент НЕ пересоздавался заново на каждый ход!
+        assert len(created_cids) == 1
+        assert backend._load_state().get("conversation_id") == cid1
+        # Никаких ложных уведомлений о пересоздании сессии не слалось
+        for call in agent.transport.send_memory_info.call_args_list:
+            assert "создана новая сессия" not in call[0][0]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Integration: Реальная сессия Antigravity по подписке (без ключей)
@@ -630,3 +691,53 @@ class TestIntegrationAntigravity:
         tool_call = agent.transport.on_tool_call.call_args
         assert "add" in tool_call.args[0]
         assert tool_call.args[1] == {"a": 17, "b": 25}
+
+    @pytest.mark.asyncio
+    async def test_real_antigravity_multi_turn_same_session(self):
+        """Проверяем реальный multi-turn диалог с agy.exe:
+        - сессия сохраняет conversation_id между ходами;
+        - модель помнит контекст предыдущего хода (кодовое слово);
+        - не создаётся новая сессия на каждый запрос.
+        """
+        from src.agent.backends.antigravity import _find_antigravity
+        try:
+            agy_bin = _find_antigravity()
+            if agy_bin == "agy" and not shutil.which("agy"):
+                pytest.skip("agy CLI не найден в системе")
+        except Exception:
+            pytest.skip("agy CLI не найден в системе")
+
+        agent = make_agent(model_name=os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high"))
+        try:
+            # Ход 1
+            agent.memory._turns.append({
+                "role": "user",
+                "content": "Запомни кодовое слово: ЗЕЛЁНЫЙ_ДЕЛЬФИН_88. Ответь одним словом: запомнил.",
+            })
+            turns1 = await agent.llm()
+            assert len(turns1) >= 1
+            cid1 = agent.backend_impl._load_state().get("conversation_id")
+            assert cid1, "conversation_id не сохранён в стейте"
+            agent.memory._turns.append(turns1[-1])
+
+            # Ход 2 (вопрос по контексту прошлого хода)
+            agent.memory._turns.append({
+                "role": "user",
+                "content": "Какое кодовое слово я тебя просил запомнить? Назови только его.",
+            })
+            turns2 = await agent.llm()
+            assert len(turns2) >= 1
+            cid2 = agent.backend_impl._load_state().get("conversation_id")
+
+            # Сессия та же самая!
+            assert cid2 == cid1, f"Сессия пересоздалась между ходами: {cid1} -> {cid2}"
+
+            # Модель помнит слово из прошлого хода в рамках сессии
+            content2 = turns2[-1]["content"].lower()
+            assert "зелёный_дельфин_88" in content2 or "дельфин" in content2
+
+            # Транспорт не получал ложных уведомлений о пересоздании
+            for call in agent.transport.send_memory_info.call_args_list:
+                assert "создана новая сессия" not in call[0][0]
+        finally:
+            await agent.backend_impl.close()

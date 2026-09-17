@@ -703,8 +703,17 @@ class AntigravityBackend(BaseBackend):
                 break
         return turns[:end]
 
-    @staticmethod
-    def _memory_signatures(turns: list) -> set[tuple]:
+    @classmethod
+    def _clean_user_text(cls, text: str) -> str:
+        """Очищает user-текст от временного штампа [YYYY-MM-DDTHH:MM:SS] и лишних пробелов."""
+        return re.sub(
+            r"^\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?\]\s*",
+            "",
+            text.strip(),
+        ).strip()
+
+    @classmethod
+    def _memory_signatures(cls, turns: list) -> set[tuple]:
         """Сигнатуры ходов, ожидаемые в истории диалога на основе памяти Слона."""
         sigs = set()
         for t in turns or ():
@@ -726,7 +735,11 @@ class AntigravityBackend(BaseBackend):
                 for p in content:
                     if isinstance(p, dict) and p.get("type") == "text":
                         text += p.get("text", "")
-            text = text.strip()[:200]
+            if role == "user":
+                text = cls._clean_user_text(text)
+            else:
+                text = text.strip()
+            text = text[:150].strip()
             if role == "user" and text:
                 sigs.add(("message", "user", text))
             elif role == "assistant" and text:
@@ -771,17 +784,31 @@ class AntigravityBackend(BaseBackend):
                     source = entry.get("source")
                     if stype == "USER_INPUT" or source in ("USER_EXPLICIT", "USER"):
                         content = entry.get("content") or ""
-                        if "<USER_REQUEST>" in content:
-                            m = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
-                            if m:
-                                content = m.group(1).strip()
-                        sigs.add(("message", "user", content.strip()[:200]))
-                    elif stype == "PLANNER_RESPONSE" or source == "MODEL":
+                        m = re.search(r"\[User Request\]\s*(.*?)(?:</USER_REQUEST>|\Z)", content, re.DOTALL)
+                        if m:
+                            user_text = m.group(1).strip()
+                        elif "<USER_REQUEST>" in content:
+                            m2 = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
+                            user_text = m2.group(1).strip() if m2 else content
+                        else:
+                            user_text = content
+                        cleaned = cls._clean_user_text(user_text)[:150].strip()
+                        if cleaned:
+                            sigs.add(("message", "user", cleaned))
+                    elif stype == "PLANNER_RESPONSE":
                         for tc in entry.get("tool_calls") or ():
-                            sigs.add(("tool_call", tc.get("name")))
+                            name = tc.get("name")
+                            if name == "call_mcp_tool":
+                                args = _parse_mcp_args(tc.get("args") or {})
+                                tool_name = _clean_mcp_param(args.get("ToolName") or "")
+                                if tool_name:
+                                    sigs.add(("tool_call", tool_name))
+                            elif name:
+                                sigs.add(("tool_call", name))
                         content = entry.get("content") or ""
-                        if content:
-                            sigs.add(("message", "assistant", content.strip()[:200]))
+                        text = content[:150].strip()
+                        if text:
+                            sigs.add(("message", "assistant", text))
                     elif stype == "TOOL_CALL":
                         step_id = entry.get("id") or "tool"
                         sigs.add(("tool_output", step_id))
@@ -805,32 +832,44 @@ class AntigravityBackend(BaseBackend):
 
     async def _conversation_has_diverged(self, conversation_id: str | None = None) -> bool:
         """True если стабильная часть памяти Слона и история диалога Antigravity разошлись."""
+        actual = self._agy_signatures(conversation_id)
+        if not actual:
+            return False
+
         stable = self._stable_memory_turns(self.agent.memory._turns)
         formatted = self.agent.strip_contents_private(stable)
         expected = self._memory_signatures(formatted)
-        actual = self._agy_signatures(conversation_id)
 
         if not expected and not actual:
-            return False
-        if not actual:
             return False
 
         if expected == actual:
             return False
 
-        only_in_memory = expected - actual
         only_in_agy = actual - expected
+        only_in_memory = expected - actual
 
-        log.warning(
-            "[antigravity] обнаружено расхождение контекста: %d только в памяти, %d только в Antigravity",
-            len(only_in_memory), len(only_in_agy),
-        )
-        for sig in list(only_in_memory)[:3]:
-            log.warning("[antigravity]   только в памяти: %r", sig)
-        for sig in list(only_in_agy)[:3]:
-            log.warning("[antigravity]   только в Antigravity: %r", sig)
+        if not only_in_agy and not only_in_memory:
+            return False
 
-        return True
+        # Если в истории Antigravity есть ходы, которых больше нет в памяти (LogCompressor сжал старые ходы):
+        if only_in_agy:
+            log.warning(
+                "[antigravity] обнаружено расхождение контекста: %d ходов в Antigravity отсутствуют в памяти (сжатие памяти)",
+                len(only_in_agy),
+            )
+            for sig in list(only_in_agy)[:3]:
+                log.warning("[antigravity]   только в Antigravity: %r", sig)
+            return True
+
+        # Если в памяти есть ходы, но ни один не совпадает с Antigravity (внешняя замена памяти / форк):
+        if only_in_memory and len(actual) > 0 and not (expected & actual):
+            log.warning(
+                "[antigravity] обнаружено расхождение: память полностью не совпадает с историей Antigravity",
+            )
+            return True
+
+        return False
 
     @staticmethod
     def _format_turns_for_context(turns: list) -> str:
@@ -913,32 +952,17 @@ class AntigravityBackend(BaseBackend):
         state = self._load_state()
         saved_cid = state.get("conversation_id")
         saved_skills_fp = state.get("skills_fp")
-        saved_prompt_fp = state.get("prompt_fp")
 
-        prompt_changed = (
-            self._client is not None and self._client_append != append_text
-        ) or (
-            self._client is None and saved_prompt_fp is not None and saved_prompt_fp != prompt_fp
-        )
-        skills_changed = (
-            self._client is not None and self._client_skills_fp != skills_fp
-        ) or (
-            self._client is None and saved_skills_fp is not None and saved_skills_fp != skills_fp
-        )
-
-        diverged = False
-        if not prompt_changed and not skills_changed:
-            diverged = await self._conversation_has_diverged(saved_cid)
-
-        need_fresh = prompt_changed or skills_changed or diverged or (self._client is None and not saved_cid)
-
-        if not need_fresh:
-            if self._client is not None and self._client.is_alive:
-                log.info("[antigravity] переиспользование активного клиента (conv_id=%s)", self._client.conversation_id)
-                return self._client.conversation_id or saved_cid or ""
-
-            # Клиент не поднят, но стейт валиден и не разошёлся — пробуем возобновить
-            try:
+        # 1. Если клиент активен и жив:
+        if self._client is not None and self._client.is_alive:
+            # Проверяем, изменился ли набор тулов скиллов
+            if self._client_skills_fp != skills_fp:
+                log.info("[antigravity] набор скиллов изменился, перезапускаем клиента с сессией %s", saved_cid)
+                with suppress(Exception, asyncio.CancelledError):
+                    await self._client.close()
+                self._client = None
+                self._client_append = None
+                self._client_skills_fp = None
                 await self._create_client(
                     conversation_id=saved_cid,
                     append_text=append_text,
@@ -946,30 +970,60 @@ class AntigravityBackend(BaseBackend):
                     prompt_fp=prompt_fp,
                     resume=True,
                 )
-                log.info("[antigravity] успешно возобновлена сессия %s", saved_cid)
-                return saved_cid
-            except Exception as e:
-                log.warning(
-                    "[antigravity] возобновление сессии %s не удалось (%s: %s), начинаем свежую",
-                    saved_cid, type(e).__name__, e,
-                )
-                need_fresh = True
+                return saved_cid or ""
 
+            # Проверяем реальное расхождение памяти (например, LogCompressor только что сжал старые ходы)
+            if await self._conversation_has_diverged(saved_cid):
+                log.info("[antigravity] память разошлась в активной сессии, пересоздаём сессию")
+                with suppress(Exception, asyncio.CancelledError):
+                    await self._client.close()
+                self._client = None
+                self._client_append = None
+                self._client_skills_fp = None
+            else:
+                # Нормальный multi-turn: продолжаем в том же живом процессе
+                self._client_append = append_text
+                return self._client.conversation_id or saved_cid or ""
+
+        # 2. Клиент не запущен (первый запуск, рестарт процесса или память разошлась)
+        need_fresh = False
+        diverged = False
+        if saved_cid:
+            diverged = await self._conversation_has_diverged(saved_cid)
+            if diverged:
+                need_fresh = True
+            else:
+                # Пытаемся возобновить сохранённую сессию
+                try:
+                    await self._create_client(
+                        conversation_id=saved_cid,
+                        append_text=append_text,
+                        skills_fp=skills_fp,
+                        prompt_fp=prompt_fp,
+                        resume=True,
+                    )
+                    log.info("[antigravity] успешно возобновлена сессия %s", saved_cid)
+                    return saved_cid
+                except Exception as e:
+                    log.warning(
+                        "[antigravity] возобновление сессии %s не удалось (%s: %s), начинаем свежую",
+                        saved_cid, type(e).__name__, e,
+                    )
+                    need_fresh = True
+        else:
+            need_fresh = True
+
+        # 3. Запуск свежей сессии (первый запуск или компрессия памяти)
         reasons = []
-        if prompt_changed: reasons.append("system prompt изменился")
-        if skills_changed: reasons.append("набор скиллов изменился")
-        if diverged: reasons.append("память разошлась (сжатие/правка истории)")
-        if not saved_cid: reasons.append("первый запуск")
-        reason = ", ".join(reasons) or "перезапуск"
+        if diverged:
+            reasons.append("память разошлась (сжатие/правка истории)")
+        elif not saved_cid:
+            reasons.append("первый запуск")
+        else:
+            reasons.append("перезапуск сессии")
+        reason = ", ".join(reasons)
 
         log.info("[antigravity] запуск свежей сессии (причина: %s)", reason)
-
-        if self._client:
-            with suppress(Exception, asyncio.CancelledError):
-                await self._client.close()
-            self._client = None
-            self._client_append = None
-            self._client_skills_fp = None
 
         if self._state_file is None and saved_cid:
             self._cleanup_session_files(saved_cid)
@@ -992,10 +1046,12 @@ class AntigravityBackend(BaseBackend):
             resume=False,
         )
 
-        with suppress(Exception):
-            await self.agent.transport.send_memory_info(
-                f"Синхронизировал antigravity-сессию: {reason}, создана новая сессия"
-            )
+        # Оповещаем транспорт только если сессия пересоздана из-за сжатия истории
+        if diverged:
+            with suppress(Exception):
+                await self.agent.transport.send_memory_info(
+                    f"Синхронизировал antigravity-сессию: {reason}, создана новая сессия"
+                )
 
         return self._client.conversation_id or new_cid
 
