@@ -578,9 +578,11 @@ class Agent:
                                 
                     except Exception as e:
                         logging.warning("Ошибка агента: %s", e, exc_info=True)
-                        await self.transport.send_message(f"Ошибка: {e}")
+                        try: await self.transport.send_message(f"Ошибка: {e}")
+                        except Exception as te: logging.warning("Не удалось отправить ошибку в транспорт: %s", te)
                     finally:
-                        await self.transport.send_processing(False)
+                        try: await self.transport.send_processing(False)
+                        except Exception as te: logging.warning("send_processing(False) failed: %s", te)
 
                 await stoppable(handle_turn(), self._stop_event)
         finally:

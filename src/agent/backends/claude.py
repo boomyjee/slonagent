@@ -764,6 +764,8 @@ class ClaudeBackend(BaseBackend):
                         )
 
                 elif isinstance(message, ResultMessage):
+                    if message.is_error:
+                        raise RuntimeError(message.result or f"claude {message.subtype}")
                     cost = self._turn_cost(message)
                     usage = message.model_usage or {}
                     # Ответившая модель — с наибольшим output (haiku-side-call мелкий).
