@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
+from agent import Agent
 from src.transport.web.server import WebTransportServer
 
 log = logging.getLogger(__name__)
@@ -239,7 +240,7 @@ class WebFork:
             new_parts = []
             for p in msg.get("content_parts", []):
                 if isinstance(p, dict) and p.get("type") == "file":
-                    new_parts.extend(await self._process_file(p))
+                    new_parts.extend(await self._process_file(p, msg.get("thread_id", "")))
                 else:
                     new_parts.append(p)
             msg = {**msg, "content_parts": new_parts}
@@ -253,7 +254,6 @@ class WebFork:
             try:
                 tid = msg.get("thread_id", "")
                 if tid not in self.transports:
-                    from agent import Agent
                     await Agent.get(self.ref_agent.id, tid)
 
                 await self.transports[tid].process_message(
@@ -386,7 +386,7 @@ class WebFork:
             part["_document_id"] = f"{file_id}_{filename}"
         return part
 
-    async def _process_file(self, p: dict) -> list[dict]:
+    async def _process_file(self, p: dict, thread_id: str = "") -> list[dict]:
         """Единственный диспатч аттача: сохраняет байты, возвращает 1+
         content_part'ов в зависимости от mime — image/* отдаёт также
         image_url для vision, voice/video транскрибируются/описываются,
@@ -415,13 +415,15 @@ class WebFork:
         elif mime.startswith("video/"):
             field = "video"
             try:
-                content = await self.ref_agent.describe_video(data, mime)
+                agent = await Agent.get(self.ref_agent.id, thread_id)
+                content = await agent.describe_video(data, mime)
             except Exception:
                 log.exception("video describe failed")
         elif mime.startswith("audio/"):
             field = "voice"
             try:
-                content = await self.ref_agent.transcribe_audio(data, mime)
+                agent = await Agent.get(self.ref_agent.id, thread_id)
+                content = await agent.transcribe_audio(data, mime)
             except Exception as e:
                 log.exception("voice transcription failed")
                 content = f"⚠️ Не удалось распознать: {e}"
