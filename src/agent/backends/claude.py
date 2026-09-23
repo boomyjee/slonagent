@@ -15,7 +15,9 @@ import tempfile
 import time
 import uuid
 from contextlib import suppress
+from importlib.metadata import version
 
+from packaging.requirements import Requirement
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -36,6 +38,24 @@ from src.agent.skill import Skill, bypass
 from src.agent.backends.base import BaseBackend
 
 log = logging.getLogger(__name__)
+
+
+def _require_sdk_from_requirements():
+    """Версия SDK = версия бандленного CLI, а от неё зависит, какие модели
+    пускает сервер и что CLI подмешивает в запросы. Старый SDK после git pull
+    без pip install — падаем сразу, а не посреди хода."""
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "requirements.txt")
+    with open(path, encoding="utf-8") as f:
+        required = next(Requirement(line) for line in f if line.startswith("claude-agent-sdk"))
+    installed = version("claude-agent-sdk")
+    if not required.specifier.contains(installed, prereleases=True):
+        raise RuntimeError(
+            f"claude-agent-sdk {installed} не подходит под requirements.txt ({required}). "
+            f"Обнови: .venv\\Scripts\\pip install -r requirements.txt"
+        )
+
+
+_require_sdk_from_requirements()
 
 
 # Базовый stream_id для transport.send_message — миллисекунды от запуска
@@ -573,6 +593,9 @@ class ClaudeBackend(BaseBackend):
             # you need next…» и т.п. Это подсказки для Claude Code, не для слона.
             # Блок с userEmail/currentDate этим не гасится (в CLI он безусловный);
             # дату слон и так штампует в каждое сообщение сам.
+            # CLAUDEAI_MCP_SERVERS: CLI в фоне подгружает коннекторы из аккаунта
+            # claude.ai (Docs и т.п.) — со второго запроса их тулы уходят модели
+            # рядом с нашими, а с bypassPermissions она могла бы их вызывать.
             # Мёржим после user-overrides, юзер может переопределить.
             options_kwargs["env"] = {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -580,6 +603,7 @@ class ClaudeBackend(BaseBackend):
                 "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                 "CLAUDE_CODE_DISABLE_ATTACHMENTS": "1",
                 "ENABLE_TOOL_SEARCH": "false",
+                "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
                 **options_kwargs.get("env", {}),
             }
 

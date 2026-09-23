@@ -8,12 +8,16 @@ session_id state, переиспользование клиента.
 import asyncio
 import json
 import os
+import re
+import socket
 import subprocess
 import sys
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
+from aiohttp import web
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -71,6 +75,23 @@ async def aiter_messages(messages):
     """Превращает список сообщений в async-итератор для receive_response."""
     for msg in messages:
         yield msg
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Версия SDK против requirements.txt
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSdkVersionCheck:
+
+    def test_installed_sdk_matches_requirements(self):
+        from src.agent.backends.claude import _require_sdk_from_requirements
+        _require_sdk_from_requirements()
+
+    def test_outdated_sdk_raises_with_update_hint(self):
+        from src.agent.backends.claude import _require_sdk_from_requirements
+        with patch("src.agent.backends.claude.version", return_value="0.0.1"):
+            with pytest.raises(RuntimeError, match=r"claude-agent-sdk 0\.0\.1 .*pip install -r requirements\.txt"):
+                _require_sdk_from_requirements()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -894,6 +915,115 @@ class TestClaudeAgentIntegration:
         tool_call = agent.transport.on_tool_call.call_args
         assert "add" in tool_call.args[0]
         assert tool_call.args[1] == {"a": 17, "b": 25}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Integration — что CLI реально отправляет в API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+async def anthropic_requests(monkeypatch):
+    """Прокси между claude CLI и API (CLI ходит через него по ANTHROPIC_BASE_URL).
+    Тела /v1/messages складываются в список — ровно то, что видит модель."""
+    upstream_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    requests = []
+    session = aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=300))
+
+    async def forward(request: web.Request):
+        body = await request.read()
+        if request.path == "/v1/messages":
+            requests.append(json.loads(body))
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in ("host", "content-length", "accept-encoding")}
+        async with session.request(request.method, upstream_url + request.path_qs,
+                                   headers=headers, data=body) as upstream:
+            response = web.StreamResponse(status=upstream.status, headers={
+                k: v for k, v in upstream.headers.items()
+                if k.lower() not in ("content-length", "content-encoding", "transfer-encoding", "connection")})
+            await response.prepare(request)
+            async for chunk in upstream.content.iter_any():
+                await response.write(chunk)
+        return response
+
+    app = web.Application(client_max_size=100 * 1024 * 1024)
+    app.router.add_route("*", "/{tail:.*}", forward)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    await web.SockSite(runner, sock).start()
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{sock.getsockname()[1]}")
+    yield requests
+    await runner.cleanup()
+    await session.close()
+
+
+@pytest.mark.integration
+class TestClaudeRequestWhitelist:
+    """Голый режим должен отдавать модели только наше: системку, скиллы, диалог.
+    CLI подмешивает своё (промпты, reminder'ы, коннекторы claude.ai), и набор
+    меняется от версии к версии — сверяем реальные тела /v1/messages с белым
+    списком, чтобы новая вставка после бампа claude-agent-sdk роняла тест."""
+
+    IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
+    # Секции, которые CLI шлёт безусловно: выключателя нет, а bare-режим
+    # (CLAUDE_CODE_SIMPLE) заодно выключает логин по подписке.
+    CLI_SECTIONS = [re.compile(p) for p in (
+        r"As you answer the user's questions, you can use the following context:\n# userEmail\n[^\n]*",
+        r"IMPORTANT: this context may or may not be relevant to your tasks\.[^\n]*",
+        r"# Environment\nYou have been invoked in the following environment: "
+        r"(\n - (Primary working directory|Is a git repository|Platform|Shell|OS Version): [^\n]*)+",
+        r"You are powered by the model [^\n]*",
+        r"Today's date is [^\n]*",
+    )]
+    REQUEST_KEYS = {"model", "messages", "system", "tools", "metadata", "max_tokens", "thinking",
+                    "context_management", "output_config", "stream"}
+
+    @classmethod
+    def foreign_content(cls, request: dict, append: str, user_texts: list[str]) -> list[str]:
+        found = []
+        system = [b["text"] for b in request["system"]]
+        if not system[0].startswith("x-anthropic-billing-header:") or system[1:] != [cls.IDENTITY, append]:
+            found.append(f"system: {system}")
+        found += [f"tool: {t['name']}" for t in request["tools"] if not t["name"].startswith("mcp__slon__")]
+        found += [f"request key: {k}" for k in request.keys() - cls.REQUEST_KEYS]
+        for message in request["messages"]:
+            if message["role"] == "assistant":
+                continue
+            content = message["content"]
+            blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
+            for block in blocks:
+                if block["type"] == "tool_result" or block.get("text") in user_texts:
+                    continue
+                if block["type"] != "text":
+                    found.append(f"{message['role']} block: {block['type']}")
+                    continue
+                sections = re.split(r"\n{2,}", re.sub(r"</?system-reminder>", "", block["text"]))
+                found += [f"{message['role']}: {s.strip()}" for s in sections
+                          if s.strip() and not any(p.fullmatch(s.strip()) for p in cls.CLI_SECTIONS)]
+        return found
+
+    # Модели, на которых слон гоняет claude-бэкенд (агент, компрессоры). Что и
+    # куда вставлять, CLI решает по модели: у fable был свой блок в system,
+    # у sonnet окружение завёрнуто в system-reminder.
+    @pytest.mark.parametrize("model", ["opus", "sonnet", "claude-opus-4-8"])
+    async def test_request_has_only_our_content(self, anthropic_requests, model):
+        agent = make_agent(skills=[_CalcSkill()], model_name=model)
+        # Два хода: коннекторы claude.ai подгружаются асинхронно, в первом
+        # запросе их может ещё не быть.
+        user_texts = ["Сложи 2 и 3 через тул add, ответь одним числом.", "Теперь сложи 4 и 5 тем же тулом."]
+        try:
+            for text in user_texts:
+                agent.memory._turns.append({"role": "user", "content": text})
+                await agent.llm()
+            append = agent.backend_impl._client_append
+        finally:
+            await agent.close()
+
+        assert anthropic_requests, "CLI не ходил через прокси"
+        found = {i: f for i, r in enumerate(anthropic_requests)
+                 if (f := self.foreign_content(r, append, user_texts))}
+        assert not found, "чужое в запросах к API:\n" + json.dumps(found, ensure_ascii=False, indent=1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
