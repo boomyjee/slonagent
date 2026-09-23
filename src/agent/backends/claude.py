@@ -672,6 +672,7 @@ class ClaudeBackend(BaseBackend):
         thinking_buf = ""
         thinking_stream_id = None
         tool_use_names: dict[str, str] = {}
+        turn_models: list[str] = []  # модели основного потока в этом ходе, по порядку
         block_type = None
         turns: list[dict] = []
 
@@ -716,6 +717,8 @@ class ClaudeBackend(BaseBackend):
                     # — для UI. У субагента StreamEvent'ов нет, текст приходит цельным
                     # TextBlock'ом, так что send_message делаем здесь.
                     is_sub = message.parent_tool_use_id is not None
+                    if not is_sub and message.model and message.model not in turn_models:
+                        turn_models.append(message.model)
                     # Один AssistantMessage = один API-вызов. ResultMessage даёт только
                     # сумму за ход; по вызовам видно, где префикс переписался заново
                     # (cache_creation сопоставим с cache_read) вместо роста хвоста.
@@ -791,15 +794,17 @@ class ClaudeBackend(BaseBackend):
                     if message.is_error:
                         raise RuntimeError(message.result or f"claude {message.subtype}")
                     cost = self._turn_cost(message)
-                    usage = message.model_usage or {}
-                    # Ответившая модель — с наибольшим output (haiku-side-call мелкий).
-                    # Видно сразу, ушёл ли ход на fable или на opus-fallback.
-                    primary = max(usage, key=lambda m: usage[m].get("outputTokens", 0), default="?")
+                    # Кто отвечал в этом ходе — по AssistantMessage.model основного
+                    # потока. model_usage не годится: он нарастающий за процесс CLI
+                    # (см. _turn_cost), и max по нему показывает модель, больше всех
+                    # наговорившую за сессию. Смена модели посреди хода (fallback)
+                    # видна как «a→b».
+                    who = "→".join(m.removeprefix("claude-") for m in turn_models) or "?"
                     log.info("[claude_agent] done: %d turns, %s (session total $%.4f)",
                              message.num_turns, cost, self._client_cost_usd)
                     log.info("[claude_agent] model_usage (session total): %s", message.model_usage)
                     await agent.transport.send_message(
-                        f"✅ Готово ({message.num_turns} turns, {primary.removeprefix('claude-')}, {cost})"
+                        f"✅ Готово ({message.num_turns} turns, {who}, {cost})"
                     )
                     return turns
         except asyncio.CancelledError:
