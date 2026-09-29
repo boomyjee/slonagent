@@ -100,7 +100,10 @@ class SandboxSkill(Skill):
             result = {"error": (proc.stderr or "").strip() or f"runner exit {proc.returncode}"}
         else:
             result = {"error": f"runner output без маркера результата:\n{proc.stdout}"}
-            for line in proc.stdout.splitlines():
+            # Протокол построчный по "\n". splitlines() нельзя: он рвёт строку ещё и на
+            # U+2028/U+2029/U+0085, которые json.dumps(ensure_ascii=False) оставляет
+            # внутри строк как есть → JSON результата обрезается («Unterminated string»).
+            for line in proc.stdout.split("\n"):
                 if line.startswith(self._RESULT_MARKER):
                     result = json.loads(line[len(self._RESULT_MARKER):])
                     break
