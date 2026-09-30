@@ -414,7 +414,12 @@ class Agent:
             self._transcription_client = Agent.OpenAI(*self._transcription_auth)
         return self._transcription_client
 
-    async def transcribe_audio(self, data: bytes | str, mime_type: str, silent: bool = False) -> str:
+    async def transcribe_audio(self, data: bytes | str, mime_type: str, silent: bool = False,
+                               language: str | None = None) -> str:
+        """language — язык речи (ISO-639-1: 'ro', 'en'...). По умолчанию — из конфига
+        (transcription_whisper_language). Нужен скриптам в контейнере, распознающим
+        не русскую речь: whisper с принудительным -l ru транслитерирует её в кириллицу."""
+        lang = language or self.transcription_whisper_language
         if isinstance(data, str):
             data = base64.b64decode(data)
         fmt = mime_type.split("/")[-1]
@@ -442,8 +447,8 @@ class Agent:
                     f.write(data)
                 out_base = os.path.join(td, "out")
                 args = [cli, "-m", model, "-t", "8", "-otxt", "-of", out_base, "-f", inp]
-                if self.transcription_whisper_language:
-                    args += ["-l", self.transcription_whisper_language]
+                if lang:
+                    args += ["-l", lang]
                 proc = await asyncio.create_subprocess_exec(
                     *args,
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
@@ -470,7 +475,8 @@ class Agent:
                 resp = await self.transcription_client.chat.completions.create(
                     model=self.transcription_model_name,
                     messages=[{"role": "user", "content": [
-                        {"type": "text", "text": "Transcribe the audio. Return only the transcript text."},
+                        {"type": "text", "text": "Transcribe the audio. Return only the transcript text."
+                         + (f" The speech is in language '{language}'." if language else "")},
                         {"type": "input_audio", "input_audio": {"data": base64.b64encode(data).decode(), "format": fmt}},
                     ]}],
                 )
