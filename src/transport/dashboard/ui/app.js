@@ -9,7 +9,7 @@ import { Tabs } from './components/common/Tabs.js';
 import { Logs } from './components/Logs.js';
 import { Git } from './components/Git.js';
 import { WebView } from './components/WebView.js';
-import { currentRoot, setCurrentRoot } from './components/api.js';
+import { api, currentRoot, setCurrentRoot } from './components/api.js';
 import { applyAll } from './theme.js';
 import { openSettingsDialog } from './components/SettingsDialog.js';
 
@@ -191,6 +191,13 @@ class App extends Component {
         });
         this._setMobileView('editor');
         if (line) this._editor?.revealLine(path, line);
+    };
+
+    // Путь из аргументов тула (container или host path) → вкладка файла.
+    openToolPath = async (path) => {
+        const data = await api(`api/file/locate?path=${encodeURIComponent(path)}`);
+        if (!data.path) throw new Error(data.error);
+        this._openFile(data.path, data.path.split('/').pop());
     };
 
     _openGit = (path, name) => {

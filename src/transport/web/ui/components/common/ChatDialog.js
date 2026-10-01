@@ -528,13 +528,30 @@ export class ChatDialog extends Component {
         return name;
     }
 
-    // Подсказка для tool-заголовка: basename файла из file_path/path. Для
-    // tool'ов без file-аргумента — null, ничего не подмешиваем.
-    static _toolHint(args) {
+    // Путь файла из file_path/path для tool-заголовка (там показываем basename).
+    // Для tool'ов без file-аргумента — null, ничего не подмешиваем.
+    static _toolPath(args) {
         if (!args) return null;
         const path = args.file_path || args.path;
-        if (typeof path !== 'string' || !path) return null;
-        return path.split(/[/\\]/).pop() || path;
+        return typeof path === 'string' && path ? path : null;
+    }
+
+    // Если app умеет открывать файлы (дашборд) — хинт ссылка на вкладку файла.
+    _renderToolHint(path) {
+        const name = path.split(/[/\\]/).pop() || path;
+        if (!this.props.app?.openToolPath) return html`<span class=${cl.toolHint}>${name}</span>`;
+        return html`<span class="${cl.toolHint} link" title=${path}
+                          onClick=${e => { e.stopPropagation(); this._openToolPath(e.currentTarget, path); }}>${name}</span>`;
+    }
+
+    async _openToolPath(el, path) {
+        try {
+            await this.props.app.openToolPath(path);
+        } catch (err) {
+            console.error(`open ${path}:`, err.message);
+            el.classList.add(cl.flashErr);
+            el.addEventListener('animationend', () => el.classList.remove(cl.flashErr), { once: true });
+        }
     }
 
     // Извлекает строки-комментарии из bash-команды (модель часто
@@ -625,7 +642,7 @@ export class ChatDialog extends Component {
                             const open = expanded[i];
                             const argsText = this._formatArgs(m.args);
                             const resultText = this._formatResult(m.result);
-                            const hint = ChatDialog._toolHint(m.args);
+                            const path = ChatDialog._toolPath(m.args);
                             const comments = m.name === 'sandbox_exec' && !open
                                 ? ChatDialog._bashComments(m.args?.command) : '';
                             return html`
@@ -633,7 +650,7 @@ export class ChatDialog extends Component {
                                     <div class="hdr" onClick=${() => this.setState(({ expanded: e }) => ({ expanded: { ...e, [i]: !open } }))}>
                                         <span class="arr">${open ? '▼' : '▶'}</span>
                                         <span>⚙ ${m.name}</span>
-                                        ${hint && html`<span class=${cl.toolHint}>${hint}</span>`}
+                                        ${path && this._renderToolHint(path)}
                                     </div>
                                     ${comments && html`<div class="comments">${comments}</div>`}
                                     ${open && argsText && html`<div class="body">${argsText}</div>`}
@@ -791,7 +808,14 @@ cl.toolHint = css`
   padding: 2px 6px;
   background: var(--bg);
   font-family: monospace; font-size: 10px;
+  &.link { cursor: pointer; }
+  &.link:hover { text-decoration: underline; color: var(--accent); }
 `;
+const flashErr = keyframes`
+  0%, 100% { background: var(--bg); }
+  30% { background: var(--red); }
+`;
+cl.flashErr = css`animation: ${flashErr} 0.6s;`;
 cl.tool = css`
   margin-bottom: 5px; border: 1px solid var(--border); border-radius: 3px; font-size: 12px;
   border-left: 3px solid var(--accent);
@@ -845,7 +869,7 @@ const pulse = keyframes`
   50% { opacity: 0.35; }
 `;
 cl.recording = css`
-  color: var(--err, #e74c3c) !important;
+  color: var(--red) !important;
   animation: ${pulse} 0.8s infinite;
 `;
 cl.attachments = css`

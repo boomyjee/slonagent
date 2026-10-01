@@ -216,7 +216,8 @@ export class Chat extends Component {
                         connected=${connected}
                         className=${id === activeTab ? '' : cl.hidden}
                         threadId=${id}
-                        onSend=${this._onSend(id)} />`)}
+                        onSend=${this._onSend(id)}
+                        app=${this.props.app} />`)}
             </div>
         `;
     }

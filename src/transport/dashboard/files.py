@@ -32,6 +32,7 @@ class FilesAPI:
         t.register_route("get", "/api/files", self.list)
         t.register_route("get", "/api/file", self.read)
         t.register_route("get", "/api/file/raw", self.read_raw)
+        t.register_route("get", "/api/file/locate", self.locate)
         t.register_route("get", "/api/dir/zip", self.download_dir)
         t.register_route("get", "/api/dir/zip/check", self.check_dir_zip)
         t.register_route("put", "/api/file", self.write)
@@ -57,6 +58,21 @@ class FilesAPI:
         if full == base or full.startswith(base + os.sep):
             return full
         return None
+
+    async def locate(self, root: str = Query(""), path: str = Query(...)):
+        """Путь из аргументов тула → root-relative путь вкладки. Sandbox-тулы
+        дают container path (/workspace/...), claude-бэкенд — host path."""
+        sandbox = self.fork.ref_agent.sandbox
+        host = (sandbox and sandbox.resolve_path(path)) or path
+        if not os.path.isabs(host):
+            return JSONResponse({"error": f"Not an absolute path: {path}"}, 404)
+        if not os.path.isfile(host):
+            return JSONResponse({"error": f"Not a file: {host}"}, 404)
+        base = os.path.realpath(root or self.default_root())
+        full = os.path.realpath(host)
+        if not full.startswith(base + os.sep):
+            return JSONResponse({"error": f"{full} is outside root {base}"}, 404)
+        return JSONResponse({"path": "/" + full[len(base) + 1:].replace(os.sep, "/")})
 
     # ─── file ops ──────────────────────────────────────────────────
 
