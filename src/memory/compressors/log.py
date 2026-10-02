@@ -523,6 +523,18 @@ Aim for a 2/10 detail level. Fewer, more generic observations are better than ma
 """,
 }
 
+# Mastra OBSERVATION_CONTEXT_INSTRUCTIONS (constants.ts), без SYSTEM REMINDERS —
+# своих <system-reminder> в диалог не вставляем.
+OBSERVATION_CONTEXT_INSTRUCTIONS = """IMPORTANT: When responding, reference specific details from these observations. Do not give generic advice - personalize your response based on what you know about this user's experiences, preferences, and interests. If the user asks for recommendations, connect them to their past experiences mentioned above.
+
+KNOWLEDGE UPDATES: When asked about current state (e.g., "where do I currently...", "what is my current..."), always prefer the MOST RECENT information. Observations include dates - if you see conflicting information, the newer observation supersedes the older one. Look for phrases like "will start", "is switching", "changed to", "moved to" as indicators that previous information has been updated.
+
+USER STATEMENTS VS ASSISTANT SUGGESTIONS: Treat what the user said about their own life, plans, decisions, and dates as authoritative, unless data or their own later messages say otherwise. Treat what the assistant said, such as proposed schedules, example dates, and recommendations, as suggestions rather than facts about what happened, unless the user adopted or confirmed them. What the assistant did, such as editing a file, running a command, or calling a tool, is a record of what happened.
+
+PLANNED ACTIONS: If the user stated they planned to do something (e.g., "I'm going to...", "I'm looking forward to...", "I will...") and the date they planned to do it is now in the past (check the relative time like "3 weeks ago"), assume they completed the action unless there's evidence they didn't. For example, if someone said "I'll start my new diet on Monday" and that was 2 weeks ago, assume they started the diet.
+
+MOST RECENT USER INPUT: Treat the most recent user message as the highest-priority signal for what to do next. Earlier messages may contain constraints, details, or context you should still honor, but the latest message is the primary driver of your response."""
+
 log = logging.getLogger(__name__)
 
 
@@ -723,9 +735,7 @@ class LogCompressor(BaseProvider):
         return (
             "The following observations block contains your memory of past conversations with this user.\n\n"
             f"<observations>\n{_optimize_for_context(_add_relative_time(updated, datetime.now()))}\n</observations>\n\n"
-            "IMPORTANT: When responding, reference specific details from these observations. "
-            "Do not give generic advice — personalize your response based on what you know about this user. "
-            "For conflicting information, prefer the MOST RECENT observation (check dates)."
+            f"{OBSERVATION_CONTEXT_INSTRUCTIONS}"
         )
 
     async def compress(self, turns: list) -> list:
