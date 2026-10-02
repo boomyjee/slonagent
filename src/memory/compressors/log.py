@@ -795,7 +795,8 @@ class LogCompressor(BaseProvider):
             obs = await self._run_observer(thread_turns, existing_observations)
             if not obs:
                 continue
-            new_obs_parts.append(f'<thread id="{tid}">\n{obs}\n</thread>')
+            # Главный тред — пустой id; агенту он представлен как `main` (AgentSkill).
+            new_obs_parts.append(f'<thread id="{tid or "main"}">\n{obs}\n</thread>')
 
         if not new_obs_parts:
             log.warning("[LogCompressor] Observer returned empty")
