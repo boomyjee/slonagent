@@ -547,10 +547,11 @@ def _parse_xml_tag(text: str, tag: str) -> str:
 
 
 _MAX_OBSERVATION_LINE_CHARS = 10_000
+_MIN_DUPLICATE_LINE_CHARS = 24
 
 
 def _detect_degenerate_repetition(text: str) -> bool:
-    """Mastra detectDegenerateRepetition (observer-agent.ts:1241)."""
+    """Mastra detectDegenerateRepetition (observer-agent.ts)."""
     if not text or len(text) < 2000:
         return False
     window_size = 200
@@ -567,7 +568,13 @@ def _detect_degenerate_repetition(text: str) -> bool:
             duplicate_windows += 1
     if total_windows > 5 and duplicate_windows / total_windows > 0.4:
         return True
-    return any(len(line) > 50_000 for line in text.split("\n"))
+    lines = text.split("\n")
+    if any(len(line) > 50_000 for line in lines):
+        return True
+    # Окна выше слепы к многострочной петле с длинным периодом: сэмплы совпадают,
+    # только если их позиции сравнимы по модулю периода. Поэтому считаем точные дубли строк.
+    long_lines = [s for s in (line.strip() for line in lines) if len(s) >= _MIN_DUPLICATE_LINE_CHARS]
+    return len(long_lines) >= 20 and 1 - len(set(long_lines)) / len(long_lines) > 0.5
 
 
 def _sanitize_observation_lines(observations: str) -> str:
