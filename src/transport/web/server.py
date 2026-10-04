@@ -284,10 +284,10 @@ class WebTransportServer:
                 subdomain = "web-" + hashlib.sha1(key.encode()).hexdigest()[:6]
             cls._tunnel_ready = asyncio.Event()
             async def _tunnel():
-                # Ретраи только на стартовых ошибках. Успешный коннект (даже если
-                # сразу разорвался) сбрасывает счётчик, поэтому сетевые мерцания
-                # не выжирают бюджет, а реальная поломка (sish мёртв, auth не
-                # пускает) останавливается на 5-й подряд неудачной попытке.
+                # Ретраи без конца: первые MAX_FAILS подряд — каждые 5 с (сетевые
+                # мерцания), дальше — раз в 5 минут. Успешный коннект сбрасывает
+                # счётчик. Раньше после 5 неудач тоннель сдавался навсегда — 3.10.2026
+                # сбой сети на хосте убил его на сутки, лечилось только рестартом.
                 fails, MAX_FAILS = 0, 5
                 tunnel_conn = None
                 while True:
@@ -299,12 +299,10 @@ class WebTransportServer:
                         fails = 0
                     except Exception as e:
                         fails += 1
-                        log.warning("Tunnel start failed (%d/%d): %s", fails, MAX_FAILS, e)
+                        delay = 5 if fails < MAX_FAILS else 300
+                        log.warning("Tunnel start failed (%d), retry in %ds: %s", fails, delay, e)
                         cls._tunnel_ready.set()
-                        if fails >= MAX_FAILS:
-                            log.warning("Giving up on tunnel after %d consecutive failures", MAX_FAILS)
-                            return
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(delay)
                         continue
                     cls._tunnel_ready.set()
                     try:
