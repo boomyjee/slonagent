@@ -88,31 +88,135 @@ async function compressImage(file, maxSide = 1920, quality = 0.85) {
     return { dataUrl: await readDataUrl(blob), mime: 'image/jpeg', size: blob.size };
 }
 
-// Browser MediaRecorder gives webm/opus on Chrome (ogg/opus on Firefox).
-// libsndfile reads ogg/opus but not webm — convert to PCM via AudioContext
-// and encode 16-bit WAV here so the server gets a format we know works.
-async function blobToWav(blob) {
+// MediaRecorder у каждого браузера свой контейнер (Chrome webm, Firefox ogg,
+// Safari mp4), а libsndfile на сервере webm не читает. Поэтому: декодируем
+// запись в PCM, приводим к 48 кГц моно и жмём в Opus нативным WebCodecs
+// AudioEncoder, упаковку в Ogg (RFC 7845) делаем сами. Один формат на всех
+// браузерах, ~32 кбит/с (2 мин ≈ 0.5 МБ против 11.5 МБ WAV 48 кГц, который
+// упирался в лимит сообщения WebSocket). Сервер читает Ogg/Opus через soundfile.
+// Старые браузеры без AudioEncoder (Chrome <94, Firefox <130, Safari <26) не поддерживаем.
+const OPUS_SR = 48000;
+const OPUS_PRESKIP = 312;  // lookahead libopus на 48 кГц, если энкодер не отдал свой OpusHead
+
+const OGG_CRC = (() => {
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let r = i << 24;
+        for (let k = 0; k < 8; k++) r = (r & 0x80000000) ? ((r << 1) ^ 0x04c11db7) : (r << 1);
+        t[i] = r >>> 0;
+    }
+    return t;
+})();
+
+function oggPage(packets, granule, serial, seq, flags) {
+    const lacing = [];
+    for (const p of packets) {
+        let n = p.length;
+        while (n >= 255) { lacing.push(255); n -= 255; }
+        lacing.push(n);
+    }
+    const bodyLen = packets.reduce((s, p) => s + p.length, 0);
+    const page = new Uint8Array(27 + lacing.length + bodyLen);
+    const v = new DataView(page.buffer);
+    page.set([0x4f, 0x67, 0x67, 0x53], 0);           // "OggS"
+    page[5] = flags;                                   // 1 continued, 2 BOS, 4 EOS
+    v.setBigInt64(6, BigInt(granule), true);
+    v.setUint32(14, serial, true);
+    v.setUint32(18, seq, true);
+    page[26] = lacing.length;
+    page.set(lacing, 27);
+    let off = 27 + lacing.length;
+    for (const p of packets) { page.set(p, off); off += p.length; }
+    let crc = 0;
+    for (let i = 0; i < page.length; i++) crc = ((crc << 8) ^ OGG_CRC[((crc >>> 24) ^ page[i]) & 0xff]) >>> 0;
+    v.setUint32(22, crc, true);
+    return page;
+}
+
+async function blobToOggOpus(blob) {
+    if (typeof AudioEncoder === 'undefined')
+        throw new Error('браузер не умеет WebCodecs AudioEncoder — нужен Chrome 94+, Firefox 130+ или Safari 26+');
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer());
-    const numCh = audioBuffer.numberOfChannels;
-    const sr = audioBuffer.sampleRate;
-    const samples = audioBuffer.length;
-    const out = new ArrayBuffer(44 + samples * numCh * 2);
-    const v = new DataView(out);
-    const wrStr = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
-    wrStr(0, 'RIFF'); v.setUint32(4, out.byteLength - 8, true); wrStr(8, 'WAVE');
-    wrStr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, numCh, true);
-    v.setUint32(24, sr, true); v.setUint32(28, sr * numCh * 2, true);
-    v.setUint16(32, numCh * 2, true); v.setUint16(34, 16, true);
-    wrStr(36, 'data'); v.setUint32(40, samples * numCh * 2, true);
-    const channels = []; for (let c = 0; c < numCh; c++) channels.push(audioBuffer.getChannelData(c));
-    let off = 44;
-    for (let i = 0; i < samples; i++)
-        for (let c = 0; c < numCh; c++, off += 2) {
-            const s = Math.max(-1, Math.min(1, channels[c][i]));
-            v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    let decoded;
+    try { decoded = await ctx.decodeAudioData(await blob.arrayBuffer()); }
+    finally { ctx.close?.(); }
+    // 48 кГц моно: OfflineAudioContext сам пересэмплирует и сведёт каналы.
+    const total = Math.max(1, Math.ceil(decoded.duration * OPUS_SR));
+    const off = new OfflineAudioContext(1, total, OPUS_SR);
+    const src = off.createBufferSource();
+    src.buffer = decoded;
+    src.connect(off.destination);
+    src.start();
+    const pcm = (await off.startRendering()).getChannelData(0);
+
+    const cfg = { codec: 'opus', sampleRate: OPUS_SR, numberOfChannels: 1, bitrate: 32000 };
+    if (!(await AudioEncoder.isConfigSupported(cfg)).supported)
+        throw new Error('AudioEncoder не поддерживает Opus 48 кГц моно');
+    const packets = [];
+    let head = null, encErr = null;
+    const enc = new AudioEncoder({
+        output: (chunk, meta) => {
+            const d = new Uint8Array(chunk.byteLength);
+            chunk.copyTo(d);
+            packets.push({ data: d, samples: Math.round((chunk.duration || 20000) * OPUS_SR / 1e6) });
+            const desc = meta?.decoderConfig?.description;
+            if (desc && !head) {
+                const b = new Uint8Array(desc instanceof ArrayBuffer ? desc : desc.buffer.slice(desc.byteOffset, desc.byteOffset + desc.byteLength));
+                if (b.length >= 19 && String.fromCharCode(...b.slice(0, 8)) === 'OpusHead') head = b;
+            }
+        },
+        error: e => { encErr = e; },
+    });
+    enc.configure(cfg);
+    const STEP = OPUS_SR / 10;  // кормим по 100 мс
+    for (let i = 0; i < pcm.length; i += STEP) {
+        const n = Math.min(STEP, pcm.length - i);
+        enc.encode(new AudioData({
+            format: 'f32', sampleRate: OPUS_SR, numberOfChannels: 1, numberOfFrames: n,
+            timestamp: Math.round(i / OPUS_SR * 1e6), data: pcm.slice(i, i + n),
+        }));
+    }
+    await enc.flush();
+    enc.close();
+    if (encErr) throw encErr;
+    if (!packets.length) throw new Error('Opus-энкодер не выдал ни одного пакета');
+
+    if (!head) {
+        head = new Uint8Array(19);
+        const hv = new DataView(head.buffer);
+        head.set([...'OpusHead'].map(c => c.charCodeAt(0)), 0);
+        head[8] = 1;                                   // version
+        head[9] = 1;                                   // channels
+        hv.setUint16(10, OPUS_PRESKIP, true);
+        hv.setUint32(12, OPUS_SR, true);               // input sample rate
+        hv.setInt16(16, 0, true);                      // output gain
+        head[18] = 0;                                  // mapping family
+    }
+    const preSkip = new DataView(head.buffer, head.byteOffset).getUint16(10, true);
+    const vendor = new TextEncoder().encode('slonagent');
+    const tags = new Uint8Array(8 + 4 + vendor.length + 4);
+    tags.set([...'OpusTags'].map(c => c.charCodeAt(0)), 0);
+    new DataView(tags.buffer).setUint32(8, vendor.length, true);
+    tags.set(vendor, 12);                              // + 0 user comments (нули)
+
+    const serial = (Math.random() * 0xffffffff) >>> 0;
+    const pages = [oggPage([head], 0, serial, 0, 2), oggPage([tags], 0, serial, 1, 0)];
+    const endGranule = preSkip + pcm.length;           // хвост обрезается декодером по granule последней страницы
+    // granule = сэмплы на выходе декодера с начала потока, ВКЛЮЧАЯ pre-skip (RFC 7845 §4).
+    let seq = 2, granule = 0, batch = [], segs = 0;
+    for (let i = 0; i < packets.length; i++) {
+        const p = packets[i];
+        const need = Math.floor(p.data.length / 255) + 1;
+        if (batch.length && segs + need > 255) {
+            pages.push(oggPage(batch, Math.min(granule, endGranule), serial, seq++, 0));
+            batch = []; segs = 0;
         }
-    return new Blob([out], { type: 'audio/wav' });
+        batch.push(p.data); segs += need;
+        granule += p.samples;
+        if (i === packets.length - 1)
+            pages.push(oggPage(batch, Math.min(granule, endGranule), serial, seq++, 4));
+    }
+    return { blob: new Blob(pages, { type: 'audio/ogg' }), seconds: decoded.duration };
 }
 
 
@@ -471,14 +575,14 @@ export class ChatDialog extends Component {
                 this._recorder = null;
                 this.setState({ recording: false });
                 try {
-                    const wav = await blobToWav(new Blob(chunks, { type: recorder.mimeType }));
-                    const dataUrl = await readDataUrl(wav);
+                    const ogg = await blobToOggOpus(new Blob(chunks, { type: recorder.mimeType }));
+                    const dataUrl = await readDataUrl(ogg.blob);
                     const base64 = dataUrl.split(',', 2)[1];
-                    const seconds = Math.max(1, Math.round((wav.size - 44) / 2 / 16000));  // rough estimate
+                    const seconds = Math.max(1, Math.round(ogg.seconds));
                     this.setState(({ attachments }) => ({
                         attachments: [...attachments, {
-                            base64, mime: 'audio/wav',
-                            name: `voice_${seconds}s.wav`, size: wav.size,
+                            base64, mime: 'audio/ogg',
+                            name: `voice_${seconds}s.ogg`, size: ogg.blob.size,
                         }],
                     }));
                 } catch (e) {

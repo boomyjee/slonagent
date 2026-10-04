@@ -259,6 +259,9 @@ class WebTransportServer:
                 host="0.0.0.0",
                 port=cls._port,
                 ws="wsproto",
+                # Вложения (голос/фото/файлы) идут base64 внутри одного WS-сообщения;
+                # дефолтные 16 МиБ рвали соединение (1009) на WAV длиннее ~2 мин.
+                ws_max_size=100 * 1024 * 1024,
                 log_config=None,
             )
             server = uvicorn.Server(uv_config)
