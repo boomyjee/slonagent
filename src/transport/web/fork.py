@@ -232,6 +232,16 @@ class WebFork:
             if events:
                  await ws.send_text(json.dumps({"type": "replay", "events": events}, ensure_ascii=False))
             return
+        if msg.get("type") == "client_log":
+            # Диагностика обрывов сокета со стороны браузера: события копятся в
+            # localStorage и приходят после переподключения (wslog в dashboard/ui/app.js).
+            for e in (msg.get("events") or [])[:500]:
+                if not isinstance(e, dict):
+                    continue
+                t = e.pop("t", None)
+                ts = time.strftime("%m-%d %H:%M:%S", time.localtime(t / 1000)) if isinstance(t, (int, float)) else "?"
+                log.info("[ws-client] %s %s", ts, json.dumps(e, ensure_ascii=False)[:500])
+            return
         if msg.get("type") == "transport" and msg.get("method") == "process_message":
             # Запоминаем клиента который последним прислал user message — туда
             # уйдут адресные команды от агента (например, dashboard.open_tab).

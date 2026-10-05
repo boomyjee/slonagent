@@ -19,6 +19,19 @@ applyAll();
 const cl = {};
 const LOGS_TAB = { id: 'logs', label: '☰', closable: false };
 
+// Диагностика обрывов сокета. События копятся в localStorage (переживают
+// перезагрузку страницы) и после следующего подключения уходят на сервер
+// сообщением client_log — сервер пишет их в slonagent.log с меткой
+// [ws-client]. Консоль браузера на телефоне не посмотреть, поэтому так.
+const WSLOG_KEY = 'wslog';
+function wslog(ev, data = {}) {
+    try {
+        const arr = JSON.parse(localStorage.getItem(WSLOG_KEY) || '[]');
+        arr.push({ t: Date.now(), ev, page: location.pathname, ...data });
+        localStorage.setItem(WSLOG_KEY, JSON.stringify(arr.slice(-300)));
+    } catch {}
+}
+
 // Stable cheap hash → 8-char base36 — enough to scope localStorage keys
 // per root so paths from different host folders don't collide.
 function rootHash(root) {
@@ -71,6 +84,13 @@ class App extends Component {
         this._lastSeenId = -1;
         this._unread = 0;
         navigator.clearAppBadge?.();
+        wslog('load', { ua: navigator.userAgent, hidden: document.hidden });
+        document.addEventListener('visibilitychange', () => wslog(document.hidden ? 'hidden' : 'visible'));
+        // freeze/resume — Page Lifecycle (Chrome): вкладку усыпили/разбудили.
+        document.addEventListener('freeze', () => wslog('freeze'));
+        document.addEventListener('resume', () => wslog('resume'));
+        window.addEventListener('online', () => wslog('online'));
+        window.addEventListener('offline', () => wslog('offline'));
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 this._unread = 0;
@@ -115,15 +135,38 @@ class App extends Component {
 
     _connect() {
         const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        this._ws = new WebSocket(proto + location.host + location.pathname + 'ws');
-        this._ws.onopen = () => {
+        const ws = this._ws = new WebSocket(proto + location.host + location.pathname + 'ws');
+        const startedAt = Date.now();
+        let openedAt = null;
+        ws.onopen = () => {
+            openedAt = this._lastMsgAt = Date.now();
             this.setState({ connected: true });
             this.send({ type: 'replay', last_seen_id: this._lastSeenId });
             this._subscribeWatcher();
+            wslog('open', { connect_ms: openedAt - startedAt });
+            this._flushWsLog();
         };
-        this._ws.onclose = () => { this.setState({ connected: false }); setTimeout(() => this._connect(), 2000); };
-        this._ws.onerror = () => this._ws.close();
-        this._ws.onmessage = e => this._onMessage(JSON.parse(e.data));
+        ws.onclose = (e) => {
+            const now = Date.now();
+            wslog('close', {
+                code: e.code, reason: e.reason, clean: e.wasClean,
+                lived_ms: openedAt ? now - openedAt : null,
+                since_msg_ms: openedAt ? now - this._lastMsgAt : null,
+                since_send_ms: this._lastSendAt ? now - this._lastSendAt : null,
+                buffered: ws.bufferedAmount, hidden: document.hidden,
+            });
+            this.setState({ connected: false });
+            setTimeout(() => this._connect(), 2000);
+        };
+        ws.onerror = () => { wslog('error'); ws.close(); };
+        ws.onmessage = e => { this._lastMsgAt = Date.now(); this._onMessage(JSON.parse(e.data)); };
+    }
+
+    _flushWsLog() {
+        let events;
+        try { events = JSON.parse(localStorage.getItem(WSLOG_KEY) || '[]'); } catch { events = []; }
+        localStorage.removeItem(WSLOG_KEY);
+        if (events.length) this.send({ type: 'client_log', events });
     }
 
     _subscribeWatcher() {
@@ -153,7 +196,20 @@ class App extends Component {
     };
 
     send(msg) {
-        if (this._ws?.readyState === WebSocket.OPEN) this._ws.send(JSON.stringify(msg));
+        const ws = this._ws;
+        const open = ws?.readyState === WebSocket.OPEN;
+        const body = JSON.stringify(msg);
+        if (msg.type === 'transport' && msg.method === 'process_message') {
+            // Пишем в диагностику каждую отправку сообщения агенту: состояние
+            // сокета и сколько байт браузер ещё не отдал в сеть через 5 с.
+            this._lastSendAt = Date.now();
+            const info = { bytes: body.length, ready: ws?.readyState, buffered: ws?.bufferedAmount,
+                           since_msg_ms: Date.now() - (this._lastMsgAt || 0) };
+            wslog(open ? 'send' : 'send_dropped', info);
+            if (open) setTimeout(() => wslog('send_check', {
+                same_ws: this._ws === ws, ready: ws.readyState, buffered: ws.bufferedAmount }), 5000);
+        }
+        if (open) ws.send(body);
     }
 
     _onMessage(ev) {
