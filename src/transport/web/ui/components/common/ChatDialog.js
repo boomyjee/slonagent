@@ -872,15 +872,16 @@ export class ChatDialog extends Component {
 // --- styles ---
 
 cl.dialog = css`
-  flex: 1 1 0; min-height: 0; display: flex; flex-direction: column;
+  flex: 1 1 0; min-height: 0; min-width: 0; display: flex; flex-direction: column;
   position: relative;
   &, & * { box-sizing: border-box; }
 `;
-cl.messages = css`flex: 1; min-height: 0; overflow-y: auto; padding: 12px;`;
+cl.messages = css`flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: 12px;`;
 cl.msg = css`
   position: relative;
   margin-bottom: 10px; font-size: 13px; line-height: 1.5; padding: 8px 12px;
   border-radius: 8px; max-width: 90%; white-space: pre-wrap; word-break: break-word;
+  overflow-wrap: anywhere;
   &.user, &.inject { background: var(--user-msg-bg); color: var(--user-msg-fg); margin-left: auto; }
   &.pending { opacity: 0.5; }
   &.assistant { background: var(--surface2); }
@@ -892,7 +893,11 @@ cl.msg = css`
     line-height: 34px; height: 34px;
     padding-top: 0; padding-bottom: 0;
     overflow: hidden; cursor: pointer; opacity: 0.5;
+    /* Свёрнутая мысль — ровно одна строка, хвост режется многоточием,
+       а не уезжает за край и не распирает колонку по горизонтали. */
+    white-space: nowrap; text-overflow: ellipsis; max-width: 100%;
   }
+  &.thinking.collapsed * { display: inline; white-space: nowrap; }
   &.thinking.collapsed:hover { opacity: 0.7; }
   & h1, & h2, & h3, & h4, & h5, & h6 { font-size: 14px; font-weight: 600; margin: 4px 0; }
   & a, & .slash-cmd { color: inherit; text-decoration: underline; cursor: pointer; }
@@ -912,6 +917,7 @@ cl.toolHint = css`
   padding: 2px 6px;
   background: var(--bg);
   font-family: monospace; font-size: 10px;
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
   &.link { cursor: pointer; }
   &.link:hover { text-decoration: underline; color: var(--accent); }
 `;

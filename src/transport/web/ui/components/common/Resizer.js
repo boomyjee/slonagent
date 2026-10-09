@@ -7,6 +7,10 @@ export function Resizer({ side, persistKey, className, collapseLabel }) {
         !!(persistKey && persist.get(`collapsed.${persistKey}`))
     );
 
+    // Панель не должна быть шире окна: родитель дашборда с overflow:hidden
+    // обрежет хвост, прокрутки не будет, и контент станет недоступен.
+    function maxW() { return Math.max(150, window.innerWidth - 120); }
+
     function target() {
         const el = ref.current;
         if (!el) return null;
@@ -19,8 +23,18 @@ export function Resizer({ side, persistKey, className, collapseLabel }) {
         t.style.display = collapsed ? 'none' : '';
         if (!collapsed && persistKey) {
             const w = persist.get(`resizer.${persistKey}`);
-            if (w) { t.style.flex = 'none'; t.style.width = w + 'px'; }
+            if (w) { t.style.flex = 'none'; t.style.width = Math.min(w, maxW()) + 'px'; }
         }
+        // Окно могли уменьшить (или открыть на другом мониторе) уже после того,
+        // как ширина была сохранена — поджимаем панель обратно в экран.
+        function onResize() {
+            const el = target();
+            if (!el || collapsed || el.style.flex !== 'none') return;
+            const cur = parseInt(el.style.width);
+            if (cur > maxW()) el.style.width = maxW() + 'px';
+        }
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
     }, [collapsed]);
 
     function toggle() {
@@ -51,7 +65,7 @@ export function Resizer({ side, persistKey, className, collapseLabel }) {
         document.body.appendChild(overlay);
         function onMove(ev) {
             const dx = ev.clientX - startX;
-            const w = Math.max(150, startW + (side === 'left' ? dx : -dx));
+            const w = Math.min(maxW(), Math.max(150, startW + (side === 'left' ? dx : -dx)));
             t.style.flex = 'none';
             t.style.width = w + 'px';
         }
