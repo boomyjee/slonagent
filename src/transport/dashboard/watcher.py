@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
 
 
 class _Watcher:
