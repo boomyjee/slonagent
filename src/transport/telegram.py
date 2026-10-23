@@ -30,6 +30,20 @@ def _markdown_to_html(text: str) -> str:
         return f"\x00IC{len(inline_codes) - 1}\x00"
     text = re.sub(r'`([^`]+)`', save_inline_code, text)
 
+    # 2б. Ссылки — в сторону до жирного/курсива, возвращаются в конце (иначе `_Новый_` внутри адреса становился курсивом и рвал
+    # ссылку). [текст](адрес) и <адрес> -> <a>; голый адрес остаётся текстом (Телеграм делает ссылку сам), но без разметки внутри.
+    links: list[str] = []
+    def _esc(s: str) -> str:
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    def save_link(html_: str) -> str:
+        links.append(html_)
+        return f"\x00LK{len(links) - 1}\x00"
+    def _a(href: str, label: str) -> str:
+        return save_link(f'<a href="{_esc(href).replace(chr(34), "&quot;")}">{_esc(label)}</a>')
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', lambda m: _a(m.group(2), m.group(1)), text)
+    text = re.sub(r'<(https?://[^\s<>]+)>', lambda m: _a(m.group(1), m.group(1)), text)
+    text = re.sub(r'https?://[^\s<>)\x00]+', lambda m: save_link(_esc(m.group(0))), text)
+
     # 3. Headers → plain text
     text = re.sub(r'^#{1,6}\s+(.+)$', r'\1', text, flags=re.MULTILINE)
 
@@ -39,16 +53,14 @@ def _markdown_to_html(text: str) -> str:
     # 5. Escape HTML special characters
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    # 6. Links [text](url)
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
-
     # 7. Bold **text** or __text__
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
 
     # 8. Italic *text* or _text_ (avoid **bold** and snake_case)
     text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', text)
-    text = re.sub(r'(?<![a-zA-Z0-9])_([^_]+)_(?![a-zA-Z0-9])', r'<i>\1</i>', text)
+    # _курсив_ — только если подчёркивание не между буквами/цифрами любого алфавита ([^\W_] = буква или цифра)
+    text = re.sub(r'(?<![^\W_])_([^_]+)_(?![^\W_])', r'<i>\1</i>', text)
 
     # 9. Strikethrough ~~text~~
     text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
@@ -65,6 +77,10 @@ def _markdown_to_html(text: str) -> str:
     for i, code in enumerate(code_blocks):
         escaped = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         text = text.replace(f"\x00CB{i}\x00", f"<pre><code>{escaped}</code></pre>")
+
+    # 13. Restore links
+    for i, html_ in enumerate(links):
+        text = text.replace(f"\x00LK{i}\x00", html_)
 
     return text
 

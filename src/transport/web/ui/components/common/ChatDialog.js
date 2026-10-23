@@ -14,6 +14,13 @@ function mdToHtml(text) {
     text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, c) => `\x00CB${blocks.push(c) - 1}\x00`);
     const inlines = [];
     text = text.replace(/`([^`]+)`/g, (_, c) => `\x00IC${inlines.push(c) - 1}\x00`);
+    // Ссылки откладываются до разбора жирного/курсива и возвращаются в конце готовыми <a>: иначе `_Новый_` внутри адреса
+    // становился курсивом и рвал ссылку. [текст](адрес) — текст как есть; <адрес> и голые http(s)-адреса.
+    const links = [];
+    const link = (href, label) => `\x00LK${links.push([href, label]) - 1}\x00`;
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => link(u, t));
+    text = text.replace(/<(https?:\/\/[^\s<>]+)>/g, (_, u) => link(u, u));
+    text = text.replace(/https?:\/\/[^\s<>)\x00]+/g, u => link(u, u));
     text = text.replace(/^>\s*(.*)$/gm, '$1');
     text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     // Markdown tables: detect consecutive lines with | delimiters and a separator row
@@ -28,15 +35,13 @@ function mdToHtml(text) {
         return '\n<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>\n';
     });
     text = text.replace(/^(#{1,6})\s+(.+)$/gm, (_, h, t) => `<h${h.length}>${t}</h${h.length}>`);
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
     text = text.replace(/__(.+?)__/g, '<b>$1</b>');
     text = text.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<i>$1</i>');
-    text = text.replace(/(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])/g, '<i>$1</i>');
+    // _курсив_ — только если подчёркивание не между буквами/цифрами любого алфавита (snake_case, дереверб_Новый_доктор)
+    text = text.replace(/(?<![\p{L}\p{N}])_([^_\n]+)_(?![\p{L}\p{N}])/gu, '<i>$1</i>');
     text = text.replace(/~~(.+?)~~/g, '<s>$1</s>');
     text = text.replace(/^[-*]\s+/gm, '• ');
-    // Bare URLs (not already inside an <a> tag)
-    text = text.replace(/(?<!href="|">)(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
     // /commands at the start of a message
     text = text.replace(/^(\/\w+)/gm, '<span class="slash-cmd">$1</span>');
     // \n → <br> (до восстановления code-блоков, чтобы не трогать их содержимое):
@@ -46,6 +51,7 @@ function mdToHtml(text) {
     const esc = c => c.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     inlines.forEach((c, i) => { text = text.replace(`\x00IC${i}\x00`, `<code>${esc(c)}</code>`); });
     blocks.forEach((c, i) => { text = text.replace(`\x00CB${i}\x00`, `<pre><code>${esc(c)}</code></pre>`); });
+    links.forEach(([u, t], i) => { text = text.replace(`\x00LK${i}\x00`, `<a href="${esc(u).replace(/"/g, '&quot;')}" target="_blank" rel="noopener">${esc(t)}</a>`); });
     return text;
 }
 
