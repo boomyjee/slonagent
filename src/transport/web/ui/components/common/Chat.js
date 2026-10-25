@@ -123,6 +123,16 @@ export class Chat extends Component {
         }, () => this._persist());
     };
 
+    _onReorderTab = (srcId, insertAt) => {
+        const srcIdx = this.state.tabs.indexOf(srcId);
+        const filtered = this.state.tabs.filter(t => t !== srcId);
+        // После удаления src вставки правее srcIdx сдвигаются на один влево.
+        const target = insertAt > srcIdx ? insertAt - 1 : insertAt;
+        this.setState({
+            tabs: [...filtered.slice(0, target), srcId, ...filtered.slice(target)],
+        }, () => this._persist());
+    };
+
     _onAddTab = () => {
         // Тред регистрируется на сервере лениво — при первом сообщении (через make_agent
         // → Agent.start) или явном rename. Закрытие пустого таба не оставит хвостов.
@@ -198,18 +208,22 @@ export class Chat extends Component {
                 closable: threadsEnabled,
             };
         });
+        // Диалоги в стабильном порядке, не в порядке табов: иначе перестановка
+        // табов двигает DOM-узлы диалогов, а перенос узла сбрасывает scroll.
+        const dialogIds = [...tabs].sort();
         return html`
             <div class="${cl.chat} ${className || ''}">
                 <div class=${cl.tabBar}>
                     <${Tabs} tabs=${tabsRender} active=${activeTab}
                              onSelect=${this._onSelectTab}
                              onClose=${this._onCloseTab}
+                             onReorder=${this._onReorderTab}
                              contextItems=${threadsEnabled ? (t => [{ label: 'Переименовать', action: () => this._onRenameTab(t.id) }]) : null} />
                     ${threadsEnabled && html`
                         <button class=${cl.headerBtn} title="История тредов" onClick=${this._onShowHistory}>${ICON_CLOCK}</button>
                         <button class=${cl.headerBtn} title="Новый тред" onClick=${this._onAddTab}>${ICON_PLUS}</button>`}
                 </div>
-                ${tabs.map(id => html`
+                ${dialogIds.map(id => html`
                     <${ChatDialog}
                         key=${id}
                         ref=${this._setDialogRef(id)}
