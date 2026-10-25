@@ -326,7 +326,7 @@ export class Git extends Component {
             ${error && html`<div class=${cl.error}>${error}</div>`}
 
             <div class=${cl.scroll}>
-                <table class=${cl.table}>
+                <table class="${cl.table}${isHistory ? ' history' : ''}">
                     <thead><tr>
                         ${!isHistory && html`<th class="staged">Staged</th>`}
                         <th class="state">State</th>
@@ -537,18 +537,21 @@ cl.error = css`
   font-size: 12px; white-space: pre-wrap; border-bottom: 1px solid var(--border);
 `;
 cl.scroll = css`flex: 1; overflow: auto;`;
+// Grid вместо табличной раскладки: в таблице колонка-распорка с width:100%
+// сжимает Filename до min-content (переносы при пустом месте справа). Здесь
+// auto-трек растёт до max-content раньше, чем 1fr получает остаток.
 cl.table = css`
-  width: 100%; border-collapse: collapse; font-size: 12px;
+  display: grid; grid-template-columns: 76px 76px auto 76px 1fr; font-size: 12px;
+  &.history { grid-template-columns: 76px auto 1fr; }
+  & thead, & tbody, & tr { display: contents; }
   & thead th {
     text-align: left; font-weight: normal; color: var(--text-dim);
     background: var(--surface); padding: 4px 8px; border-bottom: 1px solid var(--border);
     position: sticky; top: 0;
   }
-  & th.staged, & th.state, & th.checkout { width: 60px; }
-  & th.empty { width: 100%; }
 `;
 cl.fileRow = css`
-  & td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  & td { padding: 4px 8px; border-bottom: 1px solid var(--border); align-content: center; }
   & td.filename { cursor: pointer; user-select: none; }
   & td.filename:hover { color: var(--accent); }
   & td.state { font-family: monospace; color: var(--accent); user-select: none; }
@@ -567,8 +570,8 @@ cl.xBtn = css`
   font-size: 14px; padding: 0 4px;
   &:hover { color: var(--red); }
 `;
-cl.emptyRow = css`text-align: center; color: var(--text-dim); padding: 16px; font-style: italic;`;
-cl.diffCell = css`padding: 0 !important; background: var(--bg);`;
+cl.emptyRow = css`grid-column: 1 / -1; text-align: center; color: var(--text-dim); padding: 16px; font-style: italic;`;
+cl.diffCell = css`grid-column: 1 / -1; padding: 0 !important; background: var(--bg);`;
 cl.loading = css`padding: 8px 12px; color: var(--text-dim); font-size: 12px;`;
 cl.diffEmpty = css`padding: 8px 12px; color: var(--text-dim); font-size: 12px; font-style: italic;`;
 cl.diff = css`font-family: monospace; font-size: var(--font-size-mono, 13px); line-height: 1.5;`;
