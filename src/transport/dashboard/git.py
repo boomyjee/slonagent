@@ -51,19 +51,17 @@ class Git:
         return (out + err), code
 
     async def status(self) -> list[dict]:
-        # Porcelain v1: each line is "XY path" (or "XY old -> new" for renames).
+        # Porcelain v1 -z: "XY path\0", renames/copies "XY new\0old\0".
         # X = index status, Y = working-tree status. '?' means untracked.
-        out, _, _ = await self.run("status", "--porcelain", "--untracked-files")
+        # Without -z git quotes and octal-escapes non-ASCII paths and paths with spaces.
+        out, _, _ = await self.run("status", "--porcelain", "-z", "--untracked-files")
+        entries = iter(out.split("\0"))
         files = []
-        for line in out.splitlines():
-            if len(line) < 3:
+        for entry in entries:
+            if len(entry) < 3:
                 continue
-            x, y, path = line[0], line[1], line[3:]
-            old_path = None
-            if x == "R":
-                parts = path.split(" -> ", 1)
-                if len(parts) == 2:
-                    old_path, path = parts
+            x, y, path = entry[0], entry[1], entry[3:]
+            old_path = next(entries, None) if x in "RC" else None
             staged = x not in (" ", "?")
             partial = staged and y not in (" ", "")
             files.append({
@@ -174,21 +172,22 @@ class Git:
     async def history(self, commit_sha: str, depth: int = 1) -> list[dict]:
         csha = self._rev(commit_sha)
         out, err, _ = await self.run(
-            "diff", "--no-color", "--name-status", "--find-renames",
+            "diff", "--no-color", "--name-status", "--find-renames", "-z",
             f"{csha}~{depth}", csha,
         )
         if err and not out:
             return []
+        # -z: "STATE\0path\0", renames/copies "STATE\0old\0new\0".
+        fields = iter(out.split("\0"))
         files = []
-        for line in out.splitlines():
-            parts = re.split(r"\s+", line.strip(), maxsplit=2)
-            if len(parts) < 2:
+        for state in fields:
+            if not state:
                 continue
-            state = parts[0]
-            if state.startswith("R") and len(parts) == 3:
-                files.append({"file": parts[2], "old_file": parts[1], "state": state})
+            path = next(fields, "")
+            if state[0] in "RC":
+                files.append({"file": next(fields, ""), "old_file": path, "state": state})
             else:
-                files.append({"file": parts[1], "old_file": None, "state": state})
+                files.append({"file": path, "old_file": None, "state": state})
         return files
 
     _BLAME_RE = re.compile(
