@@ -67,6 +67,11 @@ async def handle_cgi(tunnel, frame):
         if mf.startswith("/workspace/"):
             sys.modules.pop(name, None)
 
+    # Скрипты пишутся как отдельный процесс и делают sys.path.insert(0, папка).
+    # В долгоживущем worker'е это копилось: за ~2 суток 2412 копий одной папки,
+    # и каждый import перебирал их все (stat через 9p) — subs.py 2.6 с вместо
+    # 0.14. Возвращаем sys.path после каждого exec'а, как сбрасываем модули.
+    saved_path = list(sys.path)
     try:
         with open(fpath, encoding="utf-8") as f:
             code = compile(f.read(), fpath, "exec")
@@ -81,6 +86,8 @@ async def handle_cgi(tunnel, frame):
         status = 500
         body = (buf.getvalue() + "\n" + traceback.format_exc()).encode("utf-8")
         headers = {"Content-Type": "text/plain; charset=utf-8"}
+    finally:
+        sys.path[:] = saved_path
 
     await tunnel.send(json.dumps({
         "id": id_, "kind": "cgi_resp",
