@@ -20,6 +20,32 @@ from starlette.routing import Match
 log = logging.getLogger(__name__)
 
 
+_MEDIA_CHUNK = 2 * 1024 * 1024
+_MEDIA_EXT = (".mp4", ".m4a", ".mov", ".webm", ".mkv", ".mp3", ".wav", ".flac", ".ogg", ".opus", ".aac")
+
+
+def _media_ranges(app):
+    """На Range-запрос к медиафайлу отдаём не больше _MEDIA_CHUNK: 206 с Content-Range короче запрошенного (RFC 9110
+    так позволяет), плеер браузера сам дозапрашивает дальше. Chrome просит видео до конца файла и, поставив его на паузу,
+    перестаёт читать ответ, не закрывая: по HTTP/1.1 такое видео держит одно из 6 соединений браузера на адрес, и
+    несколько видео на паузе вешают весь дашборд (редактор шортсов держит три). Короткий ответ дочитывается в буфер
+    плеера, запрос кончается. Замер 03.11: 8 видео на паузе — мелкие запросы ждали до 8 с, с нарезкой и 30 видео — 4 мс."""
+    async def media_ranges(scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"].lower().endswith(_MEDIA_EXT):
+            hh = []
+            for k, v in scope["headers"]:
+                if k == b"range":
+                    m = re.fullmatch(rb"\s*bytes=(\d+)-(\d*)\s*", v)
+                    if m:
+                        a = int(m.group(1)); e = a + _MEDIA_CHUNK - 1
+                        if not m.group(2) or int(m.group(2)) > e:
+                            v = b"bytes=%d-%d" % (a, e)
+                hh.append((k, v))
+            scope = dict(scope, headers=hh)
+        await app(scope, receive, send)
+    return media_ranges
+
+
 async def start_tunnel(port: int, subdomain: str, sish_domain: str, sish_port: int, sish_key: str):
     """Start SSH tunnel via sish using asyncssh. Returns (public_url, connection)."""
     import asyncssh
@@ -190,6 +216,7 @@ class WebTransportServer:
                 await app(scope, receive, send)
             return lazy_spawn
         cls._app.add_middleware(_lazy_spawn)
+        cls._app.add_middleware(_media_ranges)
 
         @cls._app.middleware("http")
         async def auth_middleware(request: Request, call_next):
