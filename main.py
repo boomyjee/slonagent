@@ -39,6 +39,28 @@ def release_pid_lock():
     try: os.unlink(_PID_PATH)
     except FileNotFoundError: pass
 
+def _proactor_reset_fix():
+    """Windows, cpython#160429 (исправление — PR #160909, ещё не принят): клиент сбросил соединение, и shutdown() в
+    _ProactorBasePipeTransport._call_connection_lost падает ConnectionResetError — трейсбек в лог, а сокет не закрыт и
+    от сервера не отцеплен. Как в PR: сброс при shutdown — нормальный конец соединения. Тело метода не копируем
+    (оно разное в 3.12 и 3.14) — на время вызова подставляем сокет, чей shutdown сброс глотает. Тот же транспорт
+    обслуживает и каналы процессов (PipeHandle, shutdown нет) — их не трогаем, метод сам проверяет hasattr(shutdown)."""
+    from asyncio.proactor_events import _ProactorBasePipeTransport as T
+    orig = T._call_connection_lost
+
+    class Sock:
+        def __init__(self, sock): self._sock = sock
+        def __getattr__(self, name): return getattr(self._sock, name)
+        def shutdown(self, how):
+            try: self._sock.shutdown(how)
+            except ConnectionResetError: pass
+
+    def _call_connection_lost(self, exc):
+        if hasattr(self._sock, "shutdown") and not isinstance(self._sock, Sock):
+            self._sock = Sock(self._sock)
+        return orig(self, exc)
+    T._call_connection_lost = _call_connection_lost
+
 async def run_cli():
     DashboardTransport.start(Agent.config.get("web", {}))
     CronSkill.start_daemon(root_dir=os.getcwd())
@@ -67,6 +89,7 @@ async def run_telegram():
     await asyncio.Event().wait()
 
 acquire_pid_lock()
+if sys.platform == "win32": _proactor_reset_fix()
 os.makedirs(_LOG_DIR := os.path.expanduser("~/.slonagent"), exist_ok=True)
 _LOG_FILE = os.path.join(_LOG_DIR, "slonagent.log")
 _log_fh = logging.handlers.RotatingFileHandler(_LOG_FILE, maxBytes=0, backupCount=3, encoding="utf-8")
