@@ -243,7 +243,7 @@ class TelegramTransport(BaseTransport):
             key = (self.chat_id, self.agent.thread_id)
             if key not in self._topic_warned:
                 self._topic_warned.add(key)
-                log.warning("create_forum_topic failed: %s", e)
+                log.warning("[telegram] create_forum_topic failed: %s", e)
                 if self.agent and self.agent.transport:
                     await self.agent.transport.send_message(
                         f"⚠️ Telegram: не удалось создать топик «{self.agent.thread_id[:8]}» — {e}"
@@ -268,10 +268,10 @@ class TelegramTransport(BaseTransport):
                         try:
                             await self.bot.send_chat_action(chat_id=self.chat_id, action="typing", message_thread_id=self.thread_id)
                         except TelegramRetryAfter as e:
-                            log.warning("typing flood, waiting %s sec", e.retry_after)
+                            log.warning("[telegram] typing flood, waiting %s sec", e.retry_after)
                             await asyncio.sleep(e.retry_after)
                         except Exception as e:
-                            log.warning("typing action failed: %s", e)
+                            log.warning("[telegram] typing action failed: %s", e)
                         await asyncio.sleep(4)
                 except asyncio.CancelledError:
                     pass
@@ -493,17 +493,17 @@ class TelegramTransport(BaseTransport):
                 if future: future.set_result(result)
             except (TelegramRetryAfter, TelegramServerError) as e:
                 wait = e.retry_after if isinstance(e, TelegramRetryAfter) else 5
-                log.warning("Telegram error, waiting %s sec: %s", wait, e)
+                log.warning("[telegram] error, waiting %s sec: %s", wait, e)
                 await asyncio.sleep(wait)
                 try:
                     result = await self._exec_item(item)
                     if future: future.set_result(result)
                 except Exception as e2:
                     if future: future.set_exception(e2)
-                    else: log.warning("queue item failed after retry: %s", e2, exc_info=True)
+                    else: log.warning("[telegram] queue item failed after retry: %s", e2, exc_info=True)
             except Exception as e:
                 if future: future.set_exception(e)
-                else: log.warning("queue item failed: %s", e, exc_info=True)
+                else: log.warning("[telegram] queue item failed: %s", e, exc_info=True)
             last_action = asyncio.get_event_loop().time()            
 
     def _ensure_queue(self):
@@ -515,7 +515,11 @@ class TelegramTransport(BaseTransport):
         self._ensure_queue()
         future = asyncio.get_event_loop().create_future()
         self._queue.put_nowait({"kind": "send", "text": text, "kwargs": kwargs, "future": future})
-        return await future
+        try:
+            return await future
+        except Exception as e:
+            log.warning("[telegram] send failed: %s", e, exc_info=True)
+            return None
 
     async def _edit(self, msg: Message, text: str, **kwargs):
         if not await self._ensure_chat_and_topic(): return
@@ -552,7 +556,9 @@ class TelegramTransport(BaseTransport):
             if m < len(messages):
                 await self._edit(messages[m], body, parse_mode="HTML")
             else:
-                messages.append(await self._send(body, parse_mode="HTML"))
+                msg = await self._send(body, parse_mode="HTML")
+                if msg is None: break
+                messages.append(msg)
         for msg in messages[len(bodies):]:
             try:
                 await msg.delete()
