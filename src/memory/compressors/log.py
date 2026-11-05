@@ -810,6 +810,7 @@ class LogCompressor(BaseProvider):
 
         obs_tokens = Memory.count_tokens([{"role": "user", "content": updated}])
         if obs_tokens >= self._reflect_after_tokens:
+            self._save_before_reflection(updated)
             updated = await self._run_reflector(updated) or updated
 
         self._write_log(updated)
@@ -834,6 +835,17 @@ class LogCompressor(BaseProvider):
                 f.write(observations)
         except Exception as e:
             log.warning("[LogCompressor] write LOG.md failed: %s", e, exc_info=True)
+
+    def _save_before_reflection(self, observations: str):
+        """Полный LOG.md перед сжатием рефлектором -> memory/log/history/<дата_время>.md.
+        Между сжатиями LOG.md только дописывается, поэтому снимки + текущий LOG.md = вся память без потерь."""
+        try:
+            d = os.path.join(self.agent.memory.memory_dir, "log", "history")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, datetime.now().strftime("%Y-%m-%d_%H%M%S.md")), "w", encoding="utf-8") as f:
+                f.write(observations)
+        except Exception as e:
+            log.warning("[LogCompressor] log/history save failed: %s", e, exc_info=True)
 
     async def _generate(self, label: str, system: str, user_prompt: str, **kwargs) -> str:
         # Эфемерный агент на каждый вызов (как FactProvider._make_sub_agent): вызовы
