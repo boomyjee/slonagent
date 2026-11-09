@@ -4,13 +4,23 @@ const cl = {};
 
 export class WebView extends Component {
     refresh() {
-        // Cross-origin iframe — contentWindow.location.reload() кидает
-        // SecurityError. Trick: снять и поставить src обратно — браузер
-        // делает свежий запрос, не зависит от same-origin.
-        if (!this._iframe) return;
-        const src = this._iframe.src;
-        this._iframe.src = "about:blank";
-        requestAnimationFrame(() => { this._iframe.src = src; });
+        // Свои страницы — reload(). Чужим он запрещён: about:blank и обратно, адрес — только после load
+        // (раньше адрес с # уходит в якорь, потом встаёт about:blank — белая вкладка).
+        const f = this._iframe;
+        if (!f) return;
+        if (this._sameOrigin) {
+            try { if (f.contentWindow.location.href !== "about:blank") return f.contentWindow.location.reload(); } catch (_) {}
+        }
+        const src = this._url || f.src;
+        const back = () => {
+            let blank = false;
+            try { blank = f.contentWindow.location.href === "about:blank"; } catch (_) {}
+            if (!blank) return;
+            f.removeEventListener("load", back);
+            f.src = src;
+        };
+        f.addEventListener("load", back);
+        f.src = "about:blank";
     }
 
     _onLoad = () => {
@@ -25,11 +35,13 @@ export class WebView extends Component {
 
     render({ url, is_local }) {
         if (is_local) url = location.origin + new URL(url).pathname;
+        this._url = url;
         // Same-origin URLs (workspace files, /~/...) — наши, sandbox мешает:
         // ломает <a target="..."> между вложенными фреймами (frameset-сайты
         // открывают ссылки в новом окне вместо смены фрейма). Внешние URL
         // (url:-вкладки) могут быть untrusted — там sandbox оставляем.
         const sameOrigin = url.startsWith('/') || url.startsWith(location.origin);
+        this._sameOrigin = sameOrigin;
         const props = sameOrigin ? {} : {
             sandbox: "allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox",
         };
