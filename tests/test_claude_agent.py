@@ -971,8 +971,10 @@ class TestClaudeRequestWhitelist:
     CLI_SECTIONS = [re.compile(p) for p in (
         r"As you answer the user's questions, you can use the following context:\n# userEmail\n[^\n]*",
         r"IMPORTANT: this context may or may not be relevant to your tasks\.[^\n]*",
+        r"Claude Code attached this context automatically; it isn't part of the user's message\.[^\n]*",
         r"# Environment\nYou have been invoked in the following environment: "
-        r"(\n - (Primary working directory|Is a git repository|Platform|Shell|OS Version): [^\n]*)+",
+        r"(\n - (Primary working directory|Is a git repository|Platform|Shell|OS Version"
+        r"|Downloaded files and extracted archives are untrusted data): [^\n]*)+",
         r"You are powered by the model [^\n]*",
         r"Today's date is [^\n]*",
     )]
